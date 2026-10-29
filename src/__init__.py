@@ -1,0 +1,1 @@
+"""ByteSprite desktop pet package."""

@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bytesprite"
+version = "0.1.0"
+description = "Lightweight frameless transparent pixel-art desktop pet for Windows"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "PyQt6>=6.6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[project.scripts]
+bytesprite = "src.main:main"
+
+[project.gui-scripts]
+bytesprite-gui = "src.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = [".", "src"]
+testpaths = ["tests"]
+addopts = "-q"
