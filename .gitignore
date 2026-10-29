@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .superpowers/
+.codebase-memory/
 dist/
 build/
 *.egg-info/
