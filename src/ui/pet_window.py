@@ -121,7 +121,7 @@ class PetWindow(QWidget):
     """Borderless translucent desktop widget rendering ByteSprite and hover HUD."""
 
     WINDOW_WIDTH: int = 176
-    WINDOW_HEIGHT: int = 204
+    WINDOW_HEIGHT: int = 222
     SPRITE_SCALE: int = 4  # 32x32 * 4 = 128x128 crisp integer scaling
     DRAG_THRESHOLD_PX: int = 5
 
@@ -661,18 +661,24 @@ class PetWindow(QWidget):
 
     def _paint_toast(self, painter: QPainter) -> None:
         progress = 1.0 - (self._toast_steps / max(1, self._toast_max_steps))
-        rise_px = int(progress * 14)
-        alpha = max(60, min(255, int(255 * (self._toast_steps / max(1, self._toast_max_steps)) * 1.35)))
+        rise_px = int(progress * 8)
+        alpha = max(80, min(255, int(255 * (self._toast_steps / max(1, self._toast_max_steps)) * 1.35)))
 
-        pill_w = 64
+        pill_w = 68
         pill_h = 18
         pill_x = (self.width() - pill_w) // 2
-        pill_y = max(2, self._sprite_rect.top() - 10 - rise_px)
+        min_y = (self._hud_rect.bottom() + 3) if self._is_hud_visible() else 4
+        pill_y = max(min_y, self._sprite_rect.top() - 22 - rise_px)
         pill = QRect(pill_x, pill_y, pill_w, pill_h)
 
-        bg = QColor(24, 20, 37, min(235, alpha))
+        bg = QColor(24, 20, 37, min(240, alpha))
         painter.fillRect(pill.adjusted(1, 0, -1, 0), bg)
         painter.fillRect(pill.adjusted(0, 1, 0, -1), bg)
+
+        border = QColor(self._toast_color)
+        border.setAlpha(min(180, alpha))
+        painter.setPen(QPen(border, 1))
+        painter.drawRect(pill.adjusted(1, 1, -2, -2))
 
         fg = QColor(self._toast_color)
         fg.setAlpha(alpha)

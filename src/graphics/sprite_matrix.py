@@ -106,16 +106,16 @@ def _draw_body_32(
     top_y = by + squash
     bot_y = by + 16
 
-    # Cat-ear tufts (left x=8..12, right x=19..23)
+    # Cat-ear tufts (left x=8..12, right x=19..23; droopy x=7..11 and x=20..24)
     if ear_droop:
         _stamp(
             grid,
             7,
             top_y - 1,
             [
-                " OOO              OOO ",
-                "OLLBO            OBBDO",
-                "OBBBO            OBBDO",
+                " OOO          OOO ",
+                "OLLBO        OBBDO",
+                "OBBBO        OBBDO",
             ],
         )
     else:
@@ -131,18 +131,21 @@ def _draw_body_32(
             ],
         )
 
-    # Central antenna stalk + glowing bulb
+    # Central antenna stalk + inked 2x2 lantern bulb (high contrast on light & dark desktops)
     ax = 15 + antenna_dx
     _put(grid, 15, top_y - 1, "O")
     _put(grid, 16, top_y - 1, "O")
-    _put(grid, ax, top_y - 2, "O")
-    _put(grid, ax + 1, top_y - 2, "O")
-    # Glowing 2x2 bulb with outline/aura
-    _rect(grid, ax - 1, top_y - 5, ax + 2, top_y - 2, "h")
-    _put(grid, ax, top_y - 4, "W")
-    _put(grid, ax + 1, top_y - 4, antenna_color)
-    _put(grid, ax, top_y - 3, antenna_color)
-    _put(grid, ax + 1, top_y - 3, antenna_color)
+    _stamp(
+        grid,
+        ax - 1,
+        top_y - 5,
+        [
+            " OO ",
+            f"OW{antenna_color}O",
+            f"O{antenna_color}{antenna_color}O",
+            " OO ",
+        ],
+    )
 
     # Rounded body shell (x=7..24, y=top_y..bot_y)
     _hline(grid, 10, 21, top_y, "O")
@@ -196,8 +199,9 @@ def _draw_body_32(
         _stamp(grid, 5, arm_y + 2, ["OO", "OB", "OO"])
         _stamp(grid, 25, arm_y + 2, ["OO", "DO", "OO"])
     elif arms == "hold":
-        _stamp(grid, 6, arm_y, ["OO", "OB", "OO"])
-        _stamp(grid, 24, arm_y, ["OO", "DO", "OO"])
+        # Paws tucked inward on chest to hold a berry snack
+        _stamp(grid, 10, arm_y + 3, ["OOO", "OBO", "OOO"])
+        _stamp(grid, 19, arm_y + 3, ["OOO", "ODO", "OOO"])
 
     # Stubby feet
     if feet == "stand":
@@ -268,9 +272,12 @@ def _draw_face_32(
     elif mouth == "sleep":
         _put(grid, 15, my + 1, "M")
     elif mouth == "munch_open":
-        _rect(grid, 14, my, 17, my + 2, "M")
+        _rect(grid, 15, my, 16, my + 1, "E")
+        _put(grid, 15, my + 1, "M")
     elif mouth == "munch_closed":
-        _hline(grid, 14, 17, my + 1, "E")
+        _put(grid, 14, my, "E")
+        _hline(grid, 15, 16, my + 1, "E")
+        _put(grid, 17, my, "E")
 
 
 def _draw_sleeping_loaf_32(grid: list[list[str]], breath: int, z_step: int) -> None:
@@ -279,19 +286,27 @@ def _draw_sleeping_loaf_32(grid: list[list[str]], breath: int, z_step: int) -> N
     top_y = 13 - breath
     bot_y = 27
 
-    # Sleepy drooped ears + dimmed periwinkle antenna
+    # Sleepy symmetrical drooped ears + inked periwinkle lantern
     _stamp(
         grid,
         7,
         top_y - 1,
         [
-            " OOO              OOO ",
-            "OLLBO            OBBDO",
+            " OOO          OOO ",
+            "OLLBO        OBBDO",
         ],
     )
-    _put(grid, 15, top_y - 1, "O")
-    _put(grid, 15, top_y - 2, "P")
-    _put(grid, 16, top_y - 2, "P")
+    _stamp(
+        grid,
+        14,
+        top_y - 4,
+        [
+            " OO ",
+            "OWPO",
+            "OPPO",
+            " OO ",
+        ],
+    )
 
     _hline(grid, 9, 22, top_y, "O")
     _hline(grid, 7, 24, top_y + 1, "O")
@@ -315,7 +330,7 @@ def _draw_sleeping_loaf_32(grid: list[list[str]], breath: int, z_step: int) -> N
     _draw_face_32(grid, fy=top_y + 5, eyes="closed", mouth="sleep", blush=True)
 
     # Floating pixel Zzz in upper-right
-    z_small = ["PP", " P", "PP"]
+    z_small = ["PPP", " P ", "PPP"]
     z_big = ["PPPP", "  P ", " P  ", "PPPP"]
     positions = [
         (23, 9, z_small),
@@ -440,33 +455,33 @@ def _build_32_animations() -> dict[str, list[FrameMatrix]]:
         hungry_frames.append(_grid_to_rgba(g))
     animations["hungry"] = hungry_frames
 
-    # 7. EATING (4-frame snack munching with pixel berry)
+    # 7. EATING (4-frame snack munching with inked pixel berry held between paws)
     eating_frames: list[FrameMatrix] = []
     berry_full = [
-        " L ",
-        "RRR",
-        "RWR",
-        " R ",
+        " OL ",
+        "ORRO",
+        "ORWO",
+        " OO ",
     ]
     berry_half = [
-        " L ",
-        "RR ",
-        " R ",
+        " OL ",
+        "ORRO",
+        " OO ",
     ]
     for step in range(4):
         g = _new_grid(32)
         _draw_shadow_32(g, width_radius=8, y=29)
         _draw_body_32(g, by=8, squash=(step % 2), antenna_dx=0, antenna_color="G", arms="hold", feet="stand")
         mouth_mode = "munch_open" if step % 2 == 0 else "munch_closed"
-        eye_mode = "happy" if step >= 2 else "open"
+        eye_mode = "happy" if step >= 1 else "open"
         _draw_face_32(g, fy=14 + (step % 2), eyes=eye_mode, mouth=mouth_mode, blush=True)
         if step < 2:
             _stamp(g, 14, 19, berry_full)
         elif step == 2:
-            _stamp(g, 15, 20, berry_half)
+            _stamp(g, 14, 20, berry_half)
         else:
-            # Happy crumbs + sparkle
-            _put(g, 13, 21, "A")
+            # Happy crumbs + gold sparkle
+            _put(g, 13, 21, "R")
             _put(g, 18, 20, "A")
         eating_frames.append(_grid_to_rgba(g))
     animations["eating"] = eating_frames
