@@ -59,3 +59,23 @@ class TestByteSpriteAppIntegration:
         assert reloaded.stats.hunger == 60.0
         assert reloaded.stats.experience == 130
         assert not controller.has_active_timers()
+
+    def test_window_close_event_triggers_full_app_shutdown_not_frozen_tray(
+        self, qapp: QApplication, tmp_path: Path
+    ) -> None:
+        storage = StorageManager(tmp_path / "close_state.json")
+        controller = ByteSpriteApp(app=qapp, storage=storage, enable_tray=False)
+        controller.window.trigger_pet()
+        # Simulate user pressing Alt+F4 on PetWindow directly
+        controller.window.close()
+
+        assert not controller.has_active_timers()
+        saved = storage.load()
+        assert saved.stats.experience > 0
+
+    def test_requirements_txt_is_valid_utf8_without_utf16_bom(self) -> None:
+        req_path = Path(__file__).resolve().parents[1] / "requirements.txt"
+        raw = req_path.read_bytes()
+        assert not raw.startswith((b"\xff\xfe", b"\xfe\xff", b"\xef\xbb\xbf"))
+        decoded = raw.decode("utf-8")
+        assert "PyQt6" in decoded

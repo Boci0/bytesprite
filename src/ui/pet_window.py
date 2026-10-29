@@ -73,9 +73,40 @@ def clamp_position_to_screens(
     height: int,
     screens: Sequence[ScreenRect],
 ) -> tuple[int, int]:
-    """Clamp window top-left (x, y) to the nearest containing or closest monitor."""
+    """Clamp window top-left (x, y) across adjacent monitors or to the nearest screen."""
     if not screens:
         return (x, y)
+
+    right_edge = x + width - 1
+    bottom_edge = y + height - 1
+
+    # Allow smooth straddling across horizontally adjacent monitors
+    for left_scr in screens:
+        if left_scr.x <= x < left_scr.right and right_edge >= left_scr.right:
+            for right_scr in screens:
+                if (
+                    right_scr is not left_scr
+                    and left_scr.right == right_scr.x
+                    and right_scr.x <= right_edge < right_scr.right
+                ):
+                    shared_top = max(left_scr.y, right_scr.y)
+                    shared_bot = min(left_scr.bottom, right_scr.bottom)
+                    if shared_bot - shared_top >= height:
+                        return (x, max(shared_top, min(shared_bot - height, y)))
+
+    # Allow smooth straddling across vertically adjacent monitors
+    for top_scr in screens:
+        if top_scr.y <= y < top_scr.bottom and bottom_edge >= top_scr.bottom:
+            for bot_scr in screens:
+                if (
+                    bot_scr is not top_scr
+                    and top_scr.bottom == bot_scr.y
+                    and bot_scr.y <= bottom_edge < bot_scr.bottom
+                ):
+                    shared_left = max(top_scr.x, bot_scr.x)
+                    shared_right = min(top_scr.right, bot_scr.right)
+                    if shared_right - shared_left >= width:
+                        return (max(shared_left, min(shared_right - width, x)), y)
 
     cx = x + width // 2
     cy = y + height // 2
@@ -167,6 +198,7 @@ class PetWindow(QWidget):
         # Gentle autonomous walk steps
         self._walk_dx: int = 0
         self._walk_steps_remaining: int = 0
+        self._is_shutting_down: bool = False
 
         self._configure_window()
         self._sync_animation_to_pet_state(self._state_machine.state)
@@ -428,10 +460,29 @@ class PetWindow(QWidget):
     # Mouse & Context Menu Events
     # ------------------------------------------------------------------
 
-    def _is_interactive_hit(self, local_pos: QPoint) -> bool:
+    def hit_test_point(self, local_pos: QPoint) -> bool:
+        """Return True if local_pos hits opaque sprite pixels or an active HUD card."""
         if self._is_hud_visible() and self._hud_rect.contains(local_pos):
             return True
-        return self._sprite_rect.adjusted(-6, -6, 6, 6).contains(local_pos)
+        if not self._sprite_rect.contains(local_pos):
+            return False
+
+        frame = self._anim.current_frame()
+        h = len(frame)
+        w = len(frame[0]) if h > 0 else 0
+        if w == 0 or h == 0:
+            return False
+
+        sx = (local_pos.x() - self._sprite_rect.left()) // self.SPRITE_SCALE
+        sy = (local_pos.y() - self._sprite_rect.top()) // self.SPRITE_SCALE
+        for ny in range(max(0, sy - 1), min(h, sy + 2)):
+            for nx in range(max(0, sx - 1), min(w, sx + 2)):
+                if frame[ny][nx][3] > 0:
+                    return True
+        return False
+
+    def _is_interactive_hit(self, local_pos: QPoint) -> bool:
+        return self.hit_test_point(local_pos)
 
     def enterEvent(self, event: QEnterEvent | None) -> None:
         self._hovered = True
@@ -463,7 +514,6 @@ class PetWindow(QWidget):
             return
 
         if event.button() == Qt.MouseButton.RightButton:
-            self._open_context_menu(event.globalPosition().toPoint())
             event.accept()
             return
 
@@ -531,7 +581,10 @@ class PetWindow(QWidget):
 
     def _open_context_menu(self, global_pos: QPoint) -> None:
         menu = self.build_context_menu()
-        menu.exec(global_pos)
+        try:
+            menu.exec(global_pos)
+        finally:
+            menu.deleteLater()
 
     # ------------------------------------------------------------------
     # Painting (Crisp Nearest-Neighbor Sprite + Pixel HUD)
@@ -700,6 +753,7 @@ class PetWindow(QWidget):
 
     def shutdown(self) -> None:
         """Stop all internal timers and detach state listeners cleanly."""
+        self._is_shutting_down = True
         self._anim_timer.stop()
         self._ambient_timer.stop()
         self._overlay_timer.stop()
@@ -711,6 +765,9 @@ class PetWindow(QWidget):
             self._unsub_stats = None  # type: ignore[assignment]
 
     def closeEvent(self, event: QCloseEvent | None) -> None:
-        self.shutdown()
+        if not self._is_shutting_down:
+            self.trigger_quit()
+        else:
+            self.shutdown()
         if event is not None:
             super().closeEvent(event)

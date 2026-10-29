@@ -51,6 +51,16 @@ class TestScreenGeometryClamping:
     def test_empty_screens_returns_input_unchanged(self) -> None:
         assert clamp_position_to_screens(123, 456, 168, 204, []) == (123, 456)
 
+    def test_straddling_seam_between_adjacent_monitors_does_not_jump(self) -> None:
+        screens = [
+            ScreenRect(-1920, 0, 1920, 1080),
+            ScreenRect(0, 0, 1920, 1040),
+        ]
+        # Window straddling x=0 seam (-80..96) is fully visible across both monitors
+        assert clamp_position_to_screens(-80, 300, 176, 222, screens) == (-80, 300)
+        # Straddling seam while dragged above top edge clamps y to 0 without snapping x
+        assert clamp_position_to_screens(-80, -40, 176, 222, screens) == (-80, 0)
+
 
 class TestPetWindowAndContextMenu:
     def test_window_flags_and_translucent_attributes(self, qapp: QApplication) -> None:
@@ -215,4 +225,62 @@ class TestPetWindowAndContextMenu:
         finally:
             win.shutdown()
             assert not win.has_active_timers()
+            win.close()
+
+    def test_transparent_region_returns_httransparent_and_ignores_hit(
+        self, qapp: QApplication
+    ) -> None:
+        sm = PetStateMachine(PetStats())
+        anim = AnimationController(size=32)
+        win = PetWindow(state_machine=sm, animation_controller=anim, auto_wander=False)
+        try:
+            # Upper transparent HUD zone when not hovered must pass through
+            assert win.hit_test_point(QPoint(5, 5)) is False
+            # Sprite body center must hit
+            assert win.hit_test_point(win.sprite_center_point()) is True
+        finally:
+            win.shutdown()
+            win.close()
+
+    def test_right_click_opens_context_menu_only_once(self, qapp: QApplication) -> None:
+        from PyQt6.QtGui import QContextMenuEvent
+
+        sm = PetStateMachine(PetStats())
+        anim = AnimationController(size=32)
+        win = PetWindow(state_machine=sm, animation_controller=anim, auto_wander=False)
+        invocations: list[QPoint] = []
+        win._open_context_menu = lambda pos: invocations.append(pos)  # type: ignore[method-assign]
+        try:
+            local_pt = win.sprite_center_point()
+            global_pt = win.mapToGlobal(local_pt)
+
+            press = QMouseEvent(
+                QEvent.Type.MouseButtonPress,
+                QPointF(local_pt),
+                QPointF(global_pt),
+                Qt.MouseButton.RightButton,
+                Qt.MouseButton.RightButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+            release = QMouseEvent(
+                QEvent.Type.MouseButtonRelease,
+                QPointF(local_pt),
+                QPointF(global_pt),
+                Qt.MouseButton.RightButton,
+                Qt.MouseButton.NoButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+            ctx = QContextMenuEvent(
+                QContextMenuEvent.Reason.Mouse,
+                local_pt,
+                global_pt,
+            )
+
+            win.mousePressEvent(press)
+            win.mouseReleaseEvent(release)
+            win.contextMenuEvent(ctx)
+
+            assert len(invocations) == 1
+        finally:
+            win.shutdown()
             win.close()
