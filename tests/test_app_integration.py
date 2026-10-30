@@ -100,6 +100,20 @@ class TestByteSpriteAppIntegration:
         lyrics._enabled = False
         controller.quit()
 
+    def test_hud_only_opens_for_user_actions(self, qapp: QApplication, tmp_path: Path) -> None:
+        from PyQt6.QtGui import QColor
+
+        controller = ByteSpriteApp(app=qapp, storage=StorageManager(tmp_path / "h.json"), enable_tray=False)
+        window = controller.window
+        window._hovered = False
+        # RAM crossing the 90% alert line flips state by itself; that must not pop the card
+        window._handle_state_change(PetState.IDLE, PetState.HUNGRY, controller.state_machine.stats)
+        window._show_toast("FOCUS DONE", QColor("#73EFF7"))
+        assert not window._is_hud_visible()
+        window.trigger_pet()  # a click cycles the view, which the card shows
+        assert window._is_hud_visible()
+        controller.quit()
+
     def test_requirements_txt_is_valid_utf8_without_utf16_bom(self) -> None:
         req_path = Path(__file__).resolve().parents[1] / "requirements.txt"
         raw = req_path.read_bytes()

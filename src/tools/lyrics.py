@@ -92,15 +92,6 @@ def line_at(lines: list[tuple[int, str]], position_ms: float) -> str:
     return lines[idx][1] if idx >= 0 else ""
 
 
-def line_span(lines: list[tuple[int, str]], position_ms: float) -> tuple[float, float]:
-    """(start, end) ms of the line active at `position_ms`; end is the next line's start."""
-    idx = bisect.bisect_right(lines, position_ms, key=lambda pair: pair[0]) - 1
-    if idx < 0:
-        return 0.0, 0.0
-    start = float(lines[idx][0])
-    return start, float(lines[idx + 1][0]) if idx + 1 < len(lines) else start + 4000.0
-
-
 def pear_lyrics_path(title: str) -> Path | None:
     """Where Pear Music caches (or will cache) the lyrics for `title`; None if the log never played it."""
     try:
@@ -243,8 +234,6 @@ class LyricsPlugin:
         self._track_started = 0.0
         self._pear_path: Path | None = None
         self._pear_check_at = 0.0
-        self._span = (0.0, 0.0)
-        self._pos_anchor = (0.0, 0.0)  # (position ms, time.time() ms) for extrapolating between ticks
         self._was_loading = False
 
     @property
@@ -274,18 +263,20 @@ class LyricsPlugin:
         return self._enabled and self._playing
 
     @property
+    def has_lyrics(self) -> bool:
+        """Playing a track whose synced lines are known (the card stays up through blank lines)."""
+        return self.playing and bool(self._lines)
+
+    @property
+    def title(self) -> str:
+        """Title of the track SMTC reports ('' when off)."""
+        return self._track[0] if self._enabled else ""
+
+    @property
     def loading(self) -> bool:
         """Playing, but no lyrics yet and still worth waiting for (drives the bubble's waiting dots)."""
         return (self.playing and not self._lines
                 and time.monotonic() - self._track_started < _LOADING_MAX_S)
-
-    def line_progress(self) -> float:
-        """0..1 through the current line, extrapolated to now so the karaoke sweep stays smooth."""
-        start, end = self._span
-        if not self.line or end <= start:
-            return 0.0
-        pos = self._pos_anchor[0] + time.time() * 1000 - self._pos_anchor[1]
-        return max(0.0, min(1.0, (pos - start) / (end - start)))
 
     @property
     def line(self) -> str:
@@ -351,9 +342,6 @@ class LyricsPlugin:
             except (KeyError, TypeError, ValueError):
                 playing = False
         line = line_at(self._lines, position)[:_MAX_LINE_CHARS] if playing and self._lines else ""
-        if line:
-            self._span = line_span(self._lines or [], position)
-            self._pos_anchor = (position, time.time() * 1000)
         loading = self.loading
         changed = line != self._line or playing != self._playing or loading != self._was_loading
         self._line, self._playing, self._position_ms, self._was_loading = line, playing, position, loading

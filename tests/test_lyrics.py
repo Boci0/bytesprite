@@ -135,4 +135,3 @@ def test_late_pear_cache_is_picked_up_without_waiting_for_retry(monkeypatch, tmp
     plugin._reader.snap = _playing(2000)  # type: ignore[attr-defined]
     plugin.tick()
     assert plugin.line == "late line" and not plugin.loading
-    assert 0.4 < plugin.line_progress() < 0.7  # 2000ms into a 1000..3000ms line

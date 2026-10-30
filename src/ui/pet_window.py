@@ -16,8 +16,6 @@ from pathlib import Path
 
 from PyQt6.QtCore import QDateTime, QPoint, QProcess, QRect, QRectF, QStandardPaths, Qt, QTimer, QUrl
 from PyQt6.QtGui import (
-    QBrush,
-    QLinearGradient,
     QCloseEvent,
     QColor,
     QContextMenuEvent,
@@ -29,6 +27,7 @@ from PyQt6.QtGui import (
     QDropEvent,
     QEnterEvent,
     QFont,
+    QFontMetrics,
     QGuiApplication,
     QIcon,
     QImage,
@@ -282,13 +281,20 @@ class PetWindow(QWidget):
         self._toast_max_steps: int = 12
         # Synced lyric shown in a speech bubble above the sprite (Lyrics tool)
         self._lyric_line: str = ""
-        # Line-change morph: the old line drifts up and out while the bubble resizes to the new one
+        # Lyric card: `_lyric_shown` survives blank LRC lines (dimmed) so the card never blinks out
+        # mid-song; lines crossfade in place while the card height eases from where it currently is
+        self._lyric_shown: str = ""
         self._lyric_prev: str = ""
         self._lyric_changed_ms: float = 0.0
-        self._lyric_prev_size: tuple[float, float] = (0.0, 0.0)
-        self._lyric_size: tuple[float, float] = (0.0, 0.0)
+        self._lyric_dim_ms: float = 0.0
+        self._lyric_visible: bool = False
+        self._lyric_vis_ms: float = 0.0
+        self._lyric_from_h: float = 0.0
+        self._lyric_cur_h: float = 0.0
+        self._lyric_title: str = ""
+        self._lyric_fit_cache: dict[str, tuple[float, str, int]] = {}
         self._lyric_timer = QTimer(self)
-        self._lyric_timer.setInterval(40)  # 25fps, only while a bubble is on screen
+        self._lyric_timer.setInterval(40)  # 25fps, only while the card animates or the waiting dots bounce
         self._lyric_timer.timeout.connect(self._on_lyric_frame)
 
         # Gentle autonomous walk steps
@@ -474,20 +480,14 @@ class PetWindow(QWidget):
     ) -> None:
         self._walk_steps_remaining = 0
         self._sync_animation_to_pet_state(new_state)
-        self._pin_hud(32)
+        # No HUD pin here: RAM/CPU hovering near the 90% alert line flips state on its own,
+        # which popped the card up out of nowhere; the clip change already shows the state
         self._schedule_next_anim_tick()
         self.update()
 
     def _handle_stats_change(self, _stats: PetStats) -> None:
         self._collect_forge_outputs()
-        lyric = self._state_machine.lyric_line
-        if lyric != self._lyric_line:
-            self._lyric_prev, self._lyric_line = self._lyric_line, lyric
-            self._lyric_changed_ms = time.monotonic() * 1000
-            self._lyric_prev_size = self._lyric_size
-            self.update()
-        if (lyric or self._lyric_waiting()) and not self._lyric_timer.isActive():
-            self._lyric_timer.start()
+        self._sync_lyric_card()
         clip = self._base_clip(self._state_machine.state)
         if self._walk_steps_remaining == 0 and self._anim.base_state != clip:
             self._anim.set_state(clip)  # a song started or stopped
@@ -593,7 +593,10 @@ class PetWindow(QWidget):
         self._toast_text = text
         self._toast_color = color
         self._toast_steps = self._toast_max_steps
-        self._pin_hud(36)
+        # Toasts alone never open the HUD card (background notices would pop it); view switches pin it
+        if not self._overlay_timer.isActive():
+            self._overlay_timer.start()
+        self.update()
 
     def _is_hud_visible(self) -> bool:
         if self._open_wheels():
@@ -610,6 +613,7 @@ class PetWindow(QWidget):
             self._schedule_next_anim_tick()
             cpu = int(round(self._state_machine.stats.cpu_usage))
             self._show_toast(f"CPU {cpu}%", QColor("#38B764"))
+            self._pin_hud(36)
 
     def trigger_play(self) -> None:
         running = self._state_machine.toggle_pomodoro()
@@ -631,10 +635,12 @@ class PetWindow(QWidget):
         self._schedule_next_anim_tick()
         badge = plugin.tool_id.upper()[:6] if plugin is not None else "TOOL"
         self._show_toast(badge, QColor("#73EFF7"))
+        self._pin_hud(36)
 
     def trigger_select_tool(self, tool_id: str) -> None:
         if self._state_machine.select_tool(tool_id):
             self._show_toast(tool_id.upper()[:6], QColor("#73EFF7"))
+            self._pin_hud(36)
 
     def trigger_drop_files(
         self,
@@ -1403,7 +1409,7 @@ class PetWindow(QWidget):
 
         if self._is_hud_visible():
             self._paint_hud(painter)
-        elif self._lyric_line or self._lyric_prev or self._lyric_waiting():
+        elif self._lyric_visible or self._lyric_animating():
             self._paint_lyric(painter)
 
         if self._toast_steps > 0 and self._toast_text:
@@ -1484,94 +1490,163 @@ class PetWindow(QWidget):
             )
         painter.restore()
 
-    _LYRIC_MORPH_MS = 280.0
-    _LYRIC_SUNG = QColor(176, 222, 255)  # the focus pulse's ice blue
+    _LYRIC_FADE_MS = 240.0
+    _LYRIC_DOT = QColor(176, 222, 255)  # the focus pulse's ice blue
 
     def _lyric_waiting(self) -> bool:
         lyrics = self._state_machine.lyrics_plugin
         return lyrics is not None and lyrics.loading
 
+    def _sync_lyric_card(self) -> None:
+        """Turn plugin state into card transitions; called on every stats change."""
+        now = time.monotonic() * 1000
+        lyrics = self._state_machine.lyrics_plugin
+        line = self._state_machine.lyric_line
+        visible = lyrics is not None and (lyrics.has_lyrics or lyrics.loading)
+        changed = False
+        title = lyrics.title if lyrics is not None else ""
+        if visible and title and title != self._lyric_title:
+            # A new song opens with its title (dim, like a blank line) until the first lyric
+            self._lyric_title = title
+            if not line:
+                line_or_title = "\u266a " + title
+                self._lyric_prev, self._lyric_shown = self._lyric_shown, line_or_title
+                self._lyric_changed_ms, self._lyric_from_h = now, self._lyric_cur_h
+                changed = True
+        if line and line != self._lyric_shown:
+            self._lyric_prev, self._lyric_shown = self._lyric_shown, line
+            self._lyric_changed_ms, self._lyric_from_h = now, self._lyric_cur_h
+            changed = True
+        if bool(line) != bool(self._lyric_line):
+            self._lyric_dim_ms = now  # entering or leaving a blank (instrumental) line
+            changed = True
+        self._lyric_line = line
+        if visible != self._lyric_visible:
+            self._lyric_visible, self._lyric_vis_ms = visible, now
+            changed = True
+        if (changed or self._lyric_waiting()) and not self._lyric_timer.isActive():
+            self._lyric_timer.start()
+        if changed:
+            self.update()
+
+    def _lyric_animating(self) -> bool:
+        now = time.monotonic() * 1000
+        return any(now - ms < self._LYRIC_FADE_MS
+                   for ms in (self._lyric_changed_ms, self._lyric_dim_ms, self._lyric_vis_ms))
+
     def _on_lyric_frame(self) -> None:
-        morphing = time.monotonic() * 1000 - self._lyric_changed_ms < self._LYRIC_MORPH_MS
-        if not (self._lyric_line or morphing or self._lyric_waiting()):
-            self._lyric_prev = ""
-            self._lyric_timer.stop()
+        if not (self._lyric_animating() or self._lyric_waiting()):
+            if not self._lyric_visible:  # card gone: the next song starts fresh
+                self._lyric_shown = self._lyric_prev = self._lyric_title = ""
+                self._lyric_cur_h = self._lyric_from_h = 0.0
+            self._lyric_timer.stop()  # a settled card is static
         self.update()
 
-    def _paint_lyric(self, painter: QPainter) -> None:
-        """Frosted speech bubble above the sprite with a karaoke sweep through the current line.
+    def _fit_lyric(self, text: str) -> tuple[float, str, int]:
+        """(point size, text, height) fitting the card body in 3 lines: shrink 9 -> 7pt, then trim."""
+        cached = self._lyric_fit_cache.get(text)
+        if cached is not None:
+            return cached
+        width, flags = self._hud_rect.width() - 20, int(Qt.TextFlag.TextWordWrap)
+        if text.startswith("♪ "):  # the opening song title stays on one elided line
+            fm = QFontMetrics(ui_font(8.5, bold=True))
+            return 8.5, fm.elidedText(text, Qt.TextElideMode.ElideRight, width), fm.lineSpacing()
 
-        Line changes morph instead of popping: the bubble eases to the new size while the sung line
-        drifts up and fades as the next one rises in. While lyrics are being found it shows
-        bouncing dots.
+        def height(pt: float, s: str) -> tuple[int, int]:
+            fm = QFontMetrics(ui_font(pt, bold=True))
+            return fm.boundingRect(QRect(0, 0, width, 1000), flags, s).height(), fm.lineSpacing() * 3
+
+        fit = None
+        for pt in (9.0, 8.0, 7.0):
+            h, limit = height(pt, text)
+            if h <= limit:
+                fit = (pt, text, h)
+                break
+        if fit is None:
+            words, trimmed = text.split(), text
+            while len(words) > 1:
+                words.pop()
+                trimmed = " ".join(words) + "\u2026"
+                h, limit = height(7.0, trimmed)
+                if h <= limit:
+                    break
+            fit = (7.0, trimmed, min(h, limit))
+        if len(self._lyric_fit_cache) > 64:
+            self._lyric_fit_cache.clear()
+        self._lyric_fit_cache[text] = fit
+        return fit
+
+    def _paint_lyric(self, painter: QPainter) -> None:
+        """Lyric card styled like the HUD and PetContextMenu, anchored just above the sprite.
+
+        A song opens with its dim title (plus bouncing dots while lyrics are being found), then
+        each line crossfades in place (no sliding) while the card height eases; the card fades in
+        and out with a 4px drift. Blank LRC lines dim the last line instead of hiding the card.
+        No per-word highlight: synced lyric timing is too loose for it. Long lines shrink to fit.
         """
-        flags = Qt.TextFlag.TextWordWrap
-        center = int(Qt.AlignmentFlag.AlignCenter) | int(flags)
         now = time.monotonic() * 1000
-        t = min(1.0, (now - self._lyric_changed_ms) / self._LYRIC_MORPH_MS)
-        ease = 1 - (1 - t) ** 3
-        text = self._lyric_line
-        waiting = not text and self._lyric_waiting()
-        if not text and not waiting and t >= 1.0:
+
+        def eased(ms: float) -> float:
+            t = min(1.0, max(0.0, (now - ms) / self._LYRIC_FADE_MS))
+            return 1 - (1 - t) ** 3
+
+        vis = eased(self._lyric_vis_ms)
+        alpha = vis if self._lyric_visible else 1 - vis
+        if alpha <= 0.0:
             return
+        waiting = not self._lyric_line and self._lyric_waiting()
+        center = int(Qt.AlignmentFlag.AlignCenter) | int(Qt.TextFlag.TextWordWrap)
+        r = self._hud_rect
+        dots_h = 14 if waiting else 0
+
+        if self._lyric_shown:
+            pt, shown, text_h = self._fit_lyric(self._lyric_shown)
+        else:
+            pt, shown, text_h = 9.0, "", 0
+        target_h = text_h + dots_h + 14
+        change = eased(self._lyric_changed_ms)
+        h = target_h if not self._lyric_from_h else self._lyric_from_h + (target_h - self._lyric_from_h) * change
+        self._lyric_cur_h = h
+
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-        painter.setFont(ui_font(11, bold=True))
-        fm = painter.fontMetrics()
-        max_w = self.width() - 16
-
-        def measure(s: str) -> tuple[float, float]:
-            r = fm.boundingRect(QRect(0, 0, max_w - 16, 1000), flags, s)
-            # Three lines at most keeps the bubble clear of the top of the window
-            return float(max(40, min(max_w, r.width() + 16))), float(min(r.height(), fm.lineSpacing() * 3) + 12)
-
-        if text:
-            target = measure(text)
-        elif waiting:
-            target = (64.0, float(fm.lineSpacing() + 12))
-        else:
-            target = self._lyric_prev_size  # last line fading out in place
-        self._lyric_size = target
-        start = self._lyric_prev_size if self._lyric_prev_size[0] else target
-        w = start[0] + (target[0] - start[0]) * ease
-        h = start[1] + (target[1] - start[1]) * ease
-        fade_out = not text and not waiting
-        painter.setOpacity(1.0 - ease if fade_out else 1.0)
-        bubble = QRectF((self.width() - w) / 2, self._sprite_rect.top() - 4 - h, w, h)
+        painter.setOpacity(alpha)
+        card = QRectF(r.left(), self._sprite_rect.top() - 4 - h + 4 * (1 - alpha), r.width(), h)
         painter.setPen(QPen(qcolor(HAIRLINE_RGBA), 1))
         painter.setBrush(qcolor(GLASS_RGBA))
-        painter.drawRoundedRect(bubble.adjusted(0.5, 0.5, -0.5, -0.5), 9, 9)
-        inner = bubble.adjusted(8, 6, -8, -6)
-        painter.setClipRect(bubble.adjusted(2, 2, -2, -2))
+        painter.drawRoundedRect(card.adjusted(0.5, 0.5, -0.5, -0.5), 10, 10)
 
-        if fade_out:
-            if self._lyric_prev:
-                painter.setPen(self._LYRIC_SUNG)
-                painter.drawText(inner.translated(0, -6 * ease), center, self._lyric_prev)
-        else:
-            if self._lyric_prev and t < 1.0:
-                painter.setOpacity(1.0 - ease)
-                painter.setPen(self._LYRIC_SUNG)
-                painter.drawText(inner.translated(0, -10 * ease), center, self._lyric_prev)
-            painter.setOpacity(ease)
-            if text:
-                # Sung part ice blue, the rest dim, with a soft leading edge sweeping left to right
-                lyrics = self._state_machine.lyrics_plugin
-                progress = lyrics.line_progress() if lyrics is not None else 0.0
-                grad = QLinearGradient(inner.left(), 0, inner.right(), 0)
-                grad.setColorAt(max(0.0, progress - 0.001), self._LYRIC_SUNG)
-                grad.setColorAt(min(1.0, progress + 0.08), QColor(TEXT_DIM_HEX))
-                painter.setPen(QPen(QBrush(grad), 1))
-                painter.drawText(inner.translated(0, 10 * (1 - ease)), center, text)
-            else:
-                painter.setPen(Qt.PenStyle.NoPen)
-                cx, cy = bubble.center().x(), bubble.center().y()
-                lit = int(now / 480) % 3
-                for i in range(3):
-                    bounce = max(0.0, math.sin(now / 160 - i * 0.9)) * 4
-                    painter.setBrush(self._LYRIC_SUNG if i == lit else QColor(TEXT_DIM_HEX))
-                    painter.drawEllipse(QRectF(cx - 11 + i * 9, cy - 2 - bounce, 5, 5))
+        body = QRectF(card.left() + 10, card.top() + 7, card.width() - 20, h - 14 - dots_h)
+        if self._lyric_prev and change < 1.0:
+            prev_pt, prev_text, _ = self._fit_lyric(self._lyric_prev)
+            painter.setOpacity(alpha * (1 - change))
+            painter.setFont(ui_font(prev_pt, bold=True))
+            painter.setPen(QColor(TEXT_HEX))
+            painter.drawText(body, center, prev_text)
+        if shown:
+            # Blank LRC lines (instrumental gaps) fade the line to the dim text color
+            dim = eased(self._lyric_dim_ms)
+            dim = dim if not self._lyric_line else 1 - dim
+            bright, faint = QColor(TEXT_HEX), QColor(TEXT_DIM_HEX)
+            color = QColor(
+                round(bright.red() + (faint.red() - bright.red()) * dim),
+                round(bright.green() + (faint.green() - bright.green()) * dim),
+                round(bright.blue() + (faint.blue() - bright.blue()) * dim),
+            )
+            painter.setOpacity(alpha * (change if self._lyric_prev else 1.0))
+            painter.setFont(ui_font(pt, bold=True))
+            painter.setPen(color)
+            painter.drawText(body, center, shown)
+        if waiting:
+            painter.setOpacity(alpha)
+            painter.setPen(Qt.PenStyle.NoPen)
+            cx, cy = body.center().x(), body.bottom() + 8 if shown else body.center().y()
+            lit = int(now / 480) % 3
+            for i in range(3):
+                bounce = max(0.0, math.sin(now / 160 - i * 0.9)) * 4
+                painter.setBrush(self._LYRIC_DOT if i == lit else QColor(TEXT_DIM_HEX))
+                painter.drawEllipse(QRectF(cx - 11 + i * 9, cy - 2 - bounce, 5, 5))
         painter.restore()
 
     def _paint_toast(self, painter: QPainter) -> None:

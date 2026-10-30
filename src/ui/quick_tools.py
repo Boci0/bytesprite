@@ -83,9 +83,9 @@ class SnipOverlay(QWidget):
             painter.setPen(QPen(QColor("#73EFF7"), 1))
             painter.drawRect(sel.adjusted(0, 0, -1, -1))
         hint = {
-            "image": "Drag to snip and copy image  |  Esc cancels",
-            "text": "Drag over text to copy it  |  Esc cancels",
-            "color": "Click a pixel to copy its HEX  |  Esc cancels",
+            "image": "Drag to snip and copy image  |  Esc or right-click cancels",
+            "text": "Drag over text to copy it  |  Esc or right-click cancels",
+            "color": "Click a pixel to copy its HEX  |  Esc or right-click cancels",
         }.get(self._mode, "")
         if self._mode == "color" and self.rect().contains(self._hover):
             hint = f"{self.pixel_color(self._hover).name().upper()}  |  {hint}"
