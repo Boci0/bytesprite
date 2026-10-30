@@ -177,7 +177,11 @@ class TestMultiToolEngine:
 
     def test_dnd_standby_and_wake_transitions(self) -> None:
         events: list[tuple[PetState, PetState]] = []
-        sm = PetStateMachine()
+        # Fixed metrics: the live sampler flips wake() to ALERT whenever the suite pushes CPU past 90%
+        sysmon = SystemMonitorPlugin(
+            sampler=lambda: SystemMetrics(cpu_percent=15.0, ram_percent=40.0, disk_percent=50.0)
+        )
+        sm = PetStateMachine(registry=ToolRegistry([sysmon, PomodoroPlugin()]))
         unsubscribe = sm.on_state_change(lambda old, new, _stats: events.append((old, new)))
 
         sm.rest()
