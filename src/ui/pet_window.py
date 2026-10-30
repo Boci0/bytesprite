@@ -1317,18 +1317,6 @@ class PetWindow(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
 
-        # Subtle hover ring beneath ByteSprite's feet
-        if self._hovered:
-            painter.fillRect(
-                QRect(
-                    self._sprite_rect.center().x() - 34,
-                    self._sprite_rect.bottom() - 10,
-                    68,
-                    4,
-                ),
-                QColor(115, 239, 247, 95),
-            )
-
         # Crisp nearest-neighbor 4x pixel-art character
         painter.drawImage(self._sprite_rect, self._current_qimage())
 
