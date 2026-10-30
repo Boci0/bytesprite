@@ -9,7 +9,7 @@ import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, QTimer
+from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, QTimer, QVariantAnimation
 from PyQt6.QtGui import (
     QColor,
     QCursor,
@@ -73,6 +73,15 @@ def _annular_wedge_polygon(
     return QPolygonF(pts)
 
 
+def _ease_out_back(t: float) -> float:
+    c1 = 1.70158
+    return 1.0 + (c1 + 1.0) * (t - 1.0) ** 3 + c1 * (t - 1.0) ** 2
+
+
+def _clamp01(v: float) -> float:
+    return 0.0 if v < 0.0 else 1.0 if v > 1.0 else v
+
+
 class RadialDropWheel(QWidget):
     """Context-aware radial wheel spawned when hovering files over ByteSprite."""
 
@@ -85,6 +94,9 @@ class RadialDropWheel(QWidget):
     HOVER_OUTER_RADIUS: float = 131.0
     HIT_OUTER_RADIUS: float = 146.0
     GAP_RADIANS: float = 0.042
+    HUB_LABEL: str = "Skip"
+    OPEN_ANIM_MS: int = 260
+    SLICE_STAGGER: float = 0.35  # share of the open animation spent staggering slices
 
     def __init__(
         self,
@@ -113,6 +125,14 @@ class RadialDropWheel(QWidget):
         self._hover_polys: list[QPolygonF] = []
         self._label_centers: list[QPointF] = []
         self._hub_sprite: QImage = _build_hub_sprite_qimage()
+
+        # Open animation: linear 0..1 time, eased in paintEvent (pop, spin-in, staggered slices)
+        self._open_t: float = 1.0
+        self._open_anim = QVariantAnimation(self)
+        self._open_anim.setStartValue(0.0)
+        self._open_anim.setEndValue(1.0)
+        self._open_anim.setDuration(self.OPEN_ANIM_MS)
+        self._open_anim.valueChanged.connect(self._on_open_anim_value)
 
         self._watchdog_timer = QTimer(self)
         self._watchdog_timer.setInterval(80)
@@ -180,11 +200,25 @@ class RadialDropWheel(QWidget):
 
         self.show()
         self.raise_()
+        self._open_anim.stop()
+        self._open_t = 0.0
+        self._open_anim.start()
         self.update()
         if self._enable_watchdog:
             self._watchdog_timer.start()
 
+    def _on_open_anim_value(self, value: object) -> None:
+        self._open_t = float(value)  # type: ignore[arg-type]
+        self.update()
+
+    def _slice_opacity(self, index: int) -> float:
+        n = max(1, len(self._options))
+        start = self.SLICE_STAGGER * index / n
+        return _clamp01((self._open_t - start) / (1.0 - self.SLICE_STAGGER))
+
     def dismiss(self) -> None:
+        self._open_anim.stop()
+        self._open_t = 1.0
         self._watchdog_timer.stop()
         self._hovered_index = -1
         if self.isVisible():
@@ -367,6 +401,9 @@ class RadialDropWheel(QWidget):
         hairline = QPen(qcolor(HAIRLINE_RGBA), 1.0)
 
         # Header pill with the live "file -> result" preview
+        t = self._open_t
+        base_opacity = _clamp01(t * 2.0)
+        painter.setOpacity(base_opacity)
         header_text, header_color = self._header_preview_text()
         banner = QRectF(18.5, 8.5, self.width() - 37.0, 26.0)
         painter.setPen(hairline)
@@ -381,14 +418,21 @@ class RadialDropWheel(QWidget):
         painter.setPen(header_color)
         painter.drawText(banner, Qt.AlignmentFlag.AlignCenter, header_text)
 
-        # Frosted ring backdrop
+        # Frosted ring backdrop, popped and spun in by the open animation
         center = QPointF(self.CENTER_X, self.CENTER_Y)
+        scale = 0.6 + 0.4 * _ease_out_back(t)
+        painter.save()
+        painter.translate(center)
+        painter.rotate(-24.0 * (1.0 - t) ** 3)
+        painter.scale(scale, scale)
+        painter.translate(-center)
         halo_r = self.OUTER_RADIUS + 6.0
         painter.setPen(hairline)
         painter.setBrush(qcolor(GLASS_RGBA))
         painter.drawEllipse(center, halo_r, halo_r)
 
         for idx, opt in enumerate(self._options):
+            painter.setOpacity(base_opacity * self._slice_opacity(idx))
             is_hot = idx == self._hovered_index
             poly = self._hover_polys[idx] if is_hot else self._normal_polys[idx]
             if is_hot:
@@ -402,6 +446,7 @@ class RadialDropWheel(QWidget):
             painter.drawPolygon(poly)
 
         # Center cancel hub
+        painter.setOpacity(base_opacity)
         hub_r = self.INNER_RADIUS - 5.0
         hub_is_neutral = self._hovered_index < 0
         painter.setBrush(qcolor(GLASS_RGBA))
@@ -419,11 +464,12 @@ class RadialDropWheel(QWidget):
         painter.drawText(
             QRect(int(self.CENTER_X) - 28, int(self.CENTER_Y) + 9, 56, 13),
             Qt.AlignmentFlag.AlignCenter,
-            "Skip",
+            self.HUB_LABEL,
         )
 
         label_font = ui_font(9.0, bold=True)
         for idx, opt in enumerate(self._options):
+            painter.setOpacity(base_opacity * self._slice_opacity(idx))
             is_hot = idx == self._hovered_index
             pt = self._label_centers[idx]
             box = QRectF(pt.x() - 34.0, pt.y() - 14.0, 68.0, 28.0)
@@ -444,4 +490,5 @@ class RadialDropWheel(QWidget):
                 opt.subtitle.capitalize(),
             )
 
+        painter.restore()
         painter.end()

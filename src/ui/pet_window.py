@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+import ctypes
 import random
 import struct
+import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from PyQt6.QtCore import QDateTime, QPoint, QRect, QRectF, QStandardPaths, Qt, QTimer
+from PyQt6.QtCore import QDateTime, QPoint, QRect, QRectF, QStandardPaths, Qt, QTimer, QUrl
 from PyQt6.QtGui import (
     QCloseEvent,
     QColor,
     QContextMenuEvent,
+    QCursor,
+    QDesktopServices,
     QDragEnterEvent,
     QDragLeaveEvent,
     QDragMoveEvent,
@@ -28,16 +32,17 @@ from PyQt6.QtGui import (
     QPen,
     QPixmap,
 )
-from PyQt6.QtWidgets import QApplication, QFileDialog, QWidget
+from PyQt6.QtWidgets import QApplication, QFileDialog, QMenu, QWidget
 
 from src.engine.models import PetState, PetStats
 from src.engine.pet_state import PetStateMachine
 from src.graphics.animation_controller import AnimationController
 from src.graphics.sprite_matrix import FrameMatrix, get_sprite_frames
 from src.tools.file_forge import ForgeMode, ForgeWheelOption, get_wheel_options_for_paths
-from src.ui.context_menu import PetContextMenu
+from src.ui.context_menu import PetContextMenu, style_menu
 from src.ui.drop_wheel import RadialDropWheel
 from src.ui.quick_tools import OcrJob, SnipSession
+from src.ui.tool_wheel import WEB_SHORTCUTS, ToolWheel, ToolWheelOption, google_search_url
 from src.ui.theme import GLASS_RGBA, HAIRLINE_RGBA, HOVER_RGBA, TEXT_DIM_HEX, TEXT_HEX, qcolor, ui_font
 
 
@@ -211,6 +216,10 @@ def export_windows_ico(
     return dest
 
 
+VK_VOLUME_MUTE = 0xAD
+KEYEVENTF_KEYUP = 0x0002
+
+
 class PetWindow(QWidget):
     """Borderless translucent desktop widget rendering ByteSprite and hover HUD."""
 
@@ -218,6 +227,7 @@ class PetWindow(QWidget):
     WINDOW_HEIGHT: int = 222
     SPRITE_SCALE: int = 4  # 32x32 * 4 = 128x128 crisp integer scaling
     DRAG_THRESHOLD_PX: int = 5
+    HOLD_TO_WHEEL_MS: int = 450
 
     def __init__(
         self,
@@ -272,6 +282,13 @@ class PetWindow(QWidget):
         self._click_timer.setSingleShot(True)
         self._click_timer.setInterval(QApplication.styleHints().mouseDoubleClickInterval())
         self._click_timer.timeout.connect(self.trigger_pet)
+        # Holding still on the pet opens the tool wheel; any drag past the threshold cancels it
+        self._tool_wheel: ToolWheel | None = None
+        self._wheel_holding: bool = False
+        self._hold_timer = QTimer(self)
+        self._hold_timer.setSingleShot(True)
+        self._hold_timer.setInterval(self.HOLD_TO_WHEEL_MS)
+        self._hold_timer.timeout.connect(self._on_hold_timeout)
         self._ocr_jobs: list[OcrJob] = []
 
         self._configure_window()
@@ -340,6 +357,9 @@ class PetWindow(QWidget):
         if self._drop_wheel is not None:
             self._drop_wheel._always_on_top = self._always_on_top
             self._drop_wheel._configure_window()
+        if self._tool_wheel is not None:
+            self._tool_wheel._always_on_top = self._always_on_top
+            self._tool_wheel._configure_window()
 
     def set_auto_wander(self, enabled: bool) -> None:
         self._auto_wander = bool(enabled)
@@ -594,6 +614,82 @@ class PetWindow(QWidget):
             initial_global_cursor=self.mapToGlobal(local_cursor),
         )
 
+    @property
+    def tool_wheel(self) -> ToolWheel | None:
+        return self._tool_wheel
+
+    def tool_wheel_options(self) -> list[ToolWheelOption]:
+        """Slices clockwise from 12 o'clock: everyday quick tools, then web shortcuts."""
+        pomo = self._state_machine.pomodoro_plugin
+        focus_sub = "pause" if pomo is not None and pomo.running else f"{pomo.work_minutes if pomo else 25}m"
+        options = [
+            ToolWheelOption("OCR", "copy text", "#41A6F6", "snip:text"),
+            ToolWheelOption("Clips", "history", "#73EFF7", "pet:clips"),
+            ToolWheelOption("Search", "clipboard", "#38B764", "pet:search"),
+            ToolWheelOption("Focus", focus_sub, "#FFCD75", "pomodoro:toggle"),
+        ]
+        if sys.platform == "win32":
+            options.append(ToolWheelOption("Mute", "speakers", "#8A9AF2", "pet:mute"))
+        options.extend(
+            ToolWheelOption(label, "open", color, f"web:{url}") for label, url, color in WEB_SHORTCUTS
+        )
+        return options
+
+    def open_tool_wheel(self, global_cursor: QPoint | None = None) -> ToolWheel:
+        if self._tool_wheel is None:
+            self._tool_wheel = ToolWheel(
+                on_selected=self._on_tool_wheel_selected,
+                always_on_top=self._always_on_top,
+            )
+        sprite_global = self.mapToGlobal(self.sprite_center_point())
+        wx, wy = clamp_position_to_screens(
+            sprite_global.x() - int(ToolWheel.CENTER_X),
+            sprite_global.y() - int(ToolWheel.CENTER_Y),
+            ToolWheel.WHEEL_WIDTH,
+            ToolWheel.WHEEL_HEIGHT,
+            self.available_screen_rects(),
+        )
+        self._tool_wheel.open_tools(
+            self.tool_wheel_options(),
+            window_top_left=QPoint(wx, wy),
+            initial_global_cursor=global_cursor,
+        )
+        return self._tool_wheel
+
+    def _on_hold_timeout(self) -> None:
+        if self._press_global_pos is None or self._did_drag:
+            return
+        self._wheel_holding = True
+        self._click_timer.stop()
+        self._anim.play_oneshot("spin")
+        self._schedule_next_anim_tick()
+        self.open_tool_wheel(QCursor.pos())
+
+    def _on_tool_wheel_selected(self, option: ToolWheelOption) -> None:
+        if option.callback_id == "pomodoro:toggle":
+            self.trigger_play()
+        else:
+            self.trigger_tool_action(option.callback_id)
+
+    def _open_clip_history(self, global_pos: QPoint) -> None:
+        vault = self._state_machine.registry.get_plugin("clipvault")
+        entries = list(getattr(vault, "entries", ()))
+        pins = list(getattr(vault, "pins", ()))
+        if not entries and not pins:
+            self._show_toast("NO CLIPS", QColor("#EF7D57"))
+            return
+        menu = style_menu(QMenu(self))
+        for idx, entry in enumerate(entries):
+            act = menu.addAction(entry.preview.replace("&", "&&"))
+            act.triggered.connect(lambda _c=False, i=idx: self.trigger_tool_action(f"clipvault:restore:{i}"))
+        if pins:
+            menu.addSeparator()
+            for idx, entry in enumerate(pins):
+                act = menu.addAction(f"Pinned: {entry.preview}".replace("&", "&&"))
+                act.triggered.connect(lambda _c=False, i=idx: self.trigger_tool_action(f"clipvault:pinned:{i}"))
+        menu.exec(global_pos)
+        menu.deleteLater()
+
     def _clipboard_local_paths(self) -> list[Path]:
         app = QApplication.instance()
         if app is None:
@@ -715,6 +811,28 @@ class PetWindow(QWidget):
             if folder:
                 self.trigger_drop_files([folder])
             return
+        if callback_id.startswith("web:"):
+            QDesktopServices.openUrl(QUrl(callback_id.removeprefix("web:")))
+            return
+        if callback_id == "pet:search":
+            cb = QGuiApplication.clipboard()
+            query = " ".join((cb.text() if cb is not None else "").split())[:500]
+            if not query:
+                self._show_toast("NO TEXT", QColor("#EF7D57"))
+                return
+            QDesktopServices.openUrl(QUrl(google_search_url(query)))
+            self._show_toast("SEARCH", QColor("#38B764"))
+            return
+        if callback_id == "pet:mute":
+            if sys.platform == "win32":
+                u32 = ctypes.windll.user32
+                u32.keybd_event(VK_VOLUME_MUTE, 0, 0, 0)
+                u32.keybd_event(VK_VOLUME_MUTE, 0, KEYEVENTF_KEYUP, 0)
+                self._show_toast("MUTE", QColor("#8A9AF2"))
+            return
+        if callback_id == "pet:clips":
+            self._open_clip_history(QCursor.pos())
+            return
         if callback_id == "project:pick":
             folder = QFileDialog.getExistingDirectory(self, "ByteSprite - Choose Project Folder")
             project = self._state_machine.registry.get_plugin("project")
@@ -807,6 +925,7 @@ class PetWindow(QWidget):
             self._drag_offset = global_pos - self.frameGeometry().topLeft()
             self._did_drag = False
             self._walk_steps_remaining = 0
+            self._hold_timer.start()
             event.accept()
             return
 
@@ -825,9 +944,15 @@ class PetWindow(QWidget):
             and (event.buttons() & Qt.MouseButton.LeftButton)
         ):
             global_pos = event.globalPosition().toPoint()
+            if self._wheel_holding:
+                if self._tool_wheel is not None:
+                    self._tool_wheel.update_hover_from_global(global_pos)
+                event.accept()
+                return
             delta = global_pos - self._press_global_pos
             if delta.manhattanLength() >= self.DRAG_THRESHOLD_PX:
                 self._did_drag = True
+                self._hold_timer.stop()
             if self._did_drag:
                 step_dx = (
                     (global_pos.x() - self._last_drag_global_pos.x())
@@ -847,6 +972,17 @@ class PetWindow(QWidget):
         if event is None:
             return
         if event.button() == Qt.MouseButton.LeftButton and self._press_global_pos is not None:
+            self._hold_timer.stop()
+            if self._wheel_holding:
+                self._wheel_holding = False
+                self._press_global_pos = None
+                self._last_drag_global_pos = None
+                self._drag_offset = None
+                self._did_drag = False
+                if self._tool_wheel is not None and self._tool_wheel.isVisible():
+                    self._tool_wheel.release_at(event.globalPosition().toPoint())
+                event.accept()
+                return
             was_drag = self._did_drag
             self._press_global_pos = None
             self._last_drag_global_pos = None
@@ -1144,6 +1280,12 @@ class PetWindow(QWidget):
             self._drop_wheel.close()
             self._drop_wheel.deleteLater()
             self._drop_wheel = None
+        self._hold_timer.stop()
+        if self._tool_wheel is not None:
+            self._tool_wheel.dismiss()
+            self._tool_wheel.close()
+            self._tool_wheel.deleteLater()
+            self._tool_wheel = None
         if self._unsub_state is not None:
             self._unsub_state()
             self._unsub_state = None  # type: ignore[assignment]

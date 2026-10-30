@@ -324,3 +324,118 @@ class TestPetWindowAndContextMenu:
         # ICO magic header: 00 00 01 00 + 6 images (06 00)
         assert raw[:6] == b"\x00\x00\x01\x00\x06\x00"
         assert len(raw) > 512
+
+
+def _mouse(kind: QEvent.Type, win: PetWindow, global_pt: QPoint, buttons: Qt.MouseButton) -> QMouseEvent:
+    return QMouseEvent(
+        kind,
+        QPointF(win.mapFromGlobal(global_pt)),
+        QPointF(global_pt),
+        Qt.MouseButton.LeftButton,
+        buttons,
+        Qt.KeyboardModifier.NoModifier,
+    )
+
+
+def test_long_press_wheel_hold_drag_release_runs_slice(qapp: QApplication) -> None:
+    sm = PetStateMachine(PetStats())
+    win = PetWindow(state_machine=sm, animation_controller=AnimationController(size=32), auto_wander=False)
+    fired: list[str] = []
+    win.trigger_tool_action = fired.append  # type: ignore[method-assign]
+    try:
+        start = win.mapToGlobal(win.sprite_center_point())
+        win.mousePressEvent(_mouse(QEvent.Type.MouseButtonPress, win, start, Qt.MouseButton.LeftButton))
+        win._on_hold_timeout()  # stands in for the 450ms hold
+        wheel = win.tool_wheel
+        assert wheel is not None and wheel.isVisible()
+
+        labels = [o.label for o in wheel.options]
+        target_idx = labels.index("OCR")
+        target = wheel.mapToGlobal(wheel.slice_center_point(target_idx))
+        win.mouseMoveEvent(_mouse(QEvent.Type.MouseMove, win, target, Qt.MouseButton.LeftButton))
+        assert wheel.hovered_index == target_idx
+        win.mouseReleaseEvent(_mouse(QEvent.Type.MouseButtonRelease, win, target, Qt.MouseButton.NoButton))
+        assert fired == ["snip:text"]
+        assert not wheel.isVisible()
+        assert not win._click_timer.isActive()  # a hold never also cycles the HUD
+    finally:
+        win.shutdown()
+        win.close()
+
+
+def test_long_press_wheel_release_on_hub_enters_click_mode(qapp: QApplication) -> None:
+    sm = PetStateMachine(PetStats())
+    win = PetWindow(state_machine=sm, animation_controller=AnimationController(size=32), auto_wander=False)
+    fired: list[str] = []
+    win.trigger_tool_action = fired.append  # type: ignore[method-assign]
+    try:
+        start = win.mapToGlobal(win.sprite_center_point())
+        win.mousePressEvent(_mouse(QEvent.Type.MouseButtonPress, win, start, Qt.MouseButton.LeftButton))
+        win._on_hold_timeout()
+        wheel = win.tool_wheel
+        assert wheel is not None
+        hub = wheel.mapToGlobal(wheel.hub_center_point())
+        win.mouseReleaseEvent(_mouse(QEvent.Type.MouseButtonRelease, win, hub, Qt.MouseButton.NoButton))
+        assert wheel.isVisible() and wheel.click_mode and fired == []
+
+        local = QPointF(wheel.slice_center_point(0))
+        wheel.mousePressEvent(QMouseEvent(
+            QEvent.Type.MouseButtonPress, local, QPointF(wheel.mapToGlobal(local.toPoint())),
+            Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+        ))
+        assert fired == ["snip:text"] and not wheel.isVisible()
+    finally:
+        win.shutdown()
+        win.close()
+
+
+def test_wheel_open_animation_staggers_and_paints(qapp: QApplication) -> None:
+    sm = PetStateMachine(PetStats())
+    win = PetWindow(state_machine=sm, animation_controller=AnimationController(size=32), auto_wander=False)
+    try:
+        wheel = win.open_tool_wheel()
+        canvas = QImage(wheel.width(), wheel.height(), QImage.Format.Format_ARGB32_Premultiplied)
+        for t in (0.0, 0.3, 1.0):
+            wheel._open_t = t
+            canvas.fill(0)
+            wheel.render(canvas)
+        wheel._open_t = 0.3
+        last = len(wheel.options) - 1
+        assert wheel._slice_opacity(0) > wheel._slice_opacity(last)
+        wheel._open_t = 1.0
+        assert wheel._slice_opacity(last) == 1.0
+        center = wheel.hub_center_point()
+        assert canvas.pixelColor(center.x(), center.y() + 30).alpha() > 0
+    finally:
+        win.shutdown()
+        win.close()
+
+
+def test_tool_wheel_slices_and_web_search_dispatch(qapp: QApplication, monkeypatch: pytest.MonkeyPatch) -> None:
+    from PyQt6.QtGui import QDesktopServices, QGuiApplication
+
+    from src.ui.tool_wheel import google_search_url
+
+    opened: list[str] = []
+    monkeypatch.setattr(QDesktopServices, "openUrl", lambda url: opened.append(url.toString()) or True)
+    sm = PetStateMachine(PetStats())
+    win = PetWindow(state_machine=sm, animation_controller=AnimationController(size=32), auto_wander=False)
+    try:
+        labels = [o.label for o in win.tool_wheel_options()]
+        assert labels[:4] == ["OCR", "Clips", "Search", "Focus"]
+        assert labels[-3:] == ["YouTube", "Gemini", "GitHub"]
+        assert len(labels) <= 8
+
+        win.trigger_tool_action("web:https://www.youtube.com")
+        QGuiApplication.clipboard().setText("TypeError: x is not a function")
+        win.trigger_tool_action("pet:search")
+        assert opened[0] == "https://www.youtube.com"
+        assert opened[1].startswith("https://www.google.com/search?q=TypeError")
+        assert google_search_url("a b&c") == "https://www.google.com/search?q=a+b%26c"
+
+        sm.registry.get_plugin("clipvault")._ring.clear()
+        win.trigger_tool_action("pet:clips")
+        assert win._toast_text == "NO CLIPS"
+    finally:
+        win.shutdown()
+        win.close()
