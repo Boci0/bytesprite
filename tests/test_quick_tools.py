@@ -119,3 +119,19 @@ def test_windows_ocr_reads_rendered_text(tmp_path: Path) -> None:
     env = {k: v for k, v in os.environ.items() if k != "QT_QPA_PLATFORM"}
     subprocess.run([sys.executable, "-c", script, str(png)], check=True, env=env, timeout=60)
     assert "Hello" in ocr_image_file(png)
+
+
+def test_snip_save_falls_back_when_pictures_dir_refuses_writes(
+    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.ui import pet_window
+
+    blocker = tmp_path / "pictures_is_a_file"
+    blocker.write_text("x")  # mkdir under a file raises OSError, like a refused OneDrive dir
+    monkeypatch.setattr(pet_window.QStandardPaths, "writableLocation", lambda _loc: str(blocker))
+    monkeypatch.setattr(pet_window.Path, "home", lambda: tmp_path / "home")
+    img = QImage(8, 8, QImage.Format.Format_RGB32)
+    img.fill(QColor("#102030"))
+    saved = pet_window.PetWindow._save_snip_png(img)
+    assert saved is not None and saved.parent == tmp_path / "home" / ".bytesprite" / "snips"
+    assert saved.exists()

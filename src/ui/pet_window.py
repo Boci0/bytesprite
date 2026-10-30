@@ -656,12 +656,26 @@ class PetWindow(QWidget):
             return
         if cb is not None:
             cb.setImage(result)
+        saved = self._save_snip_png(result)
+        self._show_toast("SNIPPED" if saved else "COPIED", QColor("#38B764"))
+
+    @staticmethod
+    def _save_snip_png(image: QImage) -> Path | None:
+        """Save to Pictures/ByteSprite, else ~/.bytesprite/snips; never raise into Qt handlers."""
         pictures = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.PicturesLocation)
-        out_dir = Path(pictures or Path.home()) / "ByteSprite"
-        out_dir.mkdir(parents=True, exist_ok=True)
         stamp = QDateTime.currentDateTime().toString("yyyyMMdd_HHmmss_zzz")
-        result.save(str(out_dir / f"snip_{stamp}.png"), "PNG")
-        self._show_toast("SNIPPED", QColor("#38B764"))
+        # OneDrive-redirected or Controlled Folder Access Pictures dirs can refuse writes
+        for out_dir in (Path(pictures) / "ByteSprite" if pictures else None, Path.home() / ".bytesprite" / "snips"):
+            if out_dir is None:
+                continue
+            try:
+                out_dir.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                continue
+            target = out_dir / f"snip_{stamp}.png"
+            if image.save(str(target), "PNG"):
+                return target
+        return None
 
     def _on_ocr_finished(self, job: OcrJob, text: str) -> None:
         if job in self._ocr_jobs:
