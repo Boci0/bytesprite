@@ -166,7 +166,27 @@ class TestPetWindowAndContextMenu:
             win.mousePressEvent(press)
             win.mouseReleaseEvent(release)
 
+            # Single click is deferred so it cannot pair with a double-click
+            assert win._click_timer.isActive()
+            assert sm.active_tool_id == "sysmon"
+            win._click_timer.timeout.emit()
             assert sm.active_tool_id == "pomodoro"
+
+            snips: list[str] = []
+            win.trigger_snip = snips.append  # type: ignore[method-assign]
+            dbl = QMouseEvent(
+                QEvent.Type.MouseButtonDblClick,
+                QPointF(local_pt),
+                QPointF(global_pt),
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+            win.mousePressEvent(press)
+            win.mouseReleaseEvent(release)
+            win.mouseDoubleClickEvent(dbl)
+            assert snips == ["image"]
+            assert not win._click_timer.isActive()
         finally:
             win.shutdown()
             win.close()

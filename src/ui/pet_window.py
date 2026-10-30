@@ -267,6 +267,11 @@ class PetWindow(QWidget):
         self._is_shutting_down: bool = False
         self._drop_wheel: RadialDropWheel | None = None
         self._snip_session: SnipSession | None = None
+        # Single click waits out the double-click interval so a double-click snips without also cycling tools
+        self._click_timer = QTimer(self)
+        self._click_timer.setSingleShot(True)
+        self._click_timer.setInterval(QApplication.styleHints().mouseDoubleClickInterval())
+        self._click_timer.timeout.connect(self.trigger_pet)
         self._ocr_jobs: list[OcrJob] = []
         self._typer = HumanTyper(on_finished=self._on_typer_finished, parent=self)
         self._typer_wpm: int = 65
@@ -868,10 +873,22 @@ class PetWindow(QWidget):
             self._drag_offset = None
             self._did_drag = False
             if not was_drag:
-                self.trigger_pet()
+                self._click_timer.start()
             event.accept()
             return
         super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent | None) -> None:
+        if event is None:
+            return
+        if event.button() == Qt.MouseButton.LeftButton and self._is_interactive_hit(
+            event.position().toPoint()
+        ):
+            self._click_timer.stop()
+            self.trigger_snip("image")
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
 
     def contextMenuEvent(self, event: QContextMenuEvent | None) -> None:
         if event is None:
