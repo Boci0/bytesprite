@@ -12,7 +12,8 @@ REQUIRED_ANIMATIONS: tuple[str, ...] = (
     "blink",
     "walk",
     "sleep",
-    "excited",
+    "focus",
+    "spin",
 )
 
 ALL_ANIMATIONS: tuple[str, ...] = (
@@ -20,7 +21,8 @@ ALL_ANIMATIONS: tuple[str, ...] = (
     "blink",
     "walk",
     "sleep",
-    "excited",
+    "focus",
+    "spin",
     "hungry",
     "eating",
 )
@@ -46,6 +48,8 @@ PALETTE: dict[str, RGBA] = {
     "P": (168, 174, 198, 140),  # Sleepy Zzz
     "M": (92, 84, 94, 170),     # Mouth accent
     "T": (168, 206, 214, 130),  # Sweat drop / particle
+    "Q": (176, 222, 255, 235),  # Focus pulse head (ice-blue glow)
+    "q": (150, 200, 240, 150),  # Focus pulse tail
 }
 
 
@@ -136,6 +140,41 @@ def _trace_wire(
         _put(grid, x, y, core)
 
 
+def _path_cells(path: tuple[tuple[int, int], ...]) -> list[tuple[int, int]]:
+    """Ordered, de-duplicated centerline cells along a wire path (for traveling pulses)."""
+    cells: list[tuple[int, int]] = []
+    for (x0, y0), (x1, y1) in zip(path, path[1:]):
+        for pt in _line_points(x0, y0, x1, y1):
+            if not cells or cells[-1] != pt:
+                cells.append(pt)
+    return cells
+
+
+def _hscale_frame(frame: FrameMatrix, sx: float) -> FrameMatrix:
+    """Nearest-neighbor horizontal squash/mirror around the frame center (fake 3D turn)."""
+    size = len(frame)
+    cx = size / 2.0
+    out: FrameMatrix = [[PALETTE["."]] * size for _ in range(size)]
+    for x in range(size):
+        src = int((x + 0.5 - cx) / sx + cx)
+        if 0 <= src < size:
+            for y in range(size):
+                out[y][x] = frame[y][src]
+    return out
+
+
+def _over(base: FrameMatrix, top: FrameMatrix) -> FrameMatrix:
+    """Composite `top` onto `base` wherever `top` is not fully transparent."""
+    return [
+        [t if t[3] > 0 else b for b, t in zip(brow, trow)]
+        for brow, trow in zip(base, top)
+    ]
+
+
+_PATH_CELLS_32: list[tuple[int, int]] = _path_cells(_CLIP_PATH_32)
+_PATH_CELLS_16: list[tuple[int, int]] = _path_cells(_CLIP_PATH_16)
+
+
 # ---------------------------------------------------------------------------
 # 32x32 Character Composer
 # ---------------------------------------------------------------------------
@@ -174,12 +213,24 @@ def _draw_clip_32(
     eyes: str = "open",
     mouth: str = "smile",
     blush: bool = False,
+    face: bool = True,
+    pulse_at: int | None = None,
 ) -> None:
-    """Render the frosted paperclip buddy with a face across its upper loops."""
+    """Render the frosted paperclip buddy; `face=False` shows its plain back mid-spin."""
     _trace_wire(grid, _CLIP_PATH_32, ox=dx, oy=dy, brush=2, core="L", outline="O")
     # Catchlights on the outer top bend
     _put(grid, 11 + dx, 4 + dy, "W")
     _put(grid, 12 + dx, 4 + dy, "W")
+    if pulse_at is not None:
+        # Light pulse running along the wire: bright head, fading glow tail
+        cells = _PATH_CELLS_32
+        for offset, ch in ((0, "Q"), (1, "Q"), (2, "q"), (3, "q"), (4, "q")):
+            px, py = cells[(pulse_at - offset) % len(cells)]
+            for bx in (0, 1):
+                for by in (0, 1):
+                    _put(grid, px + dx + bx, py + dy + by, ch)
+    if not face:
+        return
     _stamp(grid, 9 + dx, 9 + dy, _EYES_32[eyes])
     _stamp(grid, 17 + dx, 9 + dy, _EYES_32[eyes])
     _stamp(grid, 14 + dx, 16 + dy, _MOUTHS_32[mouth])
@@ -191,18 +242,17 @@ def _draw_clip_32(
 def _build_32_animations() -> dict[str, list[FrameMatrix]]:
     animations: dict[str, list[FrameMatrix]] = {}
     sparkle_glyph = [" G ", "GWG", " G "]
-    heart_glyph = ["CC CC", "CCCCC", " CCC ", "  C  "]
     z_big = ["PPP", " P ", "PPP"]
     z_small = ["PP", "PP"]
 
     def frame(
         *, dx: int = 0, dy: int = 0, eyes: str = "open", mouth: str = "smile",
-        shadow: int = 8, blush: bool = False,
+        shadow: int = 8, blush: bool = False, pulse: int | None = None,
         extras: tuple[tuple[int, int, list[str]], ...] = (),
     ) -> FrameMatrix:
         g = _new_grid(32)
         _draw_shadow_32(g, width_radius=shadow, y=29)
-        _draw_clip_32(g, dx=dx, dy=dy, eyes=eyes, mouth=mouth, blush=blush)
+        _draw_clip_32(g, dx=dx, dy=dy, eyes=eyes, mouth=mouth, blush=blush, pulse_at=pulse)
         for ex, ey, glyph in extras:
             _stamp(g, ex, ey, glyph)
         return _grid_to_rgba(g)
@@ -227,24 +277,45 @@ def _build_32_animations() -> dict[str, list[FrameMatrix]]:
         frame(dy=2, eyes="closed", mouth="flat", shadow=9, extras=((26, 2, z_big), (24, 8, z_small))),
         frame(dy=1, eyes="closed", mouth="flat", shadow=9, extras=((24, 6, z_small),)),
     ]
-    # 5. EXCITED (FOCUS: hop with sparkles)
-    animations["excited"] = [
-        frame(dy=1, eyes="happy", mouth="open_happy", shadow=9, blush=True),
-        frame(dy=-2, eyes="happy", mouth="open_happy", shadow=6, blush=True,
-              extras=((2, 4, sparkle_glyph), (26, 3, heart_glyph))),
-        frame(dy=-3, eyes="happy", mouth="open_happy", shadow=5, blush=True,
-              extras=((2, 3, sparkle_glyph), (26, 2, heart_glyph))),
-        frame(dy=-1, eyes="happy", mouth="smile", shadow=7, blush=True,
-              extras=((3, 2, sparkle_glyph),)),
+    # 5. FOCUS (Pomodoro loop: determined eyes, light pulse circling the wire)
+    pulse_steps = 12
+    stride = len(_PATH_CELLS_32) // pulse_steps
+    animations["focus"] = [
+        frame(dy=1 if step in (5, 6, 7) else 0, eyes="half", mouth="flat",
+              pulse=step * stride)
+        for step in range(pulse_steps)
     ]
-    # 6. HUNGRY (ALERT: worried wobble with sweat drop)
+    # 6. SPIN (click reaction: hop, full 3D turn showing the plain back, happy landing)
+    spin_frames: list[FrameMatrix] = []
+    for sx, dy, face, eyes, shadow in (
+        (1.0, 1, True, "open", 9),
+        (0.55, -1, True, "open", 7),
+        (0.3, -2, False, "open", 6),
+        (-0.55, -3, False, "open", 5),
+        (-1.0, -3, False, "open", 5),
+        (-0.55, -3, False, "open", 5),
+        (0.3, -2, False, "open", 6),
+        (0.55, -1, True, "happy", 7),
+        (1.0, 0, True, "happy", 8),
+    ):
+        body = _new_grid(32)
+        _draw_clip_32(body, dy=dy, eyes=eyes, mouth="open_happy" if eyes == "happy" else "smile",
+                      face=face, blush=eyes == "happy")
+        under = _new_grid(32)
+        _draw_shadow_32(under, width_radius=shadow, y=29)
+        if eyes == "happy" and sx == 1.0:
+            _stamp(under, 3, 6, sparkle_glyph)
+            _stamp(under, 26, 4, sparkle_glyph)
+        spin_frames.append(_over(_grid_to_rgba(under), _hscale_frame(_grid_to_rgba(body), sx)))
+    animations["spin"] = spin_frames
+    # 7. HUNGRY (ALERT: worried wobble with sweat drop)
     sweat = [" T ", "TTT", " T "]
     animations["hungry"] = [
         frame(dx=step % 2, dy=1, eyes="plead", mouth="sad", shadow=9,
               extras=((25, 9 + (step % 2), sweat),))
         for step in range(4)
     ]
-    # 7. EATING (one-shot munch)
+    # 8. EATING (one-shot munch)
     animations["eating"] = [
         frame(eyes="open", mouth="munch_open", blush=True),
         frame(dy=1, eyes="happy", mouth="munch_closed", blush=True),
@@ -258,10 +329,16 @@ def _build_32_animations() -> dict[str, list[FrameMatrix]]:
 # 16x16 Compact / Tray Pixel Matrices
 # ---------------------------------------------------------------------------
 
-def _build_16_base(*, dy: int = 0, eyes: str = "open", extra: str = "") -> FrameMatrix:
+def _build_16_base(
+    *, dy: int = 0, eyes: str = "open", extra: str = "", pulse_at: int | None = None
+) -> FrameMatrix:
     g = _new_grid(16)
     _hline(g, 4, 11, 15, "s")
     _trace_wire(g, _CLIP_PATH_16, ox=0, oy=dy, brush=1, core="O", outline=None)
+    if pulse_at is not None:
+        for offset, ch in ((0, "Q"), (1, "q")):
+            px, py = _PATH_CELLS_16[(pulse_at - offset) % len(_PATH_CELLS_16)]
+            _put(g, px, py + dy, ch)
     ey = 6 + dy
     if eyes == "open":
         for ex in (5, 8):
@@ -299,7 +376,17 @@ def _build_16_animations() -> dict[str, list[FrameMatrix]]:
             _build_16_base(dy=1, eyes="closed", extra="z"),
             _build_16_base(dy=1, eyes="closed"),
         ],
-        "excited": [_build_16_base(dy=0, eyes="happy", extra="spark"), _build_16_base(dy=1, eyes="happy")],
+        "focus": [
+            _build_16_base(eyes="closed", pulse_at=i * (len(_PATH_CELLS_16) // 6)) for i in range(6)
+        ],
+        # eyes="back" draws no face: the plain back of the clip mid-turn
+        "spin": [
+            _hscale_frame(_build_16_base(dy=dy, eyes=eyes), sx)
+            for sx, dy, eyes in (
+                (1.0, 0, "open"), (0.65, -1, "open"), (-0.65, -1, "back"),
+                (-1.0, -1, "back"), (-0.65, -1, "back"), (0.65, 0, "happy"), (1.0, 0, "happy"),
+            )
+        ],
         "hungry": [_build_16_base(dy=1, extra="sweat"), _build_16_base(dy=1, eyes="closed", extra="sweat")],
         "eating": [_build_16_base(eyes="happy"), _build_16_base(dy=1, eyes="happy")],
     }

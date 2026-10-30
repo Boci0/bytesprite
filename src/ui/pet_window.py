@@ -382,7 +382,7 @@ class PetWindow(QWidget):
         mapping = {
             PetState.IDLE: "idle",
             PetState.SLEEPING: "sleep",
-            PetState.PLAYING: "excited",
+            PetState.PLAYING: "focus",
             PetState.HUNGRY: "hungry",
         }
         target_clip = mapping.get(state, "idle")
@@ -402,7 +402,7 @@ class PetWindow(QWidget):
         if notifications:
             toast_text, color_hex = notifications[-1]
             if self._state_machine.state == PetState.IDLE:
-                self._anim.play_oneshot("excited")
+                self._anim.play_oneshot("spin")
                 self._schedule_next_anim_tick()
             self._show_toast(toast_text, QColor(color_hex or "#38B764"))
             return
@@ -506,7 +506,7 @@ class PetWindow(QWidget):
     def trigger_play(self) -> None:
         running = self._state_machine.toggle_pomodoro()
         if running:
-            self._anim.set_state("excited", force=True)
+            self._anim.set_state("focus", force=True)
             self._schedule_next_anim_tick()
             self._show_toast("FOCUS!", QColor("#FFCD75"))
         else:
@@ -519,7 +519,7 @@ class PetWindow(QWidget):
             self._show_toast("DND...", QColor("#8A9AF2"))
             return
         plugin = self._state_machine.cycle_tool()
-        self._anim.play_oneshot("excited")
+        self._anim.play_oneshot("spin")
         self._schedule_next_anim_tick()
         badge = plugin.tool_id.upper()[:6] if plugin is not None else "TOOL"
         self._show_toast(badge, QColor("#73EFF7"))
