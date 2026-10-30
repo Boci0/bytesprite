@@ -1,9 +1,8 @@
-"""Tests for screen snip overlays, Windows OCR bridge, and the human-speed typer."""
+"""Tests for screen snip overlays, the Windows OCR bridge, and global snip hotkeys."""
 
 from __future__ import annotations
 
 import os
-import random
 import subprocess
 import sys
 import time
@@ -19,9 +18,7 @@ from src.storage.storage_manager import StorageManager
 from src.ui.context_menu import QUICK_TOOL_ITEMS
 from src.ui.quick_tools import (
     GlobalHotkeys,
-    HumanTyper,
     SnipOverlay,
-    human_delay_ms,
     ocr_image_file,
 )
 
@@ -32,47 +29,6 @@ def qapp() -> QApplication:
     if app is None:
         app = QApplication([])
     return app  # type: ignore[return-value]
-
-
-def test_human_delay_is_bounded_and_pauses_on_punctuation() -> None:
-    rng = random.Random(7)
-    letters = [human_delay_ms("a", 60, rng) for _ in range(300)]
-    stops = [human_delay_ms(".", 60, rng) for _ in range(300)]
-    assert min(letters) >= 15
-    assert sum(stops) / len(stops) > sum(letters) / len(letters) + 200
-    # Faster wpm types faster on average
-    fast = [human_delay_ms("a", 150, rng) for _ in range(300)]
-    assert sum(fast) < sum(letters)
-
-
-def test_human_typer_sends_every_char_and_stops_on_escape(qapp: QApplication) -> None:
-    sent: list[str] = []
-    reasons: list[str] = []
-    typer = HumanTyper(
-        on_finished=reasons.append, send=sent.append, escape_held=lambda: False,
-        rng=random.Random(1),
-    )
-    typer.start("hi\r\nyo", wpm=200, start_delay_ms=0)
-    deadline = time.monotonic() + 5
-    while not reasons and time.monotonic() < deadline:
-        qapp.processEvents()
-    assert sent == list("hi\nyo")
-    assert reasons == ["TYPED"]
-
-    held = {"esc": False}
-    sent.clear()
-    reasons.clear()
-    typer = HumanTyper(
-        on_finished=reasons.append, send=sent.append, escape_held=lambda: held["esc"],
-    )
-    typer.start("long text", wpm=200, start_delay_ms=0)
-    held["esc"] = True
-    deadline = time.monotonic() + 2
-    while not reasons and time.monotonic() < deadline:
-        qapp.processEvents()
-    assert reasons == ["STOPPED"]
-    assert sent == []
-    assert typer.running is False
 
 
 def test_snip_overlay_crops_in_device_pixels_and_reads_colors(qapp: QApplication) -> None:
@@ -151,7 +107,7 @@ def test_submenu_titles_render_literal_ampersand(qapp: QApplication, tmp_path: P
         menu = controller.window.build_context_menu()
         titles = [sub.title() for sub in menu.plugin_submenus.values()] + [menu.quick_menu.title()]
         # "&&" is how Qt shows a literal "&"; a lone "&" would be swallowed as a mnemonic
-        assert "Screenshot && Typing" in titles
+        assert "Clip Vault && Quick Transforms" in titles
         assert all("&" not in t.replace("&&", "") for t in titles)
         menu.deleteLater()
     finally:
@@ -159,7 +115,7 @@ def test_submenu_titles_render_literal_ampersand(qapp: QApplication, tmp_path: P
 
 
 def test_closing_a_dialog_does_not_quit_the_app(qapp: QApplication, tmp_path: Path) -> None:
-    # Pet windows are Qt.Tool, so Qt would treat a closed TyperDialog as the last window
+    # Pet windows are Qt.Tool, so Qt would treat a closed file dialog as the last window
     controller = ByteSpriteApp(
         app=qapp, storage=StorageManager(tmp_path / "s.json"), enable_tray=False
     )

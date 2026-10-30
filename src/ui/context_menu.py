@@ -65,7 +65,6 @@ QUICK_TOOL_ITEMS: tuple[tuple[str, str], ...] = (
     (f"Snip Region -> Copy Image	{HOTKEY_LABEL}+S", "snip:image"),
     (f"Snip Region -> Copy Text (OCR)	{HOTKEY_LABEL}+T", "snip:text"),
     (f"Pick Screen Color -> Copy HEX	{HOTKEY_LABEL}+C", "snip:color"),
-    ("Human Typer...", "typer:open"),
 )
 
 _STATE_LABELS: dict[PetState, tuple[str, str]] = {
@@ -140,10 +139,10 @@ class PetContextMenu(QMenu):
                     lambda _checked=False, c=cid: state_machine.execute_tool_action(c)
                 )
 
-        # Tools: screenshot/typing first (most used), then plugin submenus
+        # Tools: screenshot first (most used), then plugin submenus
         self.plugin_actions: dict[str, QAction] = {}
         self.plugin_submenus: dict[str, QMenu] = {}
-        self.quick_menu = style_menu(QMenu("Screenshot && Typing", self))
+        self.quick_menu = style_menu(QMenu("Screenshot", self))
         for label, cid in QUICK_TOOL_ITEMS:
             q_act = QAction(label, self.quick_menu)
             if on_tool_action is not None:

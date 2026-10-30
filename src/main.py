@@ -36,7 +36,7 @@ class ByteSpriteApp:
     ) -> None:
         self._app = app
         # Pet/overlay windows are Qt.Tool and don't count as "last window", so closing any
-        # dialog (Human Typer, file pickers) would quit the app; quitting goes via quit() only
+        # dialog (file pickers) would quit the app; quitting goes via quit() only
         self._app.setQuitOnLastWindowClosed(False)
         self._storage = storage or StorageManager()
         self._is_shut_down = False

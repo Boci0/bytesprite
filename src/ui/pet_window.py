@@ -37,7 +37,7 @@ from src.graphics.sprite_matrix import FrameMatrix, get_sprite_frames
 from src.tools.file_forge import ForgeMode, ForgeWheelOption, get_wheel_options_for_paths
 from src.ui.context_menu import PetContextMenu
 from src.ui.drop_wheel import RadialDropWheel
-from src.ui.quick_tools import HumanTyper, OcrJob, SnipSession, TyperDialog
+from src.ui.quick_tools import OcrJob, SnipSession
 from src.ui.theme import GLASS_RGBA, HAIRLINE_RGBA, HOVER_RGBA, TEXT_DIM_HEX, TEXT_HEX, qcolor, ui_font
 
 
@@ -273,8 +273,6 @@ class PetWindow(QWidget):
         self._click_timer.setInterval(QApplication.styleHints().mouseDoubleClickInterval())
         self._click_timer.timeout.connect(self.trigger_pet)
         self._ocr_jobs: list[OcrJob] = []
-        self._typer = HumanTyper(on_finished=self._on_typer_finished, parent=self)
-        self._typer_wpm: int = 65
 
         self._configure_window()
         self._sync_animation_to_pet_state(self._state_machine.state)
@@ -624,12 +622,8 @@ class PetWindow(QWidget):
         return []
 
     # ------------------------------------------------------------------
-    # Screen Snip / OCR / Color Pick / Human Typer
+    # Screen Snip / OCR / Color Pick
     # ------------------------------------------------------------------
-
-    @property
-    def typer(self) -> HumanTyper:
-        return self._typer
 
     def trigger_snip(self, mode: str) -> None:
         if self._snip_session is not None:
@@ -701,30 +695,9 @@ class PetWindow(QWidget):
             cb.setText(text)
         self._show_toast("TEXT OK", QColor("#38B764"))
 
-    def trigger_open_typer(self) -> None:
-        if self._typer.running:
-            self._typer.stop("STOPPED")
-            return
-        dialog = TyperDialog(self, wpm=self._typer_wpm)
-        try:
-            if dialog.exec() != TyperDialog.DialogCode.Accepted or not dialog.text:
-                return
-            self._typer_wpm = dialog.wpm
-            self._typer.start(dialog.text, dialog.wpm)
-            self._show_toast("CLICK..", QColor("#FFCD75"))
-        finally:
-            dialog.deleteLater()
-
-    def _on_typer_finished(self, reason: str) -> None:
-        if not self._is_shutting_down:
-            self._show_toast(reason, QColor("#38B764" if reason == "TYPED" else "#8A9AF2"))
-
     def trigger_tool_action(self, callback_id: str) -> None:
         if callback_id.startswith("snip:"):
             self.trigger_snip(callback_id.split(":", 1)[1])
-            return
-        if callback_id == "typer:open":
-            self.trigger_open_typer()
             return
         if callback_id == "forge:pick_files":
             selected, _flt = QFileDialog.getOpenFileNames(
@@ -1156,7 +1129,6 @@ class PetWindow(QWidget):
         self._anim_timer.stop()
         self._ambient_timer.stop()
         self._overlay_timer.stop()
-        self._typer.stop("STOPPED")
         if self._snip_session is not None:
             self._snip_session.close()
             self._snip_session = None
