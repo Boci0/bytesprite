@@ -102,7 +102,7 @@ class RadialDropWheel(QWidget):
     def __init__(
         self,
         *,
-        on_option_dropped: Callable[[list[Path], ForgeWheelOption], None],
+        on_option_dropped: Callable[[list[Path | str], ForgeWheelOption], None],
         on_cancelled: Callable[[], None] | None = None,
         always_on_top: bool = True,
         enable_watchdog: bool | None = None,
@@ -117,7 +117,8 @@ class RadialDropWheel(QWidget):
             enable_watchdog = os.environ.get("QT_QPA_PLATFORM", "").lower() != "offscreen"
         self._enable_watchdog = bool(enable_watchdog)
 
-        self._paths: list[Path] = []
+        # Kept as the caller gave them (often raw strings): building thousands of Paths stalls summon
+        self._paths: list[Path | str] = []
         self._options: list[ForgeWheelOption] = []
         self._hovered_index: int = -1
         self._ticks = TickSounds(self)
@@ -183,17 +184,20 @@ class RadialDropWheel(QWidget):
 
     def open_for_paths(
         self,
-        paths: Sequence[Path],
+        paths: Sequence[Path | str],
         options: Sequence[ForgeWheelOption],
         *,
         window_top_left: QPoint,
         initial_global_cursor: QPoint | None = None,
     ) -> None:
         """Precompute slice polygons, position wheel on screen, and show immediately."""
-        self._paths = [Path(p) for p in paths]
+        self._paths = list(paths)
         self._options = list(options)
         self._hovered_index = -1
         self._rebuild_geometry_cache()
+        # Audio device wakes during the open animation, before the first hover; deferred because
+        # resuming the stream blocks ~20ms and the wheel should appear first
+        self._ticks.wake(defer=True)
 
         self.move(window_top_left)
         if initial_global_cursor is not None:
@@ -223,6 +227,7 @@ class RadialDropWheel(QWidget):
         self._open_anim.stop()
         self._open_t = 1.0
         self._watchdog_timer.stop()
+        self._ticks.sleep()
         self._hovered_index = -1
         if self.isVisible():
             self.hide()
@@ -334,11 +339,12 @@ class RadialDropWheel(QWidget):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _extract_paths(mime) -> list[Path]:
+    def _extract_paths(mime) -> list[Path | str]:
         if mime is None or not mime.hasUrls():
             return []
-        # No exists() here: a stat per file stalls big drops, and File Forge filters missing paths
-        return [Path(u.toLocalFile()) for u in mime.urls() if u.isLocalFile() and u.toLocalFile()]
+        # Raw strings, no exists(): per-file Path/stat work stalls big drops, and File Forge
+        # converts and filters missing paths on its worker thread. Non-file URLs give "".
+        return [f for u in mime.urls() if (f := u.toLocalFile())]
 
     def dragEnterEvent(self, event: QDragEnterEvent | None) -> None:
         if event is None:
@@ -369,7 +375,8 @@ class RadialDropWheel(QWidget):
     def dropEvent(self, event: QDropEvent | None) -> None:
         if event is None:
             return
-        dropped_paths = self._extract_paths(event.mimeData()) or list(self._paths)
+        # Same drag that opened the wheel: reuse its paths instead of re-reading thousands of URLs
+        dropped_paths = list(self._paths) or self._extract_paths(event.mimeData())
         self._hovered_index = self.hit_test_option_index(event.position())
         chosen = self.selected_option()
         self.dismiss()
@@ -390,7 +397,7 @@ class RadialDropWheel(QWidget):
     def _header_preview_text(self) -> tuple[str, QColor]:
         if not self._paths:
             return ("Drop to convert", QColor(TEXT_DIM_HEX))
-        lead = self._paths[0].name
+        lead = os.path.basename(self._paths[0])
         if len(lead) > 18:
             lead = f"{lead[:15]}..."
         src_label = f"{len(self._paths)} items" if len(self._paths) > 1 else lead

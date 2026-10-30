@@ -86,6 +86,7 @@ _IMAGE_EXTS: frozenset[str] = frozenset(
         ".xpm",
     }
 )
+_IMAGE_SUFFIXES: tuple[str, ...] = tuple(_IMAGE_EXTS)  # str.endswith needs a tuple
 
 _COMPOUND_ARCHIVE_SUFFIXES: tuple[str, ...] = (
     ".tar.xz",
@@ -1231,17 +1232,18 @@ def write_sha256_manifest(
 
 def get_wheel_options_for_paths(paths: Sequence[Path | str]) -> list[ForgeWheelOption]:
     """Return context-tailored radial conversion and compression options for hovered paths."""
-    existing = [Path(p) for p in paths if str(p).strip()]
-    if not existing:
+    names = [str(p) for p in paths if str(p).strip()]
+    if not names:
         return [
             ForgeWheelOption(ForgeMode.ZIP, "ZIP", "FAST", "#38B764", ".zip"),
             ForgeWheelOption(ForgeMode.TAR_XZ, "TAR.XZ", "ULTRA", "#FFCD75", ".tar.xz"),
         ]
 
     # Single or batch images: offer all image conversions + archive compression
-    # shortcut: suffix-only (a folder named x.png would get image slices); is_dir per file stalls big drops
-    if all(p.suffix.lower() in _IMAGE_EXTS for p in existing):
-        lead_ext = existing[0].suffix.lower() if len(existing) == 1 else ""
+    # shortcut: suffix-only (a folder named x.png would get image slices); is_dir per file stalls big drops.
+    # Raw-string endswith: a Path parse or splitext per file adds up over thousands of files.
+    if all(n.lower().endswith(_IMAGE_SUFFIXES) for n in names):
+        lead_ext = os.path.splitext(names[0])[1].lower() if len(names) == 1 else ""
         return [
             ForgeWheelOption(
                 ForgeMode.WEBP,
@@ -1264,8 +1266,8 @@ def get_wheel_options_for_paths(paths: Sequence[Path | str]) -> list[ForgeWheelO
             ForgeWheelOption(ForgeMode.TAR_XZ, "TAR.XZ", "ULTRA XZ", "#EF7D57", ".tar.xz"),
         ]
 
-    if len(existing) == 1 and not existing[0].is_dir():
-        single = existing[0]
+    if len(names) == 1 and not Path(names[0]).is_dir():
+        single = Path(names[0])
         ext = single.suffix.lower()
 
         if _is_archive_path(single):
@@ -1581,8 +1583,10 @@ class FileForgePlugin:
         mode_override: ForgeMode | None = None,
     ) -> bool:
         """Enqueue files/directories onto the background worker thread."""
-        clean = [Path(p) for p in paths if str(p).strip()]
-        if not clean:
+        # Called on the GUI thread: Path conversion and blank filtering happen in process_paths_sync
+        # on the worker, since parsing thousands of paths here stalls the drop
+        clean = list(paths)
+        if not any(str(p).strip() for p in clean):
             return False
 
         with self._lock:
@@ -1604,7 +1608,7 @@ class FileForgePlugin:
         self._executor.submit(self._run_worker, clean, mode_snapshot)
         return True
 
-    def _run_worker(self, paths: list[Path], mode: ForgeMode) -> None:
+    def _run_worker(self, paths: list[Path | str], mode: ForgeMode) -> None:
         def _update_progress(pct: float) -> None:
             with self._lock:
                 clamped = max(0.0, min(100.0, float(pct)))

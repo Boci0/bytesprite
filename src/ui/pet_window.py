@@ -46,7 +46,7 @@ from src.tools.web_drop import WebImageJob, is_web_image_source, web_image_stem
 from src.ui.context_menu import PetContextMenu, style_menu
 from src.ui.drop_wheel import RadialDropWheel
 from src.ui.quick_tools import OcrJob, SnipSession
-from src.ui.sfx import preload_tick_sounds
+from src.ui.sfx import preload_tick_sounds, prewarm as prewarm_ticks
 from src.ui.tool_wheel import WEB_SHORTCUTS, ToolWheel, ToolWheelOption, google_search_url
 from src.ui.theme import GLASS_RGBA, HAIRLINE_RGBA, HOVER_RGBA, TEXT_DIM_HEX, TEXT_HEX, qcolor, ui_font
 
@@ -299,7 +299,8 @@ class PetWindow(QWidget):
         self._ocr_jobs: list[OcrJob] = []
         # Image dragged out of a browser (URL or raw image), fetched only once a slice is chosen
         self._pending_web_source: str | QImage | None = None
-        self._drag_paths: list[Path] = []  # cached at drag-enter; re-stat per move lags big drops
+        # Raw path strings cached at drag-enter: re-reading or parsing thousands per event lags big drops
+        self._drag_paths: list[str] = []
         self._web_jobs: list[WebImageJob] = []
         # Clean PNG from a web drop, deleted once File Forge converts it to the chosen format
         self._web_intermediate: Path | None = None
@@ -625,18 +626,20 @@ class PetWindow(QWidget):
 
     def _on_wheel_option_dropped(
         self,
-        paths: list[Path],
+        paths: list[Path | str],
         option: ForgeWheelOption,
     ) -> None:
         self._hovered = False
+        self._drag_paths = []
         self._dispatch_drop(paths, option.mode)
 
     def _on_wheel_cancelled(self) -> None:
         self._hovered = False
+        self._drag_paths = []
         self._pending_web_source = None
         self._show_toast("SKIPPED", QColor("#8A9AF2"))
 
-    def _dispatch_drop(self, paths: Sequence[Path], mode: ForgeMode | None) -> None:
+    def _dispatch_drop(self, paths: Sequence[Path | str], mode: ForgeMode | None) -> None:
         source, self._pending_web_source = self._pending_web_source, None
         if source is not None:
             self._start_web_fetch(source, mode or ForgeMode.PNG)
@@ -743,7 +746,7 @@ class PetWindow(QWidget):
 
     def _spawn_drop_wheel(
         self,
-        paths: list[Path],
+        paths: Sequence[Path | str],
         local_cursor: QPoint,
         options: Sequence[ForgeWheelOption] | None = None,
     ) -> None:
@@ -1095,6 +1098,7 @@ class PetWindow(QWidget):
             self._did_drag = False
             self._walk_steps_remaining = 0
             self._hold_timer.start()
+            prewarm_ticks()  # resume audio during the hold delay, not as the tool wheel appears
             event.accept()
             return
 
@@ -1185,17 +1189,22 @@ class PetWindow(QWidget):
         event.accept()
 
     @staticmethod
-    def _extract_drop_paths(mime) -> list[Path]:
+    def _local_drop_files(mime) -> list[str]:
         if mime is None or not mime.hasUrls():
             return []
-        # No exists() here: a stat per file stalls big drops, and File Forge filters missing paths
-        return [Path(u.toLocalFile()) for u in mime.urls() if u.isLocalFile() and u.toLocalFile()]
+        # Raw strings, no exists(): per-file Path/stat work stalls big drops, and File Forge
+        # converts and filters missing paths on its worker thread. Non-file URLs give "".
+        return [f for u in mime.urls() if (f := u.toLocalFile())]
 
     def dragEnterEvent(self, event: QDragEnterEvent | None) -> None:
         if event is None:
             return
+        if self._drop_wheel is not None and self._drop_wheel.isVisible():
+            # Cursor slid back off the wheel mid-drag: keep its paths and open animation as they are
+            event.acceptProposedAction()
+            return
         mime = event.mimeData()
-        paths = self._drag_paths = self._extract_drop_paths(mime)
+        paths = self._drag_paths = self._local_drop_files(mime)
         self._pending_web_source = None if paths else self._web_drop_source(mime)
         if paths or self._pending_web_source is not None:
             forge = self._state_machine.forge_plugin
@@ -1206,9 +1215,7 @@ class PetWindow(QWidget):
                 return
             self._hovered = True
             self._walk_steps_remaining = 0
-            if self._drop_wheel is not None and self._drop_wheel.isVisible():
-                pass  # cursor slid back off the wheel mid-drag; respawning restarts its open animation
-            elif paths:
+            if paths:
                 self._spawn_drop_wheel(paths, event.position().toPoint())
             else:
                 source = self._pending_web_source
@@ -1244,7 +1251,8 @@ class PetWindow(QWidget):
     def dropEvent(self, event: QDropEvent | None) -> None:
         if event is None:
             return
-        paths = self._extract_drop_paths(event.mimeData())
+        # Same drag as the enter: reuse its paths instead of re-reading thousands of URLs
+        paths, self._drag_paths = self._drag_paths or self._local_drop_files(event.mimeData()), []
         if self._drop_wheel is not None and self._drop_wheel.isVisible():
             chosen = self._drop_wheel.update_hover_from_global(
                 self.mapToGlobal(event.position().toPoint())

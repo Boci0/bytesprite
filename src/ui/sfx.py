@@ -1,98 +1,193 @@
-"""Tiny synthesized UI sounds (no audio assets): winsound on Windows, QSoundEffect elsewhere."""
+"""Tiny synthesized UI sounds (no audio assets) streamed through one shared QAudioSink."""
 
 from __future__ import annotations
 
-import io
 import math
 import os
 import struct
-import sys
-import tempfile
-import wave
 
-from PyQt6.QtCore import QCoreApplication, QObject, QUrl
+from PyQt6.QtCore import QCoreApplication, QIODevice, QObject, QTimer
 
-SAMPLE_RATE = 22050
-VOLUME = 0.25  # baked into the samples: winsound has no volume control
+SAMPLE_RATE = 48000
+VOLUME = 0.25
+SINK_BUFFER_BYTES = 4800  # ~50ms of mono Int16: tick latency vs underruns while Python is busy
+IDLE_SUSPEND_MS = 20_000  # keep the stream running this long after the last wheel closes
 # C major pentatonic from C5: sliding around the wheel plays a rising scale, never a clash
 _TICK_SEMITONES = (0, 2, 4, 7, 9, 12, 14, 16, 19, 21)
 
-# One app-wide bank built at startup: wheels are created lazily, and a QSoundEffect bank built
-# then is still loading during the first hovers
-_paths: list[str] = []
-_effects: list = []
+# Why one sink, kept running between wheels, suspended only after IDLE_SUSPEND_MS:
+# - Windows powers an idle output down, and waking it swallows the first ~100ms: a whole tick.
+# - Creating a sink costs ~1s; resume/suspend block the GUI thread ~20-60ms each, so doing them
+#   per summon stuttered the wheel. Back-to-back wheels now pay nothing.
+# - A running stream blocks PC sleep, so it still suspends once wheels go quiet.
+# (A worker-thread sink was tried: Qt's audio device handle is bound to the GUI thread's COM
+# apartment, and using it elsewhere stalled the GUI for seconds.)
+_bank: list[bytes] = []  # raw mono Int16 PCM per pitch, synthesized once at startup
+_sink = None
+_sink_device_id: bytes = b""
+_stream: _TickStream | None = None
+_idle_timer: QTimer | None = None
 _devices: object = None
+_awake: set[int] = set()  # ids of TickSounds whose wheel is open
 
 
 def _synth_tick(semitones: int) -> bytes:
     """Short glassy pluck with a tiny click at the start, pitched by slice."""
     freq = 523.25 * 2 ** (semitones / 12)
     n = int(SAMPLE_RATE * 0.12)
-    samples = []
+    out = bytearray()
     for i in range(n):
         t = i / SAMPLE_RATE
         env = min(1.0, t / 0.001) * math.exp(-t * 32.0)
         tone = math.sin(2 * math.pi * freq * t) + 0.4 * math.sin(4 * math.pi * freq * t)
         click = math.exp(-t * 600.0) * math.sin(2 * math.pi * 3000 * t)
-        samples.append(VOLUME * math.tanh(1.3 * (0.6 * env * tone + 0.35 * click)))
-    buf = io.BytesIO()
-    with wave.open(buf, "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(SAMPLE_RATE)
-        w.writeframes(b"".join(struct.pack("<h", int(s * 32767)) for s in samples))
-    return buf.getvalue()
+        out += struct.pack("<h", int(32767 * VOLUME * math.tanh(1.3 * (0.6 * env * tone + 0.35 * click))))
+    return bytes(out)
 
 
-def preload_tick_sounds() -> list[str]:
-    """Write the tick WAVs once (and load QSoundEffects off Windows); call at startup."""
-    global _devices
-    if _paths or os.environ.get("QT_QPA_PLATFORM", "").lower() == "offscreen":
-        return _paths
-    for semitones in _TICK_SEMITONES:
-        path = os.path.join(tempfile.gettempdir(), f"bytesprite_tick_v2_{semitones}.wav")
-        try:
-            with open(path, "wb") as f:
-                f.write(_synth_tick(semitones))
-        except OSError:
-            pass  # another running instance holds it; its identical copy still plays
-        _paths.append(path)
-    if sys.platform == "win32":
-        return _paths
-
-    from PyQt6.QtMultimedia import QMediaDevices, QSoundEffect
-
-    app = QCoreApplication.instance()
-    for path in _paths:
-        effect = QSoundEffect(app)
-        effect.setSource(QUrl.fromLocalFile(path))
-        _effects.append(effect)
-    # Effects stay bound to the device they first opened; follow speaker/headphone switches
-    _devices = QMediaDevices(app)
-    _devices.audioOutputsChanged.connect(  # type: ignore[attr-defined]
-        lambda: [e.setAudioDevice(QMediaDevices.defaultAudioOutput()) for e in _effects]
-    )
-    return _paths
-
-
-class TickSounds(QObject):
-    """Plays pitched ticks from the shared bank."""
+class _TickStream(QIODevice):
+    """Endless pull source: the current tick, then silence. A new tick replaces the old one."""
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
-        preload_tick_sounds()
+        self._pcm = b""
+        self._pos = 0
+        self.open(QIODevice.OpenModeFlag.ReadOnly)
+
+    def start_tick(self, pcm: bytes) -> None:
+        self._pcm, self._pos = pcm, 0
+
+    def readData(self, maxlen: int) -> bytes:  # type: ignore[override]
+        # Pulled on the GUI thread (measured), so start_tick() can never interleave with a read
+        maxlen -= maxlen % 2
+        chunk = self._pcm[self._pos : self._pos + maxlen]
+        self._pos += len(chunk)
+        return chunk + bytes(maxlen - len(chunk))
+
+    def writeData(self, _data) -> int:  # type: ignore[override]
+        return 0
+
+    def isSequential(self) -> bool:  # type: ignore[override]
+        return True
+
+    def bytesAvailable(self) -> int:  # type: ignore[override]
+        return SINK_BUFFER_BYTES + super().bytesAvailable()
+
+
+def _open_sink() -> None:
+    """(Re)open the shared stream on the current default output, suspended unless a wheel is open."""
+    global _sink, _sink_device_id, _stream
+    # Sound is optional: this runs from Qt slots, where an uncaught exception aborts the whole app
+    try:
+        from PyQt6.QtMultimedia import QAudioFormat, QAudioSink, QMediaDevices
+
+        device = QMediaDevices.defaultAudioOutput()
+        _sink_device_id = bytes(device.id())
+        if _sink is not None:
+            _sink.stop()
+            _sink.deleteLater()
+            _sink = None
+        app = QCoreApplication.instance()
+        if _stream is None:
+            _stream = _TickStream(app)
+        fmt = QAudioFormat()
+        fmt.setSampleRate(SAMPLE_RATE)
+        fmt.setChannelCount(1)
+        fmt.setSampleFormat(QAudioFormat.SampleFormat.Int16)
+        _sink = QAudioSink(device, fmt, app)
+        _sink.setBufferSize(SINK_BUFFER_BYTES)
+        _sink.start(_stream)
+        if not _awake:
+            _sink.suspend()
+    except Exception:
+        _sink = None
+
+
+def _on_outputs_changed() -> None:
+    # Windows fires this for property churn too, including our own stream starting. Reopening on
+    # every one killed the stream for seconds at a time and blocked the GUI: only follow real
+    # default-device switches.
+    try:
+        from PyQt6.QtMultimedia import QMediaDevices
+
+        if bytes(QMediaDevices.defaultAudioOutput().id()) != _sink_device_id:
+            _open_sink()
+    except Exception:
+        pass
+
+
+def _resume() -> None:
+    if _idle_timer is not None:
+        _idle_timer.stop()
+    if _sink is not None:
+        from PyQt6.QtMultimedia import QAudio
+
+        if _sink.state() == QAudio.State.SuspendedState:
+            _sink.resume()
+
+
+def _suspend_if_idle() -> None:
+    if _awake:
+        return
+    from PyQt6.QtMultimedia import QAudio
+
+    if _sink is None or _sink.state() == QAudio.State.StoppedState:
+        # A failed or errored open would mean silent wheels until a device switch; retry while
+        # idle, where the ~1s open cannot stall a wheel
+        _open_sink()
+    elif _stream is not None:
+        _stream.start_tick(b"")
+        _sink.suspend()
+
+
+def preload_tick_sounds() -> list[bytes]:
+    """Synthesize the tick bank and open the suspended stream once; call at startup."""
+    global _devices, _idle_timer
+    if _bank or os.environ.get("QT_QPA_PLATFORM", "").lower() == "offscreen":
+        return _bank
+    _bank.extend(_synth_tick(s) for s in _TICK_SEMITONES)
+    app = QCoreApplication.instance()
+    _idle_timer = QTimer(app)
+    _idle_timer.setSingleShot(True)
+    _idle_timer.setInterval(IDLE_SUSPEND_MS)
+    _idle_timer.timeout.connect(_suspend_if_idle)
+    _open_sink()
+    try:
+        from PyQt6.QtMultimedia import QMediaDevices
+
+        # A sink stays bound to the device it opened on; follow speaker/headphone switches
+        _devices = QMediaDevices(app)
+        _devices.audioOutputsChanged.connect(_on_outputs_changed)  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    return _bank
+
+
+def prewarm() -> None:
+    """Resume the stream ahead of a wheel (e.g. on mouse press) without marking one open."""
+    _resume()
+    if not _awake and _idle_timer is not None:
+        _idle_timer.start()  # nothing opened after all: still suspend once quiet
+
+
+class TickSounds(QObject):
+    """Pitched hover ticks for one wheel. wake() when it opens, sleep() when it closes."""
+
+    def wake(self, *, defer: bool = False) -> None:
+        """defer=True resumes on the next event-loop turn so the wheel's first frame is not held up."""
+        _awake.add(id(self))
+        if defer:
+            QTimer.singleShot(0, lambda: _awake and _resume())  # skip if closed again meanwhile
+        else:
+            _resume()
+
+    def sleep(self) -> None:
+        # Shared sink: a hidden wheel's dismiss must not affect the wheel that is still open
+        _awake.discard(id(self))
+        if not _awake and _idle_timer is not None:
+            _idle_timer.start()
 
     def play(self, index: int) -> None:
-        if not _paths:
-            return
-        i = index % len(_paths)
-        if sys.platform == "win32":
-            import winsound
-
-            # Qt's FFmpeg QSoundEffect reported playing yet stayed silent on Windows; winmm is
-            # always on the default output. A new tick cuts the previous one, which suits ticks.
-            winsound.PlaySound(
-                _paths[i], winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT
-            )
-        elif _effects:
-            _effects[i].play()
+        # No wake() here: a stray hover on a hidden wheel would keep the stream (and PC) awake
+        if _stream is not None and _bank:
+            _stream.start_tick(_bank[index % len(_bank)])
