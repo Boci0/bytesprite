@@ -8,6 +8,7 @@ dynamic = ["version"]
 description = "Frosted paperclip desktop companion for Windows with Pear Music lyrics and dev tools"
 readme = "README.md"
 requires-python = ">=3.11"
+license = "MIT"
 dependencies = [
     "PyQt6>=6.6.0",
 ]

@@ -89,3 +89,7 @@ python -m venv .venv
 
 Installed copies pick the release up through **Check for Updates**. The updater replaces `src/` only;
 when `requirements.txt` changes, say in the release notes to re-run `install.ps1`.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
