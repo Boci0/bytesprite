@@ -112,3 +112,27 @@ def test_pear_cached_lyrics_uses_newest_id_for_title(monkeypatch, tmp_path) -> N
     assert lyrics.pear_cached_lyrics("Unknown") == []
     monkeypatch.setattr(lyrics, "_PEAR_DIR", tmp_path / "missing")
     assert lyrics.pear_cached_lyrics("A") == []
+
+
+def test_late_pear_cache_is_picked_up_without_waiting_for_retry(monkeypatch, tmp_path) -> None:
+    import src.tools.lyrics as lyrics
+
+    (tmp_path / "lyrics_cache").mkdir()
+    (tmp_path / "peerm_debug.log").write_text(
+        '[1] [player] === playSong START === token=1 song="Song" id=stream_x source=stream\n', encoding="utf-8")
+    monkeypatch.setattr(lyrics, "_PEAR_DIR", tmp_path)
+    monkeypatch.setattr(lyrics, "fetch_synced_lyrics", lambda *_a: [])  # LRCLIB has nothing
+    monkeypatch.setattr(lyrics.threading, "Thread", lambda target, args, daemon: type("T", (), {"start": lambda self: target(*args)})())
+    plugin = LyricsPlugin()
+    plugin.load_dict({"enabled": True})
+    plugin._reader = _FakeReader(_playing(1500))  # type: ignore[assignment]
+    plugin.tick()
+    assert plugin.line == "" and plugin.loading
+
+    # Pear writes its .lrc seconds later; the next 1s poll finds it, long before the 8s LRCLIB retry
+    (tmp_path / "lyrics_cache" / "stream_x.lrc").write_text("[00:01.00]late line\n[00:03.00]next", encoding="utf-8")
+    plugin._pear_check_at = 0.0
+    plugin._reader.snap = _playing(2000)  # type: ignore[attr-defined]
+    plugin.tick()
+    assert plugin.line == "late line" and not plugin.loading
+    assert 0.4 < plugin.line_progress() < 0.7  # 2000ms into a 1000..3000ms line

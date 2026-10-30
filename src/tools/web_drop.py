@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import html
 import http.client
 import re
 import sys
@@ -47,6 +48,18 @@ def sniff_image_format(head: bytes) -> str | None:
 def is_web_image_source(url: str) -> bool:
     scheme = urllib.parse.urlsplit(url).scheme.lower()
     return scheme in WEB_SCHEMES or url.lower().startswith("data:image/")
+
+
+_IMG_SRC = re.compile(r"""<img\b[^>]*?\bsrc\s*=\s*["']([^"']+)["']""", re.IGNORECASE)
+
+
+def html_image_src(markup: str) -> str | None:
+    """The first http(s)/data: <img src> in a browser drag's HTML (the picture, not the link around it)."""
+    for src in _IMG_SRC.findall(markup or ""):
+        url = html.unescape(src).strip()
+        if is_web_image_source(url):
+            return url
+    return None
 
 
 def web_image_stem(url: str) -> str:

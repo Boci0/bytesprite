@@ -17,6 +17,7 @@ from src.graphics.animation_controller import AnimationController
 from src.storage.storage_manager import StorageManager
 from src.ui.pet_window import PetWindow, build_app_icon
 from src.ui.quick_tools import GlobalHotkeys
+from src.updater import is_installed
 
 # Stored beside plugin state in state.json "tools"; not a ToolPlugin, so it never joins the HUD cycle
 RECENT_FILES_KEY = "recent"
@@ -110,6 +111,9 @@ class ByteSpriteApp:
             self.hotkeys = GlobalHotkeys()
             self.hotkeys.triggered.connect(self.window.trigger_snip)
             self.hotkeys.start()
+            if is_installed():
+                # One quiet check per launch; installing waits for Settings > Check for Updates
+                QTimer.singleShot(20_000, lambda: self.window.check_for_updates(install=False))
 
         self._app.aboutToQuit.connect(self.shutdown)
         self._app.commitDataRequest.connect(lambda _mgr: self.save_state())

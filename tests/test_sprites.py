@@ -6,6 +6,7 @@ import pytest
 
 from src.graphics.animation_controller import AnimationClip, AnimationController
 from src.graphics.sprite_matrix import (
+    ALL_ANIMATIONS,
     REQUIRED_ANIMATIONS,
     flip_frame_horizontal,
     get_sprite_frames,
@@ -14,7 +15,7 @@ from src.graphics.sprite_matrix import (
 
 class TestSpriteMatrix:
     @pytest.mark.parametrize("size", [16, 32])
-    @pytest.mark.parametrize("state", ["idle", "blink", "walk", "sleep", "focus", "spin", "hungry", "eating"])
+    @pytest.mark.parametrize("state", ALL_ANIMATIONS)
     def test_frame_dimensions_and_rgba_validity(self, size: int, state: str) -> None:
         frames = get_sprite_frames(state, size=size)
         assert len(frames) >= 2, f"{state} ({size}x{size}) must have at least 2 animation frames"
@@ -40,9 +41,9 @@ class TestSpriteMatrix:
             assert frame[0][size - 1][3] == 0
             assert visible_count > (size * size) // 10
 
-    @pytest.mark.parametrize("state", ["idle", "blink", "walk", "sleep", "focus", "spin"])
+    @pytest.mark.parametrize("state", ALL_ANIMATIONS)
     def test_consecutive_frames_animate_distinct_pixels(self, state: str) -> None:
-        assert state in REQUIRED_ANIMATIONS
+        assert set(REQUIRED_ANIMATIONS) <= set(ALL_ANIMATIONS)
         frames = get_sprite_frames(state, size=32)
         assert any(frames[i] != frames[0] for i in range(1, len(frames)))
 

@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import QLabel, QMenu, QWidget, QWidgetAction
 from src.engine.models import PetState
 from src.engine.pet_state import PetStateMachine
 from src.storage.recent_files import format_age
+from src import __version__
 from src.storage.storage_manager import autostart_enabled, set_autostart
 from src.ui.quick_tools import HOTKEY_LABEL
 from src.ui.theme import (
@@ -277,6 +278,11 @@ class PetContextMenu(QMenu):
             lambda _checked=False: on_reset_position()
         )
         self.settings_menu.addAction(self.reset_position_action)
+
+        if on_tool_action is not None:
+            update_action = QAction(f"Check for Updates (v{__version__})", self.settings_menu)
+            update_action.triggered.connect(lambda _checked=False: on_tool_action("update:check"))
+            self.settings_menu.addAction(update_action)
         self.addMenu(self.settings_menu)
 
         sleep_label = (

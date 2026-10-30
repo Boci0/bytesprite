@@ -4,13 +4,17 @@ build-backend = "hatchling.build"
 
 [project]
 name = "bytesprite"
-version = "0.1.0"
-description = "Lightweight frameless transparent pixel-art desktop pet for Windows"
+dynamic = ["version"]
+description = "Frosted paperclip desktop companion for Windows with Pear Music lyrics and dev tools"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "PyQt6>=6.6.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Boci0/bytesprite"
+Issues = "https://github.com/Boci0/bytesprite/issues"
 
 [project.optional-dependencies]
 dev = [
@@ -22,6 +26,9 @@ bytesprite = "src.main:main"
 
 [project.gui-scripts]
 bytesprite-gui = "src.main:main"
+
+[tool.hatch.version]
+path = "src/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src"]

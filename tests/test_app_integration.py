@@ -76,6 +76,30 @@ class TestByteSpriteAppIntegration:
         saved = storage.load()
         assert saved.active_tool == "pomodoro"
 
+    def test_song_switches_to_music_clip_and_focus_done_cheers(
+        self, qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from src.engine.pet_state import PetStateMachine
+
+        # Pin IDLE: live CPU above 90% would otherwise put the pet in ALERT
+        monkeypatch.setattr(PetStateMachine, "state", property(lambda _self: PetState.IDLE))
+        controller = ByteSpriteApp(app=qapp, storage=StorageManager(tmp_path / "s.json"), enable_tray=False)
+        window, sm = controller.window, controller.state_machine
+        lyrics = sm.registry.get_plugin("lyrics")
+        lyrics._enabled, lyrics._playing = True, True  # skip the PowerShell reader
+        window._handle_stats_change(sm.stats)
+        assert window._anim.base_state == "music"
+
+        lyrics._playing = False
+        window._handle_stats_change(sm.stats)
+        assert window._anim.base_state == "idle"
+
+        sm.registry.get_plugin("pomodoro")._notice = ("FOCUS DONE", "#73EFF7")
+        window._handle_stats_change(sm.stats)
+        assert window._anim.active_clip_name == "cheer"
+        lyrics._enabled = False
+        controller.quit()
+
     def test_requirements_txt_is_valid_utf8_without_utf16_bom(self) -> None:
         req_path = Path(__file__).resolve().parents[1] / "requirements.txt"
         raw = req_path.read_bytes()

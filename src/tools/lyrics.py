@@ -22,7 +22,7 @@ _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 _LRC_TIME = re.compile(r"\[(\d+):(\d+(?:\.\d+)?)\]")
 _LRC_WORD = re.compile(r"<\d+:\d+(?:\.\d+)?>")  # per-word timing in Pear's cache
 _LRCLIB = "https://lrclib.net/api/"
-_USER_AGENT = "ByteSprite/0.8.0"
+_USER_AGENT = "ByteSprite/0.9"
 _MAX_BYTES = 512 * 1024
 _MAX_LINE_CHARS = 90
 _MAX_RETRIES = 3
@@ -31,6 +31,9 @@ _PEAR_DIR = Path(os.environ.get("APPDATA", "")) / "com.peerm" / "peerm_app"
 _PEAR_PLAY = re.compile(r'playSong START === .*? song="(.*)" id=(\S+) ')
 _PEAR_LOG_TAIL = 256 * 1024
 _RETRY_S = 8.0
+# Pear writes <id>.lrc 10..65s after a song starts, so its cache is re-checked this often until it lands
+_PEAR_POLL_S = 1.0
+_LOADING_MAX_S = 45.0  # stop the "looking up" dots after this; most songs that have lyrics are found by then
 
 # One long-lived PowerShell prints a JSON line every 300ms; spawning it per poll would cost far more.
 # Prefers Pear Music (peerm_app.exe) and falls back to whatever Windows treats as the current session.
@@ -89,16 +92,34 @@ def line_at(lines: list[tuple[int, str]], position_ms: float) -> str:
     return lines[idx][1] if idx >= 0 else ""
 
 
-def pear_cached_lyrics(title: str) -> list[tuple[int, str]]:
-    """Synced lyrics Pear Music already found for `title` (any of its providers); [] when not cached."""
+def line_span(lines: list[tuple[int, str]], position_ms: float) -> tuple[float, float]:
+    """(start, end) ms of the line active at `position_ms`; end is the next line's start."""
+    idx = bisect.bisect_right(lines, position_ms, key=lambda pair: pair[0]) - 1
+    if idx < 0:
+        return 0.0, 0.0
+    start = float(lines[idx][0])
+    return start, float(lines[idx + 1][0]) if idx + 1 < len(lines) else start + 4000.0
+
+
+def pear_lyrics_path(title: str) -> Path | None:
+    """Where Pear Music caches (or will cache) the lyrics for `title`; None if the log never played it."""
     try:
         with open(_PEAR_DIR / "peerm_debug.log", "rb") as log:
             log.seek(max(0, log.seek(0, os.SEEK_END) - _PEAR_LOG_TAIL))
             tail = log.read().decode("utf-8", "replace")
-        ids = [song_id for song, song_id in _PEAR_PLAY.findall(tail) if song == title]
-        if not ids:
-            return []
-        return parse_lrc((_PEAR_DIR / "lyrics_cache" / f"{ids[-1]}.lrc").read_text("utf-8", "replace"))
+    except OSError:
+        return None
+    ids = [song_id for song, song_id in _PEAR_PLAY.findall(tail) if song == title]
+    return _PEAR_DIR / "lyrics_cache" / f"{ids[-1]}.lrc" if ids else None
+
+
+def pear_cached_lyrics(title: str) -> list[tuple[int, str]]:
+    """Synced lyrics Pear Music already found for `title` (any of its providers); [] when not cached."""
+    path = pear_lyrics_path(title)
+    if path is None:
+        return []
+    try:
+        return parse_lrc(path.read_text("utf-8", "replace"))
     except (OSError, ValueError):
         return []
 
@@ -219,6 +240,12 @@ class LyricsPlugin:
         self._cache: dict[tuple[str, str], list[tuple[int, str]]] = {}
         self._retries = 0
         self._retry_at = 0.0
+        self._track_started = 0.0
+        self._pear_path: Path | None = None
+        self._pear_check_at = 0.0
+        self._span = (0.0, 0.0)
+        self._pos_anchor = (0.0, 0.0)  # (position ms, time.time() ms) for extrapolating between ticks
+        self._was_loading = False
 
     @property
     def tool_id(self) -> str:
@@ -242,6 +269,25 @@ class LyricsPlugin:
         return self._enabled
 
     @property
+    def playing(self) -> bool:
+        """A track is playing in an SMTC player (only known while the tool is on)."""
+        return self._enabled and self._playing
+
+    @property
+    def loading(self) -> bool:
+        """Playing, but no lyrics yet and still worth waiting for (drives the bubble's waiting dots)."""
+        return (self.playing and not self._lines
+                and time.monotonic() - self._track_started < _LOADING_MAX_S)
+
+    def line_progress(self) -> float:
+        """0..1 through the current line, extrapolated to now so the karaoke sweep stays smooth."""
+        start, end = self._span
+        if not self.line or end <= start:
+            return 0.0
+        pos = self._pos_anchor[0] + time.time() * 1000 - self._pos_anchor[1]
+        return max(0.0, min(1.0, (pos - start) / (end - start)))
+
+    @property
     def line(self) -> str:
         """Current lyric line to display; '' when off, paused, unsynced or between lines."""
         return self._line if self._enabled and self._playing else ""
@@ -260,7 +306,8 @@ class LyricsPlugin:
                 self._cache.pop(next(iter(self._cache)))
             if lines:  # a miss may be a network blip, so only hits are cached
                 self._cache[track] = lines
-        if track == self._track:  # ignore a lookup the user already skipped past
+        # Ignore a lookup the user already skipped past, and never let a late miss wipe Pear's hit
+        if track == self._track and not self._lines:
             self._retry_at = time.monotonic() + _RETRY_S
             self._lines = lines
 
@@ -283,10 +330,15 @@ class LyricsPlugin:
         snap = self._reader.latest()
         track = (str(snap.get("title") or ""), str(snap.get("artist") or ""))
         playing = snap.get("status") == "Playing" and bool(track[0])
+        now = time.monotonic()
         if track != self._track:
             self._track, self._lines, self._retries = track, None, 0
+            self._track_started, self._pear_path, self._pear_check_at = now, None, now + _PEAR_POLL_S
             if track[0]:
                 self._start_fetch(track, snap)
+        elif not self._lines and track[0] and now >= self._pear_check_at:
+            self._pear_check_at = now + _PEAR_POLL_S
+            self._poll_pear_cache(track)
         elif self._lines == [] and track[0] and self._retries < _MAX_RETRIES and time.monotonic() >= self._retry_at:
             # A miss is often transient: LRCLIB timed out, or SMTC still held the previous song's duration
             self._lines, self._retries = None, self._retries + 1
@@ -299,9 +351,28 @@ class LyricsPlugin:
             except (KeyError, TypeError, ValueError):
                 playing = False
         line = line_at(self._lines, position)[:_MAX_LINE_CHARS] if playing and self._lines else ""
-        changed = line != self._line or playing != self._playing
-        self._line, self._playing, self._position_ms = line, playing, position
+        if line:
+            self._span = line_span(self._lines or [], position)
+            self._pos_anchor = (position, time.time() * 1000)
+        loading = self.loading
+        changed = line != self._line or playing != self._playing or loading != self._was_loading
+        self._line, self._playing, self._position_ms, self._was_loading = line, playing, position, loading
         return changed
+
+    def _poll_pear_cache(self, track: tuple[str, str]) -> None:
+        if self._pear_path is None:
+            if time.monotonic() - self._track_started > 10:
+                return  # Pear logs a song at its start; later on this is another player
+            self._pear_path = pear_lyrics_path(track[0])
+        if self._pear_path is None or not self._pear_path.is_file():
+            return
+        try:
+            lines = parse_lrc(self._pear_path.read_text("utf-8", "replace"))
+        except OSError:
+            return
+        if lines:
+            self._lines = lines
+            self._cache[track] = lines
 
     def desired_state(self) -> CompanionState | None:
         return None

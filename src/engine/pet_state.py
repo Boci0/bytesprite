@@ -103,6 +103,16 @@ class PetStateMachine:
         plugin = self._registry.get_plugin("lyrics")
         return plugin.line if isinstance(plugin, LyricsPlugin) else ""
 
+    @property
+    def lyrics_plugin(self) -> LyricsPlugin | None:
+        plugin = self._registry.get_plugin("lyrics")
+        return plugin if isinstance(plugin, LyricsPlugin) else None
+
+    @property
+    def music_playing(self) -> bool:
+        plugin = self._registry.get_plugin("lyrics")
+        return isinstance(plugin, LyricsPlugin) and plugin.playing
+
     def on_state_change(self, callback: StateChangeCallback) -> Callable[[], None]:
         """Register a listener for state transitions; returns an unsubscribe callable."""
         self._state_callbacks.append(callback)

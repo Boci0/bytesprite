@@ -25,6 +25,9 @@ ALL_ANIMATIONS: tuple[str, ...] = (
     "spin",
     "hungry",
     "eating",
+    "music",
+    "cheer",
+    "yawn",
 )
 
 # Frosted-glass neutral palette: low-saturation translucent greys that read on light and dark
@@ -322,6 +325,32 @@ def _build_32_animations() -> dict[str, list[FrameMatrix]]:
         frame(eyes="happy", mouth="munch_open", blush=True),
         frame(dy=1, eyes="happy", mouth="smile", blush=True, extras=((24, 6, sparkle_glyph),)),
     ]
+    # 9. MUSIC (song playing: side-to-side groove, notes drifting up)
+    note = ["  OOO", "  OWWO", "  OWOO", "OOOWO ", "OWWWO ", "OWWO  ", " OO   "]
+    animations["music"] = [
+        frame(dx=-1, dy=0, eyes="happy", extras=((24, 8, note),)),
+        frame(dx=0, dy=1, eyes="happy", shadow=9, extras=((25, 5, note), (1, 11, note))),
+        frame(dx=1, dy=0, eyes="happy", extras=((2, 8, note),)),
+        frame(dx=0, dy=1, eyes="happy", shadow=9, extras=((1, 5, note), (24, 11, note))),
+    ]
+    # 10. CHEER (Pomodoro done: crouch, big hop, sparkles on landing)
+    animations["cheer"] = [
+        frame(dy=2, eyes="closed", mouth="flat", shadow=9),
+        frame(dy=-2, eyes="happy", mouth="open_happy", shadow=6, blush=True),
+        frame(dy=-3, eyes="happy", mouth="open_happy", shadow=5, blush=True,
+              extras=((3, 5, sparkle_glyph), (26, 3, sparkle_glyph))),
+        frame(dy=-2, eyes="happy", mouth="open_happy", shadow=6, blush=True,
+              extras=((2, 3, sparkle_glyph), (27, 6, sparkle_glyph))),
+        frame(dy=1, eyes="happy", mouth="smile", shadow=9, blush=True),
+        frame(dy=0, eyes="happy", mouth="smile", blush=True, extras=((4, 8, sparkle_glyph),)),
+    ]
+    # 11. YAWN (ambient idle variety)
+    animations["yawn"] = [
+        frame(eyes="half", mouth="flat"),
+        frame(dy=-1, eyes="closed", mouth="munch_open", shadow=7),
+        frame(dy=-1, eyes="closed", mouth="munch_open", shadow=7),
+        frame(eyes="half", mouth="flat"),
+    ]
     return animations
 
 
@@ -358,6 +387,11 @@ def _build_16_base(
         _put(g, 14, 2, "C")
     elif extra == "sweat":
         _put(g, 13, 5, "T")
+    elif extra in ("note", "note_l"):
+        nx = 13 if extra == "note" else 1
+        _put(g, nx + 1, 1, "A")
+        _put(g, nx + 1, 2, "A")
+        _put(g, nx, 3, "A")
     # Ensure top corners remain strictly transparent
     _put(g, 0, 0, ".")
     _put(g, 15, 0, ".")
@@ -389,6 +423,12 @@ def _build_16_animations() -> dict[str, list[FrameMatrix]]:
         ],
         "hungry": [_build_16_base(dy=1, extra="sweat"), _build_16_base(dy=1, eyes="closed", extra="sweat")],
         "eating": [_build_16_base(eyes="happy"), _build_16_base(dy=1, eyes="happy")],
+        "music": [_build_16_base(eyes="happy", extra="note"), _build_16_base(dy=1, eyes="happy", extra="note_l")],
+        "cheer": [
+            _build_16_base(dy=1, eyes="closed"), _build_16_base(dy=-2, eyes="happy", extra="spark"),
+            _build_16_base(dy=-1, eyes="happy", extra="spark"), _build_16_base(eyes="happy"),
+        ],
+        "yawn": [_build_16_base(eyes="closed"), _build_16_base(dy=-1, eyes="closed"), _build_16_base()],
     }
 
 

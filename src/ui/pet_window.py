@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import ctypes
+import math
 import os
 import random
 import struct
 import subprocess
 import sys
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from PyQt6.QtCore import QDateTime, QPoint, QRect, QRectF, QStandardPaths, Qt, QTimer, QUrl
+from PyQt6.QtCore import QDateTime, QPoint, QProcess, QRect, QRectF, QStandardPaths, Qt, QTimer, QUrl
 from PyQt6.QtGui import (
+    QBrush,
+    QLinearGradient,
     QCloseEvent,
     QColor,
     QContextMenuEvent,
@@ -42,12 +46,13 @@ from src.graphics.animation_controller import AnimationController
 from src.graphics.sprite_matrix import FrameMatrix, get_sprite_frames
 from src.tools.file_forge import ForgeMode, ForgeWheelOption, get_wheel_options_for_paths
 from src.storage.recent_files import RecentFiles
-from src.tools.web_drop import WebImageJob, is_web_image_source, web_image_stem
+from src.tools.web_drop import WebImageJob, html_image_src, is_web_image_source, web_image_stem
 from src.ui.context_menu import PetContextMenu, style_menu
 from src.ui.drop_wheel import RadialDropWheel
-from src.ui.quick_tools import OcrJob, SnipSession
+from src.ui.quick_tools import OcrJob, SnipSession, open_folder_in_background
 from src.ui.sfx import preload_tick_sounds, prewarm as prewarm_ticks
 from src.ui.tool_wheel import WEB_SHORTCUTS, ToolWheel, ToolWheelOption, google_search_url
+from src.updater import APP_DIR, RELEASES_URL, UpdateJob, is_installed
 from src.ui.theme import GLASS_RGBA, HAIRLINE_RGBA, HOVER_RGBA, TEXT_DIM_HEX, TEXT_HEX, qcolor, ui_font
 
 
@@ -277,6 +282,14 @@ class PetWindow(QWidget):
         self._toast_max_steps: int = 12
         # Synced lyric shown in a speech bubble above the sprite (Lyrics tool)
         self._lyric_line: str = ""
+        # Line-change morph: the old line drifts up and out while the bubble resizes to the new one
+        self._lyric_prev: str = ""
+        self._lyric_changed_ms: float = 0.0
+        self._lyric_prev_size: tuple[float, float] = (0.0, 0.0)
+        self._lyric_size: tuple[float, float] = (0.0, 0.0)
+        self._lyric_timer = QTimer(self)
+        self._lyric_timer.setInterval(40)  # 25fps, only while a bubble is on screen
+        self._lyric_timer.timeout.connect(self._on_lyric_frame)
 
         # Gentle autonomous walk steps
         self._walk_dx: int = 0
@@ -302,6 +315,7 @@ class PetWindow(QWidget):
         # Raw path strings cached at drag-enter: re-reading or parsing thousands per event lags big drops
         self._drag_paths: list[str] = []
         self._web_jobs: list[WebImageJob] = []
+        self._update_jobs: list[UpdateJob] = []
         # Clean PNG from a web drop, deleted once File Forge converts it to the chosen format
         self._web_intermediate: Path | None = None
         self.recent = RecentFiles()
@@ -442,15 +456,18 @@ class PetWindow(QWidget):
     # Simulation & Animation Synchronization
     # ------------------------------------------------------------------
 
-    def _sync_animation_to_pet_state(self, state: PetState) -> None:
+    def _base_clip(self, state: PetState) -> str:
         mapping = {
             PetState.IDLE: "idle",
             PetState.SLEEPING: "sleep",
             PetState.PLAYING: "focus",
             PetState.HUNGRY: "hungry",
         }
-        target_clip = mapping.get(state, "idle")
-        self._anim.set_state(target_clip)
+        clip = mapping.get(state, "idle")
+        return "music" if clip == "idle" and self._state_machine.music_playing else clip
+
+    def _sync_animation_to_pet_state(self, state: PetState) -> None:
+        self._anim.set_state(self._base_clip(state))
 
     def _handle_state_change(
         self, _old_state: PetState, new_state: PetState, _stats: PetStats
@@ -465,12 +482,24 @@ class PetWindow(QWidget):
         self._collect_forge_outputs()
         lyric = self._state_machine.lyric_line
         if lyric != self._lyric_line:
-            self._lyric_line = lyric
+            self._lyric_prev, self._lyric_line = self._lyric_line, lyric
+            self._lyric_changed_ms = time.monotonic() * 1000
+            self._lyric_prev_size = self._lyric_size
+            self.update()
+        if (lyric or self._lyric_waiting()) and not self._lyric_timer.isActive():
+            self._lyric_timer.start()
+        clip = self._base_clip(self._state_machine.state)
+        if self._walk_steps_remaining == 0 and self._anim.base_state != clip:
+            self._anim.set_state(clip)  # a song started or stopped
+            self._schedule_next_anim_tick()
             self.update()
         notifications = self._state_machine.pop_notifications()
         if notifications:
             toast_text, color_hex = notifications[-1]
-            if self._state_machine.state == PetState.IDLE:
+            if toast_text == "FOCUS DONE":
+                self._anim.play_oneshot("cheer")
+                self._schedule_next_anim_tick()
+            elif self._state_machine.state == PetState.IDLE:
                 self._anim.play_oneshot("spin")
                 self._schedule_next_anim_tick()
             self._show_toast(toast_text, QColor(color_hex or "#38B764"))
@@ -500,7 +529,11 @@ class PetWindow(QWidget):
             return
 
         roll = random.random()
-        if roll < 0.48:
+        if roll < 0.08 and self._anim.base_state == "idle":  # no yawning mid-song
+            self._anim.play_oneshot("yawn")
+            self._schedule_next_anim_tick()
+            self.update()
+        elif roll < 0.48:
             # Subtle blink
             self._anim.play_oneshot("blink")
             self._schedule_next_anim_tick()
@@ -536,7 +569,7 @@ class PetWindow(QWidget):
             if self.pos() == before or self._walk_steps_remaining == 0:
                 self._walk_steps_remaining = 0
                 if self._state_machine.state == PetState.IDLE:
-                    self._anim.set_state("idle")
+                    self._anim.set_state(self._base_clip(PetState.IDLE))
                     self._schedule_next_anim_tick()
             needs_repaint = True
 
@@ -648,9 +681,13 @@ class PetWindow(QWidget):
 
     @staticmethod
     def _web_drop_source(mime) -> str | QImage | None:
-        """First http(s)/data: image URL in a browser drag, else its raw image data."""
+        """The dragged <img>'s URL, else raw image data, else the first http(s)/data: URL."""
         if mime is None:
             return None
+        # A linked image (YouTube avatars, thumbnails) drags the page URL first; the <img> is the picture
+        src = html_image_src(mime.html()) if mime.hasHtml() else None
+        if src is not None:
+            return src
         if mime.hasUrls():
             for url in mime.urls():
                 text = url.toString()
@@ -675,6 +712,37 @@ class PetWindow(QWidget):
                 continue
         return Path.home() / ".bytesprite" / "drops"
 
+    def check_for_updates(self, *, install: bool = True) -> None:
+        """Ask GitHub for a newer release; `install` also applies it (installed copies only)."""
+        job = UpdateJob()
+        job.finished.connect(lambda status, tag, j=job, i=install: self._on_update_done(j, status, tag, i))
+        self._update_jobs.append(job)
+        job.start(install=install)
+        if install:
+            self._show_toast("CHECKING", QColor("#8A9AF2"))
+
+    def _on_update_done(self, job: UpdateJob, status: str, tag: str, install: bool) -> None:
+        if job in self._update_jobs:
+            self._update_jobs.remove(job)
+        if status == "installed":
+            self._show_toast("UPDATED", QColor("#38B764"))
+            if self._on_notification is not None:
+                self._on_notification(f"Updated to {tag}, restarting")
+            QTimer.singleShot(1500, self.restart)
+        elif status == "available":
+            self._show_toast(f"NEW {tag}", QColor("#FFCD75"))
+            if self._on_notification is not None:
+                self._on_notification(f"ByteSprite {tag} is available: Settings > Check for Updates")
+            if install and not is_installed():
+                QDesktopServices.openUrl(QUrl(RELEASES_URL))  # git checkout: update by hand
+        elif install:  # the silent startup check never toasts "up to date" or errors
+            self._show_toast("UP TO DATE" if status == "current" else "UPDATE ERR",
+                             QColor("#38B764" if status == "current" else "#E05A47"))
+
+    def restart(self) -> None:
+        self.trigger_quit()  # saves state.json before the new copy loads it
+        QProcess.startDetached(sys.executable, ["-m", "src.main"], str(APP_DIR))
+
     def _start_web_fetch(self, source: str | QImage, mode: ForgeMode) -> None:
         job = WebImageJob()
         job.finished.connect(lambda path, err, j=job, m=mode: self._on_web_fetch_done(j, path, err, m))
@@ -697,6 +765,7 @@ class PetWindow(QWidget):
         if mode == ForgeMode.PNG:
             self.recent.add(path)
             self._show_toast("SAVED PNG", QColor("#38B764"))
+            self._show_drop_folder(path.parent)
             return
         if self.trigger_drop_files([path], mode=mode):
             self._web_intermediate = path
@@ -710,6 +779,8 @@ class PetWindow(QWidget):
             return
         for out in reversed(outputs):
             self.recent.add(out)
+        if outputs:
+            self._show_drop_folder(outputs[0].parent)
         intermediate, self._web_intermediate = self._web_intermediate, None
         if intermediate is None:
             return
@@ -731,6 +802,13 @@ class PetWindow(QWidget):
             subprocess.Popen(f'explorer /select,"{entries[index][0]}"')
         except OSError:
             self._show_toast("OPEN ERR", QColor("#EF7D57"))
+
+    def _show_drop_folder(self, folder: Path) -> None:
+        """Reveal where a drop's output landed, unless that folder is the visible desktop."""
+        desktop = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DesktopLocation)
+        if desktop and os.path.normcase(str(folder)) == os.path.normcase(str(Path(desktop))):
+            return
+        open_folder_in_background(folder)
 
     def open_output_folder(self, folder: Path) -> None:
         try:
@@ -982,6 +1060,9 @@ class PetWindow(QWidget):
                 self.open_output_folder(self._web_drop_dir())
             elif key.isdigit():
                 self.reveal_recent(int(key))
+            return
+        if callback_id == "update:check":
+            self.check_for_updates()
             return
         if callback_id.startswith("web:"):
             QDesktopServices.openUrl(QUrl(callback_id.removeprefix("web:")))
@@ -1322,7 +1403,7 @@ class PetWindow(QWidget):
 
         if self._is_hud_visible():
             self._paint_hud(painter)
-        elif self._lyric_line:
+        elif self._lyric_line or self._lyric_prev or self._lyric_waiting():
             self._paint_lyric(painter)
 
         if self._toast_steps > 0 and self._toast_text:
@@ -1403,24 +1484,94 @@ class PetWindow(QWidget):
             )
         painter.restore()
 
+    _LYRIC_MORPH_MS = 280.0
+    _LYRIC_SUNG = QColor(176, 222, 255)  # the focus pulse's ice blue
+
+    def _lyric_waiting(self) -> bool:
+        lyrics = self._state_machine.lyrics_plugin
+        return lyrics is not None and lyrics.loading
+
+    def _on_lyric_frame(self) -> None:
+        morphing = time.monotonic() * 1000 - self._lyric_changed_ms < self._LYRIC_MORPH_MS
+        if not (self._lyric_line or morphing or self._lyric_waiting()):
+            self._lyric_prev = ""
+            self._lyric_timer.stop()
+        self.update()
+
     def _paint_lyric(self, painter: QPainter) -> None:
-        """Speech bubble in the frosted-graphite style, bottom-anchored just above the sprite."""
+        """Frosted speech bubble above the sprite with a karaoke sweep through the current line.
+
+        Line changes morph instead of popping: the bubble eases to the new size while the sung line
+        drifts up and fades as the next one rises in. While lyrics are being found it shows
+        bouncing dots.
+        """
         flags = Qt.TextFlag.TextWordWrap
+        center = int(Qt.AlignmentFlag.AlignCenter) | int(flags)
+        now = time.monotonic() * 1000
+        t = min(1.0, (now - self._lyric_changed_ms) / self._LYRIC_MORPH_MS)
+        ease = 1 - (1 - t) ** 3
+        text = self._lyric_line
+        waiting = not text and self._lyric_waiting()
+        if not text and not waiting and t >= 1.0:
+            return
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
         painter.setFont(ui_font(11, bold=True))
+        fm = painter.fontMetrics()
         max_w = self.width() - 16
-        text_rect = painter.fontMetrics().boundingRect(QRect(0, 0, max_w - 16, 1000), flags, self._lyric_line)
-        # Three lines at most keeps the bubble clear of the top of the window
-        text_h = min(text_rect.height(), painter.fontMetrics().lineSpacing() * 3)
-        bubble_w = max(40, min(max_w, text_rect.width() + 16))
-        bubble = QRect((self.width() - bubble_w) // 2, self._sprite_rect.top() - 4 - (text_h + 12), bubble_w, text_h + 12)
+
+        def measure(s: str) -> tuple[float, float]:
+            r = fm.boundingRect(QRect(0, 0, max_w - 16, 1000), flags, s)
+            # Three lines at most keeps the bubble clear of the top of the window
+            return float(max(40, min(max_w, r.width() + 16))), float(min(r.height(), fm.lineSpacing() * 3) + 12)
+
+        if text:
+            target = measure(text)
+        elif waiting:
+            target = (64.0, float(fm.lineSpacing() + 12))
+        else:
+            target = self._lyric_prev_size  # last line fading out in place
+        self._lyric_size = target
+        start = self._lyric_prev_size if self._lyric_prev_size[0] else target
+        w = start[0] + (target[0] - start[0]) * ease
+        h = start[1] + (target[1] - start[1]) * ease
+        fade_out = not text and not waiting
+        painter.setOpacity(1.0 - ease if fade_out else 1.0)
+        bubble = QRectF((self.width() - w) / 2, self._sprite_rect.top() - 4 - h, w, h)
         painter.setPen(QPen(qcolor(HAIRLINE_RGBA), 1))
         painter.setBrush(qcolor(GLASS_RGBA))
-        painter.drawRoundedRect(QRectF(bubble).adjusted(0.5, 0.5, -0.5, -0.5), 9, 9)
-        painter.setPen(QColor(TEXT_HEX))
-        painter.drawText(bubble.adjusted(8, 6, -8, -6), int(Qt.AlignmentFlag.AlignCenter) | int(flags), self._lyric_line)
+        painter.drawRoundedRect(bubble.adjusted(0.5, 0.5, -0.5, -0.5), 9, 9)
+        inner = bubble.adjusted(8, 6, -8, -6)
+        painter.setClipRect(bubble.adjusted(2, 2, -2, -2))
+
+        if fade_out:
+            if self._lyric_prev:
+                painter.setPen(self._LYRIC_SUNG)
+                painter.drawText(inner.translated(0, -6 * ease), center, self._lyric_prev)
+        else:
+            if self._lyric_prev and t < 1.0:
+                painter.setOpacity(1.0 - ease)
+                painter.setPen(self._LYRIC_SUNG)
+                painter.drawText(inner.translated(0, -10 * ease), center, self._lyric_prev)
+            painter.setOpacity(ease)
+            if text:
+                # Sung part ice blue, the rest dim, with a soft leading edge sweeping left to right
+                lyrics = self._state_machine.lyrics_plugin
+                progress = lyrics.line_progress() if lyrics is not None else 0.0
+                grad = QLinearGradient(inner.left(), 0, inner.right(), 0)
+                grad.setColorAt(max(0.0, progress - 0.001), self._LYRIC_SUNG)
+                grad.setColorAt(min(1.0, progress + 0.08), QColor(TEXT_DIM_HEX))
+                painter.setPen(QPen(QBrush(grad), 1))
+                painter.drawText(inner.translated(0, 10 * (1 - ease)), center, text)
+            else:
+                painter.setPen(Qt.PenStyle.NoPen)
+                cx, cy = bubble.center().x(), bubble.center().y()
+                lit = int(now / 480) % 3
+                for i in range(3):
+                    bounce = max(0.0, math.sin(now / 160 - i * 0.9)) * 4
+                    painter.setBrush(self._LYRIC_SUNG if i == lit else QColor(TEXT_DIM_HEX))
+                    painter.drawEllipse(QRectF(cx - 11 + i * 9, cy - 2 - bounce, 5, 5))
         painter.restore()
 
     def _paint_toast(self, painter: QPainter) -> None:
@@ -1469,6 +1620,7 @@ class PetWindow(QWidget):
         self._ambient_timer.stop()
         self._topmost_timer.stop()
         self._overlay_timer.stop()
+        self._lyric_timer.stop()
         if self._snip_session is not None:
             self._snip_session.close()
             self._snip_session = None

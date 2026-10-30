@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import os
 import subprocess
 import sys
 import tempfile
@@ -240,6 +241,50 @@ def ocr_image_file(png_path: Path, timeout_s: float = 30.0) -> str:
     if proc.returncode != 0:
         return ""
     return proc.stdout.decode("utf-8", errors="replace").strip()
+
+
+# Prints nothing when the folder already has an Explorer window; otherwise opens a hidden
+# ShellBrowserWindow (plain ShellExecute ignores SW_SHOWNOACTIVATE and steals focus) and prints its HWND
+_OPEN_FOLDER_PS = r"""
+$target = $env:BYTESPRITE_FOLDER.TrimEnd('')
+$shell = New-Object -ComObject Shell.Application
+foreach ($w in $shell.Windows()) {
+    try { if ($w.Document.Folder.Self.Path.TrimEnd('') -eq $target) { exit } } catch {}
+}
+$win = [Activator]::CreateInstance([Type]::GetTypeFromCLSID('C08AFD90-F2A1-11D1-8455-00A0C91F3880'))
+$win.Navigate2($target)
+$win.HWND
+"""
+
+
+def open_folder_in_background(folder: Path) -> None:
+    """Show `folder` in Explorer behind the active window, without focus; no-op if already open."""
+    threading.Thread(target=_open_folder_worker, args=(folder,), daemon=True).start()
+
+
+def _open_folder_worker(folder: Path) -> None:
+    if sys.platform != "win32":
+        return
+    try:
+        proc = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", _OPEN_FOLDER_PS],
+            capture_output=True, timeout=20, text=True,
+            env={**os.environ, "BYTESPRITE_FOLDER": str(folder)},  # env var: no quoting of odd names
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        hwnd = int(proc.stdout.strip() or 0)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return
+    if not hwnd:
+        return
+    user32 = ctypes.windll.user32
+    user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND] + [ctypes.c_int] * 4 + [ctypes.c_uint]
+    fg = user32.GetForegroundWindow()
+    # Slot directly under the active window; under a topmost one that would make Explorer topmost too
+    topmost = fg and user32.GetWindowLongW(fg, -20) & 0x8  # GWL_EXSTYLE, WS_EX_TOPMOST
+    after = 1 if (not fg or topmost) else fg  # 1 = HWND_BOTTOM
+    user32.ShowWindow(hwnd, 4)  # SW_SHOWNOACTIVATE
+    user32.SetWindowPos(hwnd, after, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)  # NOSIZE|NOMOVE|NOACTIVATE
 
 
 class OcrJob(QObject):

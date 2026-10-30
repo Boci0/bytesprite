@@ -1,84 +1,91 @@
 # ByteSprite
 
-ByteSprite is a lightweight, frameless, translucent floating pixel-art desktop companion for Windows 10 and Windows 11. Built on Python and PyQt6 using a Model-View-Controller architecture, it runs with zero external asset files by generating crisp 16x16 and 32x32 pixel-art animations directly from embedded RGBA palettes.
+A small frosted-glass paperclip that lives on your Windows desktop. It shows synced lyrics for whatever
+Pear Music is playing, and it carries a pocket full of developer and file tools behind a click, a hold
+or a drag.
 
-## Features
+Windows 10 / 11, Python 3.11+, PyQt6. No telemetry, no asset files: every sprite is generated in code.
 
-- **Headless Simulation Engine:** Discrete-tick state machine tracking Food (`hunger`), Energy (`energy`), Happiness (`happiness`), Experience, and Level across `Idle`, `Playing`, `Hungry`, and `Sleeping` moods.
-- **Crisp High-DPI Pixel Art:** Nearest-neighbor (`FastTransformation` / unsmoothed `QImage`) rendering preserves sharp pixel edges across 100%, 125%, and 150% Windows display scaling.
-- **Zero-Clutter Hover HUD:** Stays cleanly transparent on the desktop while idle, revealing a retro pixel status card (`LV`, `FD`, `EN`, `HP`) on cursor hover or care interactions.
-- **Multi-Monitor Drag & Clamping:** Smooth left-click dragging across single or multi-monitor setups (including negative-coordinate secondary displays) with automatic desktop work-area boundary clamping.
-- **Interactive Care & System Tray:** Left-click to pet, drag to reposition, or right-click (on the sprite or system tray icon) to Feed, Play, Put to Sleep / Wake Up, toggle Always on Top, toggle Gentle Wander, Reset Position, or Quit.
-- **Resilient Atomic Persistence:** Auto-saves every 60 seconds and on application or OS shutdown to `~/.bytesprite/state.json` via atomic temporary-file replacement (`os.replace`) with automatic fallback recovery from corrupted JSON.
+## Install
 
-## Project Structure
+Per-user, no admin rights. In PowerShell:
 
-```text
-desktop_pet/
-├── pyproject.toml
-├── requirements.txt
-├── src/
-│   ├── main.py                      # QApplication assembly, timers, system tray, shutdown
-│   ├── engine/
-│   │   ├── models.py                # PetStats dataclass and PetState enum
-│   │   └── pet_state.py             # PetStateMachine simulation logic and callbacks
-│   ├── graphics/
-│   │   ├── sprite_matrix.py         # Embedded 16x16 and 32x32 RGBA pixel matrices
-│   │   └── animation_controller.py  # Frame duration playback, looping, and oneshots
-│   ├── ui/
-│   │   ├── pet_window.py            # Frameless translucent QWidget, HUD, and screen clamping
-│   │   └── context_menu.py          # Dark pixel-styled right-click QMenu
-│   └── storage/
-│       └── storage_manager.py       # Atomic JSON save/load and corruption recovery
-└── tests/
-    ├── test_pet_state.py
-    ├── test_sprites.py
-    ├── test_window_geometry.py
-    ├── test_storage.py
-    └── test_app_integration.py
+```powershell
+irm https://raw.githubusercontent.com/Boci0/bytesprite/main/install.ps1 | iex
 ```
 
-## Setup
+Or from a clone:
 
-Create a virtual environment and install dependencies:
+```powershell
+git clone https://github.com/Boci0/bytesprite.git
+cd bytesprite
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -DesktopShortcut
+```
+
+Options: `-DesktopShortcut`, `-StartWithWindows`, `-NoLaunch`. If Python is missing:
+`winget install Python.Python.3.12`.
+
+| Location | Contents |
+| :--- | :--- |
+| `%LOCALAPPDATA%\ByteSprite\app` | Program files (`src`, `assets`, `uninstall.ps1`) |
+| `%LOCALAPPDATA%\ByteSprite\venv` | Private Python environment |
+| `%USERPROFILE%\.bytesprite` | Settings and state (kept on update and uninstall) |
+| `Downloads\ByteSprite` | Images dropped from a browser |
+| `Pictures\ByteSprite` | Screen snips |
+
+The installer adds a Start Menu shortcut and an entry in **Settings > Apps**, which runs the uninstaller.
+
+### Updating
+
+Right-click the pet, then **Settings > Check for Updates**. It downloads the newest GitHub release,
+swaps in the new code and restarts. An installed copy also checks quietly once per launch and shows a
+toast when a release is out. Re-running `install.ps1` updates too (and refreshes dependencies).
+
+### Uninstalling
+
+**Settings > Apps > ByteSprite > Uninstall**, or:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\ByteSprite\app\uninstall.ps1" -Purge
+```
+
+`-Purge` also deletes your settings.
+
+## Pear Music lyrics
+
+Right-click > **Lyrics > Show Song Lyrics**. ByteSprite reads the playing track from Windows media
+controls (no Pear plugin needed), then shows the current line in a bubble with a karaoke sweep. Lyrics
+come from Pear's own lyrics cache first, so anything Pear can show works, then from
+[LRCLIB](https://lrclib.net). Turning it on sends the song title and artist to LRCLIB. While a song
+plays, the paperclip grooves along.
+
+## What else it does
+
+- **Click** cycles the HUD: CPU / RAM / Disk, Pomodoro, File Forge, Clip Vault, Project (git), Lyrics.
+- **Double-click** snips a screen region to the clipboard.
+- **Hold** opens a tool wheel: OCR, clipboard history, search, focus timer, mute, web shortcuts.
+- **Drag files onto it** to convert or compress: WebP / PNG / JPG / ICO / BMP, CSV / TSV / JSON,
+  ZIP / TAR.XZ / TAR.GZ / GZIP, extract, SHA-256. Drag an image out of a browser to save a clean copy.
+  The output folder opens behind your current window (unless it is already open).
+- **Right-click** for everything else: ports inspector, dev transforms (JWT, URL, timestamps, case,
+  UUID), recent files, Pomodoro, settings.
+- **Hotkeys:** `Ctrl+Shift+Alt+S` snip image, `T` snip text (OCR), `C` pick a color.
+
+## Development
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m src.main --console
+.\.venv\Scripts\pytest.exe
 ```
 
-Or with `uv`:
+`CONTEXT.md` is the architecture and invariants record; read it before changing code.
 
-```powershell
-uv venv --python 3.12 .venv
-.\.venv\Scripts\python.exe -m pip install PyQt6 pytest
-```
+### Releasing
 
-## Running ByteSprite
+1. Bump `__version__` in `src/__init__.py` (the single version source).
+2. Commit, then tag and publish: `gh release create v0.9.0 --generate-notes`.
 
-Launch the desktop companion from the repository root:
-
-```powershell
-.\.venv\Scripts\python.exe -m src.main
-```
-
-Optional custom state path:
-
-```powershell
-.\.venv\Scripts\python.exe -m src.main --state-file .\custom_state.json
-```
-
-## Controls
-
-- **Left-Click (no drag):** Pet ByteSprite (`+HAPPY` and XP).
-- **Left-Click + Drag:** Move ByteSprite anywhere across visible monitors.
-- **Hover:** Reveal the floating pixel HUD (`LV`, `FD`, `EN`, `HP`, current mood).
-- **Right-Click (Sprite or System Tray):** Open the dark pixel context menu (`Feed Berry`, `Play Game`, `Pet Companion`, `Put to Sleep` / `Wake Up`, `Always on Top`, `Gentle Wander`, `Reset Position`, `Quit`).
-
-## Running Tests
-
-Execute the unit and integration test suite:
-
-```powershell
-.\.venv\Scripts\pytest.exe -v
-```
+Installed copies pick the release up through **Check for Updates**. The updater replaces `src/` only;
+when `requirements.txt` changes, say in the release notes to re-run `install.ps1`.

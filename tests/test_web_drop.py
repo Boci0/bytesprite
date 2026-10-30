@@ -20,6 +20,7 @@ from src.engine.pet_state import PetStateMachine
 from src.graphics.animation_controller import AnimationController
 from src.tools.file_forge import ForgeMode
 from src.tools.web_drop import (
+    html_image_src,
     WebImageJob,
     decode_image_bytes,
     fetch_image_bytes,
@@ -198,3 +199,15 @@ def test_web_conversion_removes_intermediate_png(qapp: QApplication, tmp_path: P
     finally:
         win.shutdown()
         win.close()
+
+
+def test_linked_image_drag_uses_img_src_not_page_url() -> None:
+    markup = ('<a href="https://www.youtube.com/@Box2_"><img alt="Box2" '
+              'src="https://yt3.ggpht.com/abc=s88-c-k?x=1&amp;y=2"></a>')
+    assert html_image_src(markup) == "https://yt3.ggpht.com/abc=s88-c-k?x=1&y=2"
+    assert html_image_src('<img src="blob:https://web.whatsapp.com/1">') is None
+    assert html_image_src("") is None
+    mime = QMimeData()
+    mime.setUrls([QUrl("https://www.youtube.com/@Box2_")])
+    mime.setHtml(markup)
+    assert PetWindow._web_drop_source(mime) == "https://yt3.ggpht.com/abc=s88-c-k?x=1&y=2"
