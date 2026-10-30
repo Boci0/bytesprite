@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import QWidget
 
 from src.graphics.sprite_matrix import get_sprite_frames
 from src.tools.file_forge import ForgeWheelOption
+from src.ui.sfx import TickSounds
 from src.ui.theme import (
     DANGER_HEX,
     GLASS_RAISED_RGBA,
@@ -119,6 +120,7 @@ class RadialDropWheel(QWidget):
         self._paths: list[Path] = []
         self._options: list[ForgeWheelOption] = []
         self._hovered_index: int = -1
+        self._ticks = TickSounds(self)
 
         # Precomputed per-open geometry caches (zero trig inside paintEvent)
         self._normal_polys: list[QPolygonF] = []
@@ -200,6 +202,7 @@ class RadialDropWheel(QWidget):
 
         self.show()
         self.raise_()
+        self.restack_topmost()
         self._open_anim.stop()
         self._open_t = 0.0
         self._open_anim.start()
@@ -281,18 +284,37 @@ class RadialDropWheel(QWidget):
         shifted = (theta + (step * 0.5)) % (2.0 * math.pi)
         return int(shifted // step) % n
 
+    def _set_hovered(self, new_idx: int) -> None:
+        if new_idx == self._hovered_index:
+            return
+        self._hovered_index = new_idx
+        if new_idx >= 0:
+            self._ticks.play(new_idx)
+        self.update()
+
     def update_hover_from_global(self, global_pos: QPoint) -> ForgeWheelOption | None:
         local = self.mapFromGlobal(global_pos)
         new_idx = self.hit_test_option_index(QPointF(local))
-        if new_idx != self._hovered_index:
-            self._hovered_index = new_idx
-            self.update()
+        self._set_hovered(new_idx)
         return self.selected_option()
+
+    def restack_topmost(self) -> None:
+        """Topmost, but directly under the shell's drag image so the dragged item stays visible."""
+        if sys.platform != "win32" or not self._always_on_top or not self.isVisible():
+            return
+        u32 = ctypes.windll.user32
+        u32.FindWindowW.restype = ctypes.c_void_p
+        u32.SetWindowPos.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
+                                     ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+        drag_image = u32.FindWindowW("SysDragImage", None)
+        # HWND_TOPMOST = -1; SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE
+        u32.SetWindowPos(int(self.winId()), drag_image or -1, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)
 
     def _on_watchdog_tick(self) -> None:
         if not self.isVisible():
             self._watchdog_timer.stop()
             return
+        self.restack_topmost()
         cursor_pos = QCursor.pos()
         if not self.geometry().adjusted(-14, -14, 14, 14).contains(cursor_pos):
             self.dismiss()
@@ -333,9 +355,7 @@ class RadialDropWheel(QWidget):
             if paths:
                 self._paths = paths
             new_idx = self.hit_test_option_index(event.position())
-            if new_idx != self._hovered_index:
-                self._hovered_index = new_idx
-                self.update()
+            self._set_hovered(new_idx)
             event.acceptProposedAction()
             return
         event.ignore()
@@ -344,9 +364,7 @@ class RadialDropWheel(QWidget):
         if event is None:
             return
         new_idx = self.hit_test_option_index(event.position())
-        if new_idx != self._hovered_index:
-            self._hovered_index = new_idx
-            self.update()
+        self._set_hovered(new_idx)
         event.acceptProposedAction()
 
     def dragLeaveEvent(self, event: QDragLeaveEvent | None) -> None:

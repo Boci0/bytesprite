@@ -367,6 +367,9 @@ class PetWindow(QWidget):
     def auto_wander(self) -> bool:
         return self._auto_wander
 
+    def _open_wheels(self) -> list:
+        return [w for w in (self._tool_wheel, self._drop_wheel) if w is not None and w.isVisible()]
+
     def _reassert_topmost(self) -> None:
         if sys.platform != "win32" or not self._always_on_top or not self.isVisible():
             return
@@ -374,7 +377,11 @@ class PetWindow(QWidget):
         set_pos = ctypes.windll.user32.SetWindowPos
         set_pos.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
                             ctypes.c_int, ctypes.c_int, ctypes.c_uint]
-        set_pos(int(self.winId()), -1, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)
+        wheels = self._open_wheels()
+        if not wheels:
+            set_pos(int(self.winId()), -1, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)
+        for wheel in wheels:
+            wheel.restack_topmost()  # wheels stay above the pet but below an in-flight drag image
 
     def set_always_on_top(self, enabled: bool) -> None:
         if self._always_on_top == bool(enabled):
@@ -483,6 +490,8 @@ class PetWindow(QWidget):
     def _on_ambient_tick(self) -> None:
         if self._press_global_pos is not None:
             return
+        if self._open_wheels():
+            return  # a hop or blink must not move the pet out from under an open wheel
         if self._state_machine.state != PetState.IDLE:
             return
 
@@ -550,6 +559,8 @@ class PetWindow(QWidget):
         self._pin_hud(36)
 
     def _is_hud_visible(self) -> bool:
+        if self._open_wheels():
+            return False  # the HUD would cover wheel slices
         return self._hovered or self._hud_pinned_until_ticks > 0
 
     # ------------------------------------------------------------------
