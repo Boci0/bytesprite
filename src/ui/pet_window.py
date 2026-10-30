@@ -39,6 +39,7 @@ from src.engine.pet_state import PetStateMachine
 from src.graphics.animation_controller import AnimationController
 from src.graphics.sprite_matrix import FrameMatrix, get_sprite_frames
 from src.tools.file_forge import ForgeMode, ForgeWheelOption, get_wheel_options_for_paths
+from src.tools.web_drop import WebImageJob, is_web_image_source, web_image_stem
 from src.ui.context_menu import PetContextMenu, style_menu
 from src.ui.drop_wheel import RadialDropWheel
 from src.ui.quick_tools import OcrJob, SnipSession
@@ -290,6 +291,9 @@ class PetWindow(QWidget):
         self._hold_timer.setInterval(self.HOLD_TO_WHEEL_MS)
         self._hold_timer.timeout.connect(self._on_hold_timeout)
         self._ocr_jobs: list[OcrJob] = []
+        # Image dragged out of a browser (URL or raw image), fetched only once a slice is chosen
+        self._pending_web_source: str | QImage | None = None
+        self._web_jobs: list[WebImageJob] = []
 
         self._configure_window()
         self._sync_animation_to_pet_state(self._state_machine.state)
@@ -583,20 +587,87 @@ class PetWindow(QWidget):
         option: ForgeWheelOption,
     ) -> None:
         self._hovered = False
-        self.trigger_drop_files(paths, mode=option.mode)
+        self._dispatch_drop(paths, option.mode)
 
     def _on_wheel_cancelled(self) -> None:
         self._hovered = False
+        self._pending_web_source = None
         self._show_toast("SKIPPED", QColor("#8A9AF2"))
 
-    def _spawn_drop_wheel(self, paths: list[Path], local_cursor: QPoint) -> None:
+    def _dispatch_drop(self, paths: Sequence[Path], mode: ForgeMode | None) -> None:
+        source, self._pending_web_source = self._pending_web_source, None
+        if source is not None:
+            self._start_web_fetch(source, mode or ForgeMode.PNG)
+        elif paths:
+            self.trigger_drop_files(paths, mode=mode)
+
+    @staticmethod
+    def _web_drop_source(mime) -> str | QImage | None:
+        """First http(s)/data: image URL in a browser drag, else its raw image data."""
+        if mime is None:
+            return None
+        if mime.hasUrls():
+            for url in mime.urls():
+                text = url.toString()
+                if not url.isLocalFile() and is_web_image_source(text):
+                    return text
+        if mime.hasImage():
+            image = mime.imageData()
+            if isinstance(image, QImage) and not image.isNull():
+                return image
+        return None
+
+    @staticmethod
+    def _web_drop_dir() -> Path:
+        downloads = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DownloadLocation)
+        for out_dir in (Path(downloads) / "ByteSprite" if downloads else None, Path.home() / ".bytesprite" / "drops"):
+            if out_dir is None:
+                continue
+            try:
+                out_dir.mkdir(parents=True, exist_ok=True)
+                return out_dir
+            except OSError:
+                continue
+        return Path.home() / ".bytesprite" / "drops"
+
+    def _start_web_fetch(self, source: str | QImage, mode: ForgeMode) -> None:
+        job = WebImageJob()
+        job.finished.connect(lambda path, err, j=job, m=mode: self._on_web_fetch_done(j, path, err, m))
+        self._web_jobs.append(job)
+        job.start(source, self._web_drop_dir())
+        self._anim.play_oneshot("eating")
+        self._schedule_next_anim_tick()
+        self._show_toast("FETCHING", QColor("#FFCD75"))
+
+    def _on_web_fetch_done(self, job: WebImageJob, path: object, error: str, mode: ForgeMode) -> None:
+        if job in self._web_jobs:
+            self._web_jobs.remove(job)
+        job.deleteLater()
+        if self._is_shutting_down:
+            return
+        if not isinstance(path, Path):
+            toast = {"not an image": "NOT IMAGE", "too large": "TOO BIG"}.get(error, "WEB ERR")
+            self._show_toast(toast, QColor("#EF7D57"))
+            return
+        if mode == ForgeMode.PNG:
+            self._show_toast("SAVED PNG", QColor("#38B764"))
+            return
+        self.trigger_drop_files([path], mode=mode)
+
+    def _spawn_drop_wheel(
+        self,
+        paths: list[Path],
+        local_cursor: QPoint,
+        options: Sequence[ForgeWheelOption] | None = None,
+    ) -> None:
         if self._drop_wheel is None:
             self._drop_wheel = RadialDropWheel(
                 on_option_dropped=self._on_wheel_option_dropped,
                 on_cancelled=self._on_wheel_cancelled,
                 always_on_top=self._always_on_top,
             )
-        options = get_wheel_options_for_paths(paths)
+        if options is None:
+            options = get_wheel_options_for_paths(paths)
         sprite_global = self.mapToGlobal(self.sprite_center_point())
         ideal_x = sprite_global.x() - int(RadialDropWheel.CENTER_X)
         ideal_y = sprite_global.y() - int(RadialDropWheel.CENTER_Y)
@@ -1032,16 +1103,29 @@ class PetWindow(QWidget):
     def dragEnterEvent(self, event: QDragEnterEvent | None) -> None:
         if event is None:
             return
-        paths = self._extract_drop_paths(event.mimeData())
-        if paths:
+        mime = event.mimeData()
+        paths = self._extract_drop_paths(mime)
+        self._pending_web_source = None if paths else self._web_drop_source(mime)
+        if paths or self._pending_web_source is not None:
             forge = self._state_machine.forge_plugin
             if forge is not None and forge.busy:
+                self._pending_web_source = None
                 self._show_toast("BUSY!", QColor("#EF7D57"))
                 event.ignore()
                 return
             self._hovered = True
             self._walk_steps_remaining = 0
-            self._spawn_drop_wheel(paths, event.position().toPoint())
+            if paths:
+                self._spawn_drop_wheel(paths, event.position().toPoint())
+            else:
+                source = self._pending_web_source
+                stem = web_image_stem(source) if isinstance(source, str) else "web_image"
+                # Re-encoding slices only: archiving would pass the downloaded image through untouched
+                options = [
+                    o for o in get_wheel_options_for_paths([Path("web.png")])
+                    if o.mode not in (ForgeMode.ZIP, ForgeMode.TAR_XZ)
+                ]
+                self._spawn_drop_wheel([Path(f"{stem}.png")], event.position().toPoint(), options)
             event.acceptProposedAction()
             return
         event.ignore()
@@ -1049,7 +1133,7 @@ class PetWindow(QWidget):
     def dragMoveEvent(self, event: QDragMoveEvent | None) -> None:
         if event is None:
             return
-        if self._extract_drop_paths(event.mimeData()):
+        if self._pending_web_source is not None or self._extract_drop_paths(event.mimeData()):
             if self._drop_wheel is not None and self._drop_wheel.isVisible():
                 self._drop_wheel.update_hover_from_global(
                     self.mapToGlobal(event.position().toPoint())
@@ -1073,14 +1157,14 @@ class PetWindow(QWidget):
                 self.mapToGlobal(event.position().toPoint())
             )
             self._drop_wheel.dismiss()
-            if chosen is not None and paths:
-                self.trigger_drop_files(paths, mode=chosen.mode)
+            if chosen is not None and (paths or self._pending_web_source is not None):
+                self._dispatch_drop(paths, chosen.mode)
             else:
                 self._on_wheel_cancelled()
             event.acceptProposedAction()
             return
-        if paths:
-            self.trigger_drop_files(paths)
+        if paths or self._pending_web_source is not None:
+            self._dispatch_drop(paths, None)
             event.acceptProposedAction()
             return
         event.ignore()
