@@ -91,3 +91,24 @@ def test_plugin_retries_a_missed_lookup(monkeypatch) -> None:
     plugin._retry_at = 0.0
     plugin.tick()
     assert len(calls) == 2 and plugin.line == "found"
+
+
+def test_parse_lrc_strips_word_timing() -> None:
+    assert parse_lrc("[00:00.930]<00:00.930>Whole <00:01.230>heap<00:02.880>") == [(930, "Whole heap")]
+
+
+def test_pear_cached_lyrics_uses_newest_id_for_title(monkeypatch, tmp_path) -> None:
+    import src.tools.lyrics as lyrics
+
+    (tmp_path / "lyrics_cache").mkdir()
+    (tmp_path / "lyrics_cache" / "stream_new.lrc").write_text("[00:01.00]right", encoding="utf-8")
+    (tmp_path / "lyrics_cache" / "stream_old.lrc").write_text("[00:01.00]stale", encoding="utf-8")
+    (tmp_path / "peerm_debug.log").write_text(
+        '[1] [player] === playSong START === token=1 song="A \\"B\\" - C" id=stream_old source=stream\n'
+        '[2] [player] === playSong START === token=2 song="A \\"B\\" - C" id=stream_new source=stream\n',
+        encoding="utf-8")
+    monkeypatch.setattr(lyrics, "_PEAR_DIR", tmp_path)
+    assert lyrics.pear_cached_lyrics('A \\"B\\" - C') == [(1000, "right")]
+    assert lyrics.pear_cached_lyrics("Unknown") == []
+    monkeypatch.setattr(lyrics, "_PEAR_DIR", tmp_path / "missing")
+    assert lyrics.pear_cached_lyrics("A") == []

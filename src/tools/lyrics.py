@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import bisect
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
 import re
 import subprocess
@@ -12,17 +13,23 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Any
 
 from src.engine.models import CompanionState, HudBar, HudData, ToolMenuItem
 
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 _LRC_TIME = re.compile(r"\[(\d+):(\d+(?:\.\d+)?)\]")
+_LRC_WORD = re.compile(r"<\d+:\d+(?:\.\d+)?>")  # per-word timing in Pear's cache
 _LRCLIB = "https://lrclib.net/api/"
 _USER_AGENT = "ByteSprite/0.8.0"
 _MAX_BYTES = 512 * 1024
 _MAX_LINE_CHARS = 90
 _MAX_RETRIES = 3
+# Pear Music caches the lyrics it shows as lyrics_cache/<id>.lrc; its debug log maps the song title to <id>
+_PEAR_DIR = Path(os.environ.get("APPDATA", "")) / "com.peerm" / "peerm_app"
+_PEAR_PLAY = re.compile(r'playSong START === .*? song="(.*)" id=(\S+) ')
+_PEAR_LOG_TAIL = 256 * 1024
 _RETRY_S = 8.0
 
 # One long-lived PowerShell prints a JSON line every 300ms; spawning it per poll would cost far more.
@@ -69,7 +76,7 @@ def parse_lrc(text: str) -> list[tuple[int, str]]:
         stamps = _LRC_TIME.findall(raw)
         if not stamps:
             continue
-        lyric = _LRC_TIME.sub("", raw).strip()
+        lyric = _LRC_WORD.sub("", _LRC_TIME.sub("", raw)).strip()
         for minutes, seconds in stamps:
             out.append((int((int(minutes) * 60 + float(seconds)) * 1000), lyric))
     out.sort(key=lambda pair: pair[0])
@@ -82,6 +89,20 @@ def line_at(lines: list[tuple[int, str]], position_ms: float) -> str:
     return lines[idx][1] if idx >= 0 else ""
 
 
+def pear_cached_lyrics(title: str) -> list[tuple[int, str]]:
+    """Synced lyrics Pear Music already found for `title` (any of its providers); [] when not cached."""
+    try:
+        with open(_PEAR_DIR / "peerm_debug.log", "rb") as log:
+            log.seek(max(0, log.seek(0, os.SEEK_END) - _PEAR_LOG_TAIL))
+            tail = log.read().decode("utf-8", "replace")
+        ids = [song_id for song, song_id in _PEAR_PLAY.findall(tail) if song == title]
+        if not ids:
+            return []
+        return parse_lrc((_PEAR_DIR / "lyrics_cache" / f"{ids[-1]}.lrc").read_text("utf-8", "replace"))
+    except (OSError, ValueError):
+        return []
+
+
 def _fetch_json(path: str, params: dict[str, str]) -> Any:
     req = urllib.request.Request(
         f"{_LRCLIB}{path}?{urllib.parse.urlencode(params)}", headers={"User-Agent": _USER_AGENT}
@@ -91,11 +112,14 @@ def _fetch_json(path: str, params: dict[str, str]) -> Any:
 
 
 def fetch_synced_lyrics(title: str, artist: str, duration_s: float = 0.0) -> list[tuple[int, str]]:
-    """Look up synced lyrics on LRCLIB; [] when none exist.
+    """Pear Music's own lyrics cache first, then LRCLIB; [] when neither has synced lyrics.
 
     Pear radio tracks arrive as title "Song - Channel" with the placeholder artist "Pear Radio", so those
     are also searched by the leading "Song" part, accepting only an exact track name of similar length.
     """
+    cached = pear_cached_lyrics(title)
+    if cached:
+        return cached
     clean = re.sub(r"\s*[\(\[].*?[\)\]]", "", title).strip() or title
     head, _, tail = clean.partition(" - ")
     head = head.strip()
