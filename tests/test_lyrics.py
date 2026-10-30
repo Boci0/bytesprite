@@ -68,3 +68,26 @@ def test_plugin_persists_enabled_flag_and_toggle_stops_reader() -> None:
     plugin.execute_action("lyrics:toggle")
     assert plugin.to_dict() == {"enabled": False}
     assert plugin.execute_action("other")[0] is False
+
+
+def test_plugin_retries_a_missed_lookup(monkeypatch) -> None:
+    import src.tools.lyrics as lyrics
+
+    calls: list[float] = []
+
+    def fake_fetch(title: str, artist: str, duration_s: float) -> list[tuple[int, str]]:
+        calls.append(duration_s)
+        return [(0, "found")] if len(calls) > 1 else []  # first lookup misses (stale duration / timeout)
+
+    monkeypatch.setattr(lyrics, "fetch_synced_lyrics", fake_fetch)
+    monkeypatch.setattr(lyrics.threading, "Thread", lambda target, args, daemon: type("T", (), {"start": lambda self: target(*args)})())
+    plugin = LyricsPlugin()
+    plugin.load_dict({"enabled": True})
+    plugin._reader = _FakeReader({**_playing(500), "dur": 200000})  # type: ignore[assignment]
+    plugin.tick()
+    assert plugin._lines == [] and plugin.line == ""
+    plugin.tick()
+    assert len(calls) == 1  # no hammering before the retry delay
+    plugin._retry_at = 0.0
+    plugin.tick()
+    assert len(calls) == 2 and plugin.line == "found"

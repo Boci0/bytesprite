@@ -22,6 +22,8 @@ _LRCLIB = "https://lrclib.net/api/"
 _USER_AGENT = "ByteSprite/0.8.0"
 _MAX_BYTES = 512 * 1024
 _MAX_LINE_CHARS = 90
+_MAX_RETRIES = 3
+_RETRY_S = 8.0
 
 # One long-lived PowerShell prints a JSON line every 300ms; spawning it per poll would cost far more.
 # Prefers Pear Music (peerm_app.exe) and falls back to whatever Windows treats as the current session.
@@ -191,6 +193,8 @@ class LyricsPlugin:
         self._position_ms = 0.0
         self._line = ""
         self._cache: dict[tuple[str, str], list[tuple[int, str]]] = {}
+        self._retries = 0
+        self._retry_at = 0.0
 
     @property
     def tool_id(self) -> str:
@@ -233,7 +237,15 @@ class LyricsPlugin:
             if lines:  # a miss may be a network blip, so only hits are cached
                 self._cache[track] = lines
         if track == self._track:  # ignore a lookup the user already skipped past
+            self._retry_at = time.monotonic() + _RETRY_S
             self._lines = lines
+
+    def _start_fetch(self, track: tuple[str, str], snap: dict[str, Any]) -> None:
+        try:
+            duration_s = float(snap.get("dur") or 0) / 1000
+        except (TypeError, ValueError):
+            duration_s = 0.0
+        threading.Thread(target=self._fetch, args=(track, duration_s), daemon=True).start()
 
     def tick(self) -> bool:
         if not self._enabled:
@@ -248,13 +260,13 @@ class LyricsPlugin:
         track = (str(snap.get("title") or ""), str(snap.get("artist") or ""))
         playing = snap.get("status") == "Playing" and bool(track[0])
         if track != self._track:
-            self._track, self._lines = track, None
+            self._track, self._lines, self._retries = track, None, 0
             if track[0]:
-                try:
-                    duration_s = float(snap.get("dur") or 0) / 1000
-                except (TypeError, ValueError):
-                    duration_s = 0.0
-                threading.Thread(target=self._fetch, args=(track, duration_s), daemon=True).start()
+                self._start_fetch(track, snap)
+        elif self._lines == [] and track[0] and self._retries < _MAX_RETRIES and time.monotonic() >= self._retry_at:
+            # A miss is often transient: LRCLIB timed out, or SMTC still held the previous song's duration
+            self._lines, self._retries = None, self._retries + 1
+            self._start_fetch(track, snap)
         position = 0.0
         if playing:
             # SMTC reports the position as of `at`; Pear only republishes it occasionally
