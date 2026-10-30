@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import ctypes
+import os
 import random
 import struct
+import subprocess
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -39,6 +41,7 @@ from src.engine.pet_state import PetStateMachine
 from src.graphics.animation_controller import AnimationController
 from src.graphics.sprite_matrix import FrameMatrix, get_sprite_frames
 from src.tools.file_forge import ForgeMode, ForgeWheelOption, get_wheel_options_for_paths
+from src.storage.recent_files import RecentFiles
 from src.tools.web_drop import WebImageJob, is_web_image_source, web_image_stem
 from src.ui.context_menu import PetContextMenu, style_menu
 from src.ui.drop_wheel import RadialDropWheel
@@ -294,6 +297,9 @@ class PetWindow(QWidget):
         # Image dragged out of a browser (URL or raw image), fetched only once a slice is chosen
         self._pending_web_source: str | QImage | None = None
         self._web_jobs: list[WebImageJob] = []
+        # Clean PNG from a web drop, deleted once File Forge converts it to the chosen format
+        self._web_intermediate: Path | None = None
+        self.recent = RecentFiles()
 
         self._configure_window()
         self._sync_animation_to_pet_state(self._state_machine.state)
@@ -428,6 +434,7 @@ class PetWindow(QWidget):
         self.update()
 
     def _handle_stats_change(self, _stats: PetStats) -> None:
+        self._collect_forge_outputs()
         notifications = self._state_machine.pop_notifications()
         if notifications:
             toast_text, color_hex = notifications[-1]
@@ -650,9 +657,54 @@ class PetWindow(QWidget):
             self._show_toast(toast, QColor("#EF7D57"))
             return
         if mode == ForgeMode.PNG:
+            self.recent.add(path)
             self._show_toast("SAVED PNG", QColor("#38B764"))
             return
-        self.trigger_drop_files([path], mode=mode)
+        if self.trigger_drop_files([path], mode=mode):
+            self._web_intermediate = path
+        else:
+            self.recent.add(path)  # forge busy: keep the clean PNG as the result
+
+    def _collect_forge_outputs(self) -> None:
+        forge = self._state_machine.forge_plugin
+        outputs = forge.pop_finished_outputs() if forge is not None else None
+        if outputs is None:
+            return
+        for out in reversed(outputs):
+            self.recent.add(out)
+        intermediate, self._web_intermediate = self._web_intermediate, None
+        if intermediate is None:
+            return
+        if outputs and intermediate not in outputs:
+            try:
+                intermediate.unlink(missing_ok=True)
+            except OSError:
+                self.recent.add(intermediate)
+        else:
+            self.recent.add(intermediate)  # conversion failed: the clean PNG is still useful
+
+    def reveal_recent(self, index: int) -> None:
+        entries = self.recent.entries()
+        if not 0 <= index < len(entries):
+            self._show_toast("GONE", QColor("#EF7D57"))
+            return
+        try:
+            # Windows paths cannot contain quotes, so wrapping is safe
+            subprocess.Popen(f'explorer /select,"{entries[index][0]}"')
+        except OSError:
+            self._show_toast("OPEN ERR", QColor("#EF7D57"))
+
+    def open_output_folder(self, folder: Path) -> None:
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            os.startfile(folder)
+        except OSError:
+            self._show_toast("OPEN ERR", QColor("#EF7D57"))
+
+    @staticmethod
+    def snips_dir() -> Path:
+        pictures = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.PicturesLocation)
+        return Path(pictures) / "ByteSprite" if pictures else Path.home() / ".bytesprite" / "snips"
 
     def _spawn_drop_wheel(
         self,
@@ -828,6 +880,8 @@ class PetWindow(QWidget):
         if cb is not None:
             cb.setImage(result)
         saved = self._save_snip_png(result)
+        if saved is not None:
+            self.recent.add(saved)
         self._show_toast("SNIPPED" if saved else "COPIED", QColor("#38B764"))
 
     @staticmethod
@@ -881,6 +935,15 @@ class PetWindow(QWidget):
             )
             if folder:
                 self.trigger_drop_files([folder])
+            return
+        if callback_id.startswith("recent:"):
+            key = callback_id.removeprefix("recent:")
+            if key == "snips":
+                self.open_output_folder(self.snips_dir())
+            elif key == "drops":
+                self.open_output_folder(self._web_drop_dir())
+            elif key.isdigit():
+                self.reveal_recent(int(key))
             return
         if callback_id.startswith("web:"):
             QDesktopServices.openUrl(QUrl(callback_id.removeprefix("web:")))
@@ -1184,6 +1247,7 @@ class PetWindow(QWidget):
             on_toggle_on_top=self.set_always_on_top,
             on_toggle_wander=self.set_auto_wander,
             on_quit=self.trigger_quit,
+            recent_files=self.recent.entries(),
             parent=self,
         )
 

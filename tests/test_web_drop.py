@@ -138,3 +138,63 @@ def test_browser_drag_opens_reencode_only_wheel(qapp: QApplication, tmp_path: Pa
     finally:
         win.shutdown()
         win.close()
+
+
+def test_recent_files_order_dedupe_cap_and_persist(tmp_path: Path) -> None:
+    from src.storage.recent_files import RecentFiles, format_age
+
+    recent = RecentFiles()
+    files = []
+    for i in range(RecentFiles.MAX_ENTRIES + 3):
+        f = tmp_path / f"f{i}.png"
+        f.write_bytes(b"x")
+        files.append(f)
+        recent.add(f, when=1000.0 + i)
+    recent.add(files[5], when=2000.0)  # re-adding moves it to the front
+    names = [p.name for p, _ in recent.entries()]
+    assert names[0] == "f5.png" and names.count("f5.png") == 1
+    assert len(names) == RecentFiles.MAX_ENTRIES
+
+    files[12].unlink()  # deleted on disk -> hidden
+    assert "f12.png" not in [p.name for p, _ in recent.entries()]
+
+    restored = RecentFiles()
+    restored.load_dict(recent.to_dict())
+    assert restored.entries() == recent.entries()
+    restored.load_dict({"files": [["bad"], [3, 4], "x"]})
+    assert restored.entries() == []
+    assert (format_age(5), format_age(300), format_age(7200), format_age(200000)) == (
+        "just now", "5m ago", "2h ago", "2d ago")
+
+
+def test_web_conversion_removes_intermediate_png(qapp: QApplication, tmp_path: Path) -> None:
+    sm = PetStateMachine(PetStats())
+    win = PetWindow(state_machine=sm, animation_controller=AnimationController(size=32), auto_wander=False)
+    forge = sm.forge_plugin
+    try:
+        clean = tmp_path / "cat.png"
+        clean.write_bytes(b"png")
+        webp = tmp_path / "cat.webp"
+        webp.write_bytes(b"webp")
+
+        win._web_intermediate = clean
+        forge._finished_outputs = (webp,)
+        win._collect_forge_outputs()
+        assert not clean.exists()
+        assert [p for p, _ in win.recent.entries()] == [webp]
+
+        # Failed conversion keeps the clean PNG and lists it instead
+        clean.write_bytes(b"png")
+        win._web_intermediate = clean
+        forge._finished_outputs = ()
+        win._collect_forge_outputs()
+        assert clean.exists()
+        assert win.recent.entries()[0][0] == clean
+
+        menu = win.build_context_menu()
+        assert "recent:0" in menu.plugin_actions and "recent:drops" in menu.plugin_actions
+        assert menu.plugin_actions["recent:0"].text().startswith("cat.png")
+        menu.deleteLater()
+    finally:
+        win.shutdown()
+        win.close()

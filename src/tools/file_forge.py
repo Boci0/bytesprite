@@ -1521,6 +1521,7 @@ class FileForgePlugin:
         self._status_color: str = "#38B764"
         self._dirty: bool = False
         self._worker_notification: tuple[str, str] | None = None
+        self._finished_outputs: tuple[Path, ...] | None = None
         self._ready_notification: tuple[str, str] | None = None
 
     @property
@@ -1634,7 +1635,15 @@ class FileForgePlugin:
                 self._status_badge = "ERR"
                 self._status_color = "#EF7D57"
             self._worker_notification = (result.toast_text, result.toast_color)
+            self._finished_outputs = result.output_paths if result.ok else ()
             self._dirty = True
+
+    def pop_finished_outputs(self) -> tuple[Path, ...] | None:
+        """Output paths of the last finished job (empty on failure), or None if none finished."""
+        with self._lock:
+            outputs = self._finished_outputs
+            self._finished_outputs = None
+            return outputs
 
     def pop_notification(self) -> tuple[str, str] | None:
         with self._lock:

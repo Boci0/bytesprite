@@ -18,6 +18,9 @@ from src.storage.storage_manager import StorageManager
 from src.ui.pet_window import PetWindow, build_app_icon
 from src.ui.quick_tools import GlobalHotkeys
 
+# Stored beside plugin state in state.json "tools"; not a ToolPlugin, so it never joins the HUD cycle
+RECENT_FILES_KEY = "recent"
+
 SIMULATION_TICK_INTERVAL_MS: int = 2_000
 AUTO_SAVE_INTERVAL_MS: int = 60_000
 
@@ -68,6 +71,7 @@ class ByteSpriteApp:
             on_quit_requested=self.quit,
             on_notification=self._show_tray_message,
         )
+        self.window.recent.load_dict(saved.tools_data.get(RECENT_FILES_KEY))
 
         if saved.position is not None:
             self.window.move_clamped(saved.position[0], saved.position[1])
@@ -152,6 +156,7 @@ class ByteSpriteApp:
         tools_payload: dict[str, dict[str, Any]] = {}
         for plugin in self.state_machine.registry.plugins:
             tools_payload[plugin.tool_id] = plugin.to_dict()
+        tools_payload[RECENT_FILES_KEY] = self.window.recent.to_dict()
         return self._storage.save(
             stats=self.state_machine.stats,
             state=self.state_machine.state,

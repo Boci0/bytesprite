@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import time
+from collections.abc import Callable, Sequence
+from pathlib import Path
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction
@@ -10,6 +12,7 @@ from PyQt6.QtWidgets import QLabel, QMenu, QWidget, QWidgetAction
 
 from src.engine.models import PetState
 from src.engine.pet_state import PetStateMachine
+from src.storage.recent_files import format_age
 from src.storage.storage_manager import autostart_enabled, set_autostart
 from src.ui.quick_tools import HOTKEY_LABEL
 from src.ui.theme import (
@@ -106,6 +109,7 @@ class PetContextMenu(QMenu):
         on_pet: Callable[[], object] | None = None,
         on_select_tool: Callable[[str], object] | None = None,
         on_tool_action: Callable[[str], object] | None = None,
+        recent_files: Sequence[tuple[Path, float]] = (),
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -150,6 +154,29 @@ class PetContextMenu(QMenu):
             self.quick_menu.addAction(q_act)
             self.plugin_actions[cid] = q_act
         self.addMenu(self.quick_menu)
+
+        # Recent outputs: click reveals the file selected in Explorer
+        self.recent_menu = style_menu(QMenu("Recent Files", self))
+        now = time.time()
+        for idx, (path, added) in enumerate(recent_files):
+            name = path.name if len(path.name) <= 34 else f"{path.name[:31]}..."
+            r_act = QAction(f"{name}   {format_age(now - added)}".replace("&", "&&"), self.recent_menu)
+            if on_tool_action is not None:
+                r_act.triggered.connect(lambda _checked=False, c=f"recent:{idx}": on_tool_action(c))
+            self.recent_menu.addAction(r_act)
+            self.plugin_actions[f"recent:{idx}"] = r_act
+        if not recent_files:
+            empty = QAction("Nothing yet: snip or drop a file", self.recent_menu)
+            empty.setEnabled(False)
+            self.recent_menu.addAction(empty)
+        self.recent_menu.addSeparator()
+        for label, cid in (("Open Snips Folder", "recent:snips"), ("Open Web Drops Folder", "recent:drops")):
+            f_act = QAction(label, self.recent_menu)
+            if on_tool_action is not None:
+                f_act.triggered.connect(lambda _checked=False, c=cid: on_tool_action(c))
+            self.recent_menu.addAction(f_act)
+            self.plugin_actions[cid] = f_act
+        self.addMenu(self.recent_menu)
 
         top_level_items = []
         for item in state_machine.get_active_menu_items():
