@@ -1,10 +1,12 @@
-"""Main application entrypoint assembling simulation, UI, system tray, and persistence."""
+"""Main application entrypoint assembling multi-tool plugins, UI, system tray, and persistence."""
 
 from __future__ import annotations
 
+import ctypes
 import signal
 import sys
 from pathlib import Path
+from typing import Any
 
 from PyQt6.QtCore import QPoint, Qt, QTimer
 from PyQt6.QtGui import QColor, QCursor
@@ -15,12 +17,12 @@ from src.graphics.animation_controller import AnimationController
 from src.storage.storage_manager import StorageManager
 from src.ui.pet_window import PetWindow, build_app_icon
 
-SIMULATION_TICK_INTERVAL_MS: int = 5_000
+SIMULATION_TICK_INTERVAL_MS: int = 2_000
 AUTO_SAVE_INTERVAL_MS: int = 60_000
 
 
 class ByteSpriteApp:
-    """Application controller coordinating engine, floating window, tray, and storage."""
+    """Application controller coordinating multi-tool engine, floating window, tray, and storage."""
 
     def __init__(
         self,
@@ -40,6 +42,19 @@ class ByteSpriteApp:
             stats=saved.stats,
             initial_state=saved.state,
         )
+
+        # Restore per-plugin state and active HUD tool
+        for plugin in self.state_machine.registry.plugins:
+            plugin_data = saved.tools_data.get(plugin.tool_id)
+            if isinstance(plugin_data, dict):
+                plugin.load_dict(plugin_data)
+        self.state_machine.select_tool(saved.active_tool)
+
+        clip_vault = self.state_machine.clip_vault_plugin
+        if clip_vault is not None:
+            clip_vault.set_on_change(self.state_machine.notify_plugin_activity)
+            clip_vault.attach_qt_clipboard(self._app.clipboard())
+
         self.animation_controller = AnimationController(size=32)
         self.window = PetWindow(
             state_machine=self.state_machine,
@@ -54,11 +69,15 @@ class ByteSpriteApp:
         else:
             self.window.reset_to_default_position()
 
-        # Simulation tick timer
+        # Utility tick timer (2s base; scales dynamically to 1s/250ms when tools are active)
+        self._base_tick_ms = max(100, sim_tick_ms)
         self.sim_timer = QTimer(self.window)
-        self.sim_timer.setInterval(max(100, sim_tick_ms))
+        self.sim_timer.setInterval(self._desired_tick_interval_ms())
         self.sim_timer.timeout.connect(self._on_simulation_tick)
         self.sim_timer.start()
+        self._unsub_sim_sync = self.state_machine.on_stats_change(
+            lambda _s: self._sync_sim_timer_interval()
+        )
 
         # Periodic 60-second auto-save timer
         self.auto_save_timer = QTimer(self.window)
@@ -70,7 +89,7 @@ class ByteSpriteApp:
         self.tray_icon: QSystemTrayIcon | None = None
         if enable_tray and QSystemTrayIcon.isSystemTrayAvailable():
             tray = QSystemTrayIcon(build_app_icon(64), self.window)
-            tray.setToolTip("ByteSprite Desktop Companion")
+            tray.setToolTip("ByteSprite Desktop Multi-Tool")
             tray.activated.connect(self._on_tray_activated)
             tray.show()
             self.tray_icon = tray
@@ -78,12 +97,25 @@ class ByteSpriteApp:
         self._app.aboutToQuit.connect(self.shutdown)
         self._app.commitDataRequest.connect(lambda _mgr: self.save_state())
 
+    def _desired_tick_interval_ms(self) -> int:
+        return self.state_machine.registry.min_active_tick_interval_ms(self._base_tick_ms)
+
+    def _sync_sim_timer_interval(self) -> None:
+        if self._is_shut_down:
+            return
+        desired = self._desired_tick_interval_ms()
+        if self.sim_timer.interval() != desired:
+            self.sim_timer.setInterval(desired)
+
     def show(self) -> None:
         self.window.show()
         self.window.raise_()
 
     def _on_simulation_tick(self) -> None:
         self.state_machine.tick(1)
+        desired = self._desired_tick_interval_ms()
+        if self.sim_timer.interval() != desired:
+            self.sim_timer.setInterval(desired)
 
     def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.Context:
@@ -96,16 +128,21 @@ class ByteSpriteApp:
             self.window.showNormal()
             self.window.raise_()
             self.window.activateWindow()
-            self.window._show_toast("HELLO", QColor("#73EFF7"))
+            self.window._show_toast("READY", QColor("#73EFF7"))
 
     def save_state(self) -> bool:
         pos: QPoint = self.window.pos()
+        tools_payload: dict[str, dict[str, Any]] = {}
+        for plugin in self.state_machine.registry.plugins:
+            tools_payload[plugin.tool_id] = plugin.to_dict()
         return self._storage.save(
             stats=self.state_machine.stats,
             state=self.state_machine.state,
             position=(pos.x(), pos.y()),
             always_on_top=self.window.always_on_top,
             auto_wander=self.window.auto_wander,
+            active_tool=self.state_machine.active_tool_id,
+            tools_data=tools_payload,
         )
 
     def has_active_timers(self) -> bool:
@@ -121,10 +158,14 @@ class ByteSpriteApp:
             return
         self._is_shut_down = True
 
+        if self._unsub_sim_sync is not None:
+            self._unsub_sim_sync()
+            self._unsub_sim_sync = None  # type: ignore[assignment]
         self.sim_timer.stop()
         self.auto_save_timer.stop()
         self.save_state()
         self.window.shutdown()
+        self.state_machine.shutdown()
 
         if self.tray_icon is not None:
             self.tray_icon.hide()
@@ -137,8 +178,20 @@ class ByteSpriteApp:
         self._app.quit()
 
 
+def _detach_console_if_present() -> None:
+    """Ensure no console window remains attached if launched directly from Explorer."""
+    if sys.platform == "win32" and "--console" not in sys.argv:
+        try:
+            # Detach from our own console buffer without hiding any parent shell window
+            ctypes.windll.kernel32.FreeConsole()
+        except Exception:
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
     """Launch ByteSprite on the Windows desktop."""
+    if argv is None:
+        _detach_console_if_present()
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )

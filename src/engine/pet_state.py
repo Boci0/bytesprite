@@ -1,52 +1,59 @@
-"""Headless simulation state machine driving ByteSprite stats and mood."""
+"""Headless utility state coordinator driving ByteSprite multi-tools and operational states."""
 
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from pathlib import Path
 
-from src.engine.models import PetState, PetStats
+from src.engine.models import CompanionState, HudData, PetState, PetStats, ToolMenuItem
+from src.tools.base import ToolPlugin, ToolRegistry
+from src.tools.clip_vault import ClipVaultPlugin
+from src.tools.file_forge import FileForgePlugin, ForgeMode
+from src.tools.pomodoro import PomodoroPhase, PomodoroPlugin
+from src.tools.system_monitor import SystemMonitorPlugin
 
 StateChangeCallback = Callable[[PetState, PetState, PetStats], None]
 StatsChangeCallback = Callable[[PetStats], None]
 
 
 class PetStateMachine:
-    """Discrete-tick simulation engine for ByteSprite."""
+    """Discrete-tick multi-tool state machine for ByteSprite."""
 
-    HUNGRY_THRESHOLD: float = 25.0
-    EXHAUSTED_THRESHOLD: float = 10.0
-
-    # Per-tick awake decay rates
-    HUNGER_DECAY_AWAKE: float = 1.2
-    ENERGY_DECAY_AWAKE: float = 0.8
-    HAPPINESS_DECAY_AWAKE: float = 0.9
-    HAPPINESS_DECAY_HUNGRY: float = 1.8
-
-    # Per-tick sleep recovery/decay rates
-    ENERGY_RECOVERY_SLEEP: float = 4.5
-    HUNGER_DECAY_SLEEP: float = 0.35
-    HAPPINESS_DECAY_SLEEP: float = 0.15
-
-    PLAY_DURATION_TICKS: int = 2
+    ALERT_THRESHOLD: float = 90.0
 
     def __init__(
         self,
         stats: PetStats | None = None,
         initial_state: PetState | None = None,
+        registry: ToolRegistry | None = None,
     ) -> None:
         self._stats: PetStats = stats if stats is not None else PetStats()
         self._stats.clamp()
-        self._play_ticks_remaining: int = 0
+        self._dnd_enabled: bool = initial_state == PetState.SLEEPING
         self._state_callbacks: list[StateChangeCallback] = []
         self._stats_callbacks: list[StatsChangeCallback] = []
+
+        if registry is not None:
+            self._registry = registry
+        else:
+            sysmon = SystemMonitorPlugin()
+            pomodoro = PomodoroPlugin()
+            pomodoro.completed_sessions = self._stats.completed_sessions
+            forge = FileForgePlugin()
+            clipvault = ClipVaultPlugin()
+            self._registry = ToolRegistry([sysmon, pomodoro, forge, clipvault])
+
+        self._sync_stats_from_tools()
 
         if initial_state is not None and isinstance(initial_state, PetState):
             self._state = initial_state
             if initial_state == PetState.PLAYING:
-                self._play_ticks_remaining = self.PLAY_DURATION_TICKS
+                pomo = self.pomodoro_plugin
+                if pomo is not None and not pomo.running:
+                    pomo.start_work()
         else:
-            self._state = self._derive_passive_state()
+            self._state = self._derive_state()
 
     @property
     def stats(self) -> PetStats:
@@ -55,6 +62,38 @@ class PetStateMachine:
     @property
     def state(self) -> PetState:
         return self._state
+
+    @property
+    def registry(self) -> ToolRegistry:
+        return self._registry
+
+    @property
+    def active_tool_id(self) -> str:
+        return self._registry.active_tool_id
+
+    @property
+    def active_plugin(self) -> ToolPlugin | None:
+        return self._registry.active_plugin
+
+    @property
+    def sysmon_plugin(self) -> SystemMonitorPlugin | None:
+        plugin = self._registry.get_plugin("sysmon")
+        return plugin if isinstance(plugin, SystemMonitorPlugin) else None
+
+    @property
+    def pomodoro_plugin(self) -> PomodoroPlugin | None:
+        plugin = self._registry.get_plugin("pomodoro")
+        return plugin if isinstance(plugin, PomodoroPlugin) else None
+
+    @property
+    def forge_plugin(self) -> FileForgePlugin | None:
+        plugin = self._registry.get_plugin("forge")
+        return plugin if isinstance(plugin, FileForgePlugin) else None
+
+    @property
+    def clip_vault_plugin(self) -> ClipVaultPlugin | None:
+        plugin = self._registry.get_plugin("clipvault")
+        return plugin if isinstance(plugin, ClipVaultPlugin) else None
 
     def on_state_change(self, callback: StateChangeCallback) -> Callable[[], None]:
         """Register a listener for state transitions; returns an unsubscribe callable."""
@@ -67,7 +106,7 @@ class PetStateMachine:
         return _unsubscribe
 
     def on_stats_change(self, callback: StatsChangeCallback) -> Callable[[], None]:
-        """Register a listener for stat updates; returns an unsubscribe callable."""
+        """Register a listener for metric/tool updates; returns an unsubscribe callable."""
         self._stats_callbacks.append(callback)
 
         def _unsubscribe() -> None:
@@ -77,7 +116,7 @@ class PetStateMachine:
         return _unsubscribe
 
     def tick(self, elapsed_ticks: int = 1) -> None:
-        """Advance simulation by one or more discrete ticks."""
+        """Advance registered tools by one or more discrete ticks."""
         if elapsed_ticks <= 0:
             return
 
@@ -88,130 +127,189 @@ class PetStateMachine:
         self._emit_stats_changed()
 
     def _step_single_tick(self) -> None:
-        if self._state == PetState.SLEEPING:
-            self._stats.energy += self.ENERGY_RECOVERY_SLEEP
-            self._stats.hunger -= self.HUNGER_DECAY_SLEEP
-            self._stats.happiness -= self.HAPPINESS_DECAY_SLEEP
-            self._stats.clamp()
-            if self._stats.energy >= 100.0:
-                self._transition_to(self._derive_passive_state())
-            return
+        self._registry.tick_all()
+        self._sync_stats_from_tools()
+        self._transition_to(self._derive_state())
 
-        # Awake tick degradation
-        self._stats.hunger -= self.HUNGER_DECAY_AWAKE
-        self._stats.energy -= self.ENERGY_DECAY_AWAKE
-        decay_happy = (
-            self.HAPPINESS_DECAY_HUNGRY
-            if self._stats.hunger <= self.HUNGRY_THRESHOLD
-            else self.HAPPINESS_DECAY_AWAKE
-        )
-        self._stats.happiness -= decay_happy
+    def _sync_stats_from_tools(self) -> None:
+        sysmon = self.sysmon_plugin
+        if sysmon is not None:
+            m = sysmon.metrics
+            self._stats.cpu_usage = m.cpu_percent
+            self._stats.ram_usage = m.ram_percent
+            self._stats.disk_usage = m.disk_percent
+
+        pomo = self.pomodoro_plugin
+        if pomo is not None:
+            self._stats.completed_sessions = pomo.completed_sessions
         self._stats.clamp()
 
-        if self._state == PetState.PLAYING and self._play_ticks_remaining > 0:
-            self._play_ticks_remaining -= 1
-            if self._stats.energy <= self.EXHAUSTED_THRESHOLD:
-                self._play_ticks_remaining = 0
-                self._transition_to(PetState.SLEEPING)
-            elif self._play_ticks_remaining == 0:
-                self._transition_to(self._derive_passive_state())
-            return
+    def get_hud_data(self) -> HudData:
+        """Return the HudData card for the currently active tool plugin."""
+        plugin = self._registry.active_plugin
+        if plugin is not None:
+            return plugin.get_hud_data()
+        return HudData(badge_left="BYTE", badge_right="IDLE")
 
-        self._transition_to(self._derive_passive_state())
+    def get_active_menu_items(self) -> list[ToolMenuItem]:
+        """Return context menu items for all registered tools."""
+        items: list[ToolMenuItem] = []
+        for plugin in self._registry.plugins:
+            items.extend(plugin.get_menu_items())
+        return items
 
-    def feed(self, amount: float = 25.0) -> bool:
-        """Feed ByteSprite, restoring hunger and granting small happiness + XP."""
-        if amount <= 0.0:
-            return False
-        self._play_ticks_remaining = 0
-        self._stats.hunger += amount
-        self._stats.happiness += 5.0
-        self._stats.experience += 10
+    def cycle_tool(self) -> ToolPlugin | None:
+        """Cycle the active HUD view to the next registered tool plugin."""
+        nxt = self._registry.cycle_active_tool()
         self._stats.last_updated = time.time()
-        self._stats.clamp()
-
-        if self._state == PetState.SLEEPING:
-            # Feeding wakes the pet gently unless critically exhausted
-            target = (
-                PetState.SLEEPING
-                if self._stats.energy <= self.EXHAUSTED_THRESHOLD
-                else self._derive_passive_state()
-            )
-            self._transition_to(target)
-        else:
-            self._transition_to(self._derive_passive_state())
-
         self._emit_stats_changed()
-        return True
+        return nxt
 
-    def pet(self, amount: float = 15.0) -> bool:
-        """Pet ByteSprite, boosting happiness and granting XP."""
-        if amount <= 0.0:
-            return False
-        self._stats.happiness += amount
-        self._stats.experience += 5
-        self._stats.last_updated = time.time()
-        self._stats.clamp()
-
-        if self._state != PetState.SLEEPING and self._state != PetState.PLAYING:
-            self._transition_to(self._derive_passive_state())
-
-        self._emit_stats_changed()
-        return True
-
-    def play(
-        self,
-        happiness_gain: float = 20.0,
-        energy_cost: float = 10.0,
-        hunger_cost: float = 5.0,
-    ) -> bool:
-        """Engage in active play if ByteSprite has sufficient energy."""
-        if self._stats.energy <= max(self.EXHAUSTED_THRESHOLD, energy_cost):
-            self._play_ticks_remaining = 0
-            self._transition_to(PetState.SLEEPING)
+    def select_tool(self, tool_id: str) -> bool:
+        """Select a specific registered tool plugin by ID."""
+        if self._registry.set_active_tool(tool_id):
+            self._stats.last_updated = time.time()
             self._emit_stats_changed()
+            return True
+        return False
+
+    def execute_tool_action(self, callback_id: str) -> tuple[bool, str, str]:
+        """Dispatch a tool action callback_id to registered plugins."""
+        for plugin in self._registry.plugins:
+            handled, toast_text, color_hex = plugin.execute_action(callback_id)
+            if handled:
+                if callback_id.startswith("pomodoro:") and self._dnd_enabled:
+                    self._dnd_enabled = False
+                self._sync_stats_from_tools()
+                self._stats.last_updated = time.time()
+                self._transition_to(self._derive_state())
+                self._emit_stats_changed()
+                return (True, toast_text, color_hex)
+        return (False, "", "")
+
+    def submit_files(
+        self,
+        paths: Sequence[Path | str],
+        *,
+        mode: ForgeMode | None = None,
+    ) -> bool:
+        """Route dropped or selected local files/folders to FileForgePlugin."""
+        forge = self.forge_plugin
+        if forge is None:
             return False
-
-        self._stats.energy -= energy_cost
-        self._stats.hunger -= hunger_cost
-        self._stats.happiness += happiness_gain
-        self._stats.experience += 15
+        if not forge.submit_paths(paths, mode_override=mode):
+            return False
+        self._dnd_enabled = False
+        self._registry.set_active_tool("forge")
         self._stats.last_updated = time.time()
-        self._stats.clamp()
-
-        self._play_ticks_remaining = self.PLAY_DURATION_TICKS
-        self._transition_to(PetState.PLAYING)
+        self._transition_to(self._derive_state())
         self._emit_stats_changed()
         return True
+
+    def pop_notifications(self) -> list[tuple[str, str]]:
+        """Drain queued async completion toasts from registered plugins."""
+        return self._registry.pop_notifications()
+
+    def notify_plugin_activity(self) -> None:
+        """Emit stats update when an event-driven plugin (e.g. ClipVault) mutates."""
+        self._stats.last_updated = time.time()
+        self._emit_stats_changed()
+
+    def shutdown(self) -> None:
+        """Stop background workers and detach OS listeners across all plugins."""
+        self._registry.close_all()
+
+    def refresh_metrics(self) -> bool:
+        """Trigger an immediate system monitor refresh."""
+        sysmon = self.sysmon_plugin
+        if sysmon is not None:
+            sysmon.tick()
+        self._sync_stats_from_tools()
+        self._stats.last_updated = time.time()
+        self._transition_to(self._derive_state())
+        self._emit_stats_changed()
+        return True
+
+    def toggle_pomodoro(self) -> bool:
+        """Start, pause, or resume the Pomodoro timer and switch HUD to Pomodoro."""
+        pomo = self.pomodoro_plugin
+        if pomo is None:
+            return False
+        self._dnd_enabled = False
+        running = pomo.toggle_pause()
+        self._registry.set_active_tool("pomodoro")
+        self._sync_stats_from_tools()
+        self._stats.last_updated = time.time()
+        self._transition_to(self._derive_state())
+        self._emit_stats_changed()
+        return running
 
     def rest(self) -> bool:
-        """Put ByteSprite to sleep so energy recovers over subsequent ticks."""
-        self._play_ticks_remaining = 0
-        self._stats.energy = min(100.0, self._stats.energy + 2.0)
+        """Enter Do Not Disturb / Standby mode."""
+        self._dnd_enabled = True
+        pomo = self.pomodoro_plugin
+        if pomo is not None and pomo.running:
+            pomo.toggle_pause()
         self._stats.last_updated = time.time()
-        self._stats.clamp()
         self._transition_to(PetState.SLEEPING)
         self._emit_stats_changed()
         return True
 
     def wake(self) -> bool:
-        """Wake ByteSprite from sleep into its appropriate awake mood."""
-        if self._state != PetState.SLEEPING:
+        """Exit Do Not Disturb / Standby mode."""
+        if self._state != PetState.SLEEPING and not self._dnd_enabled:
             return False
-        if self._stats.energy <= self.EXHAUSTED_THRESHOLD:
-            self._stats.energy = self.EXHAUSTED_THRESHOLD + 5.0
-            self._stats.clamp()
+        self._dnd_enabled = False
+        pomo = self.pomodoro_plugin
+        if pomo is not None and pomo.phase == PomodoroPhase.BREAK and pomo.running:
+            pomo.reset()
         self._stats.last_updated = time.time()
-        self._transition_to(self._derive_passive_state())
+        self._transition_to(self._derive_state())
         self._emit_stats_changed()
         return True
 
-    def _derive_passive_state(self) -> PetState:
-        if self._stats.energy <= self.EXHAUSTED_THRESHOLD:
+    # Legacy action aliases mapped onto utility operations
+    def feed(self, amount: float = 25.0) -> bool:
+        if amount <= 0.0:
+            return False
+        return self.refresh_metrics()
+
+    def pet(self, amount: float = 15.0) -> bool:
+        if amount <= 0.0:
+            return False
+        self.cycle_tool()
+        return True
+
+    def play(self) -> bool:
+        return self.toggle_pomodoro()
+
+    def _derive_state(self) -> PetState:
+        if self._dnd_enabled:
             return PetState.SLEEPING
-        if self._stats.hunger <= self.HUNGRY_THRESHOLD:
-            return PetState.HUNGRY
-        return PetState.IDLE
+
+        # Priority 1: Active Pomodoro Focus or Break state
+        pomo = self.pomodoro_plugin
+        if pomo is not None:
+            pomo_desired = pomo.desired_state()
+            if pomo_desired is not None:
+                return pomo_desired
+
+        # Priority 2: System Monitor high resource alert
+        sysmon = self.sysmon_plugin
+        if sysmon is not None:
+            sys_desired = sysmon.desired_state()
+            if sys_desired is not None:
+                return sys_desired
+
+        # Priority 3: Any other registered plugin requesting an override state
+        for plugin in self._registry.plugins:
+            if plugin.tool_id in {"pomodoro", "sysmon"}:
+                continue
+            desired = plugin.desired_state()
+            if desired is not None:
+                return desired
+
+        return CompanionState.IDLE
 
     def _transition_to(self, next_state: PetState) -> None:
         if next_state == self._state:

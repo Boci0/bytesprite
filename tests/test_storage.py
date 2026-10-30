@@ -65,7 +65,7 @@ class TestStorageManager:
         loaded = manager.load()
 
         assert loaded.state == PetState.IDLE
-        assert loaded.stats.hunger == 80.0
+        assert loaded.stats.cpu_usage == 0.0
         assert (tmp_path / "state.json.corrupt").exists()
 
     @pytest.mark.parametrize(

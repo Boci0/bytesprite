@@ -19,13 +19,15 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class PetSaveData:
-    """Deserialized snapshot of pet simulation state and UI preferences."""
+    """Deserialized snapshot of utility state, plugin data, and UI preferences."""
 
     stats: PetStats = field(default_factory=PetStats)
     state: PetState = PetState.IDLE
     position: tuple[int, int] | None = None
     always_on_top: bool = True
     auto_wander: bool = True
+    active_tool: str = "sysmon"
+    tools_data: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 def _parse_position(window_dict: Any) -> tuple[int, int] | None:
@@ -50,7 +52,7 @@ def _parse_position(window_dict: Any) -> tuple[int, int] | None:
 class StorageManager:
     """Persists and restores ByteSprite state at ~/.bytesprite/state.json."""
 
-    SCHEMA_VERSION: int = 1
+    SCHEMA_VERSION: int = 2
 
     def __init__(self, state_path: Path | str | None = None) -> None:
         if state_path is None:
@@ -71,12 +73,19 @@ class StorageManager:
             raw_text = self._state_path.read_text(encoding="utf-8")
             payload = json.loads(raw_text)
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            logger.warning("Corrupt state file at %s (%s); falling back to defaults.", self._state_path, exc)
+            logger.warning(
+                "Corrupt state file at %s (%s); falling back to defaults.",
+                self._state_path,
+                exc,
+            )
             self._backup_corrupt_file()
             return PetSaveData()
 
         if not isinstance(payload, dict):
-            logger.warning("Invalid root JSON type in %s; falling back to defaults.", self._state_path)
+            logger.warning(
+                "Invalid root JSON type in %s; falling back to defaults.",
+                self._state_path,
+            )
             return PetSaveData()
 
         stats_raw = payload.get("stats")
@@ -98,12 +107,28 @@ class StorageManager:
             if isinstance(window_raw.get("auto_wander"), bool):
                 auto_wander = window_raw["auto_wander"]
 
+        raw_active_tool = payload.get("active_tool")
+        active_tool = (
+            raw_active_tool
+            if isinstance(raw_active_tool, str) and raw_active_tool.strip()
+            else "sysmon"
+        )
+
+        raw_tools = payload.get("tools")
+        tools_data: dict[str, dict[str, Any]] = {}
+        if isinstance(raw_tools, dict):
+            for k, v in raw_tools.items():
+                if isinstance(k, str) and isinstance(v, dict):
+                    tools_data[k] = v
+
         return PetSaveData(
             stats=stats,
             state=state,
             position=position,
             always_on_top=always_on_top,
             auto_wander=auto_wander,
+            active_tool=active_tool,
+            tools_data=tools_data,
         )
 
     def save(
@@ -114,6 +139,8 @@ class StorageManager:
         position: tuple[int, int] | None = None,
         always_on_top: bool = True,
         auto_wander: bool = True,
+        active_tool: str = "sysmon",
+        tools_data: dict[str, dict[str, Any]] | None = None,
     ) -> bool:
         """Atomically serialize state to disk using temp-file + os.replace."""
         window_payload: dict[str, Any] = {
@@ -124,11 +151,13 @@ class StorageManager:
             window_payload["x"] = int(position[0])
             window_payload["y"] = int(position[1])
 
-        document = {
+        document: dict[str, Any] = {
             "version": self.SCHEMA_VERSION,
             "state": state.value if isinstance(state, PetState) else str(state),
             "stats": stats.to_dict(),
             "window": window_payload,
+            "active_tool": str(active_tool) if active_tool else "sysmon",
+            "tools": tools_data if isinstance(tools_data, dict) else {},
         }
 
         temp_path: Path | None = None

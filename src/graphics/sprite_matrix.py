@@ -25,26 +25,27 @@ ALL_ANIMATIONS: tuple[str, ...] = (
     "eating",
 )
 
-# Retro pixel-art color palette inspired by Sweetie-16 / PICO-8
+# Frosted-glass neutral palette: low-saturation translucent greys that read on light and dark
+# desktops alike, so the companion blends in instead of drawing the eye
 PALETTE: dict[str, RGBA] = {
     ".": (0, 0, 0, 0),          # Transparent
-    "s": (16, 20, 36, 92),      # Soft ground shadow
-    "h": (255, 238, 158, 110),  # Soft antenna / sparkle aura
-    "O": (24, 20, 37, 255),     # Deep ink outline
-    "D": (31, 96, 118, 255),    # Deep teal shade
-    "B": (56, 182, 168, 255),   # Mint-cyan midtone body
-    "L": (122, 236, 220, 255),  # Aqua top highlight
-    "W": (248, 252, 255, 255),  # Pure white glint / catchlight
-    "F": (240, 247, 244, 255),  # Warm cream face / belly
-    "f": (194, 218, 214, 255),  # Belly lower shade
-    "E": (28, 24, 46, 255),     # Dark berry eye
-    "C": (255, 119, 168, 255),  # Rosy blush / heart pink
-    "A": (255, 205, 117, 255),  # Warm gold antenna / sparkle
-    "G": (255, 240, 150, 255),  # Bright gold glow
-    "R": (239, 125, 87, 255),   # Coral berry / hungry alert
-    "P": (138, 154, 242, 255),  # Sleepy periwinkle Zzz
-    "M": (184, 68, 102, 255),   # Mouth / happy tongue accent
-    "T": (115, 239, 247, 255),  # Sweat drop / cyan particle
+    "s": (0, 0, 0, 34),         # Soft ground shadow
+    "h": (255, 255, 255, 40),   # Faint antenna / sparkle aura
+    "O": (46, 50, 58, 190),     # Smoky graphite outline
+    "D": (118, 126, 138, 120),  # Shade glass
+    "B": (168, 175, 186, 105),  # Frosted body midtone
+    "L": (214, 219, 227, 125),  # Top highlight
+    "W": (255, 255, 255, 190),  # Glint / catchlight
+    "F": (232, 235, 240, 120),  # Face / belly frost
+    "f": (198, 204, 212, 110),  # Belly lower shade
+    "E": (32, 34, 40, 215),     # Eye
+    "C": (206, 178, 188, 70),   # Barely-there blush
+    "A": (196, 202, 212, 150),  # Antenna bulb
+    "G": (236, 239, 245, 150),  # Soft glow
+    "R": (214, 128, 108, 170),  # Muted alert tint
+    "P": (168, 174, 198, 140),  # Sleepy Zzz
+    "M": (92, 84, 94, 170),     # Mouth accent
+    "T": (168, 206, 214, 130),  # Sweat drop / particle
 }
 
 

@@ -15,7 +15,12 @@ from src.engine.models import PetState, PetStats
 from src.engine.pet_state import PetStateMachine
 from src.graphics.animation_controller import AnimationController
 from src.ui.context_menu import PetContextMenu
-from src.ui.pet_window import PetWindow, ScreenRect, clamp_position_to_screens
+from src.ui.pet_window import (
+    PetWindow,
+    ScreenRect,
+    clamp_position_to_screens,
+    export_windows_ico,
+)
 
 
 @pytest.fixture(scope="module")
@@ -134,10 +139,11 @@ class TestPetWindowAndContextMenu:
             win.close()
 
     def test_click_without_drag_triggers_pet_interaction(self, qapp: QApplication) -> None:
-        sm = PetStateMachine(PetStats(hunger=80.0, energy=80.0, happiness=50.0))
+        sm = PetStateMachine(PetStats())
         anim = AnimationController(size=32)
         win = PetWindow(state_machine=sm, animation_controller=anim, auto_wander=False)
         try:
+            assert sm.active_tool_id == "sysmon"
             local_pt = win.sprite_center_point()
             global_pt = win.mapToGlobal(local_pt)
 
@@ -160,14 +166,13 @@ class TestPetWindowAndContextMenu:
             win.mousePressEvent(press)
             win.mouseReleaseEvent(release)
 
-            assert sm.stats.happiness > 50.0
+            assert sm.active_tool_id == "pomodoro"
         finally:
             win.shutdown()
             win.close()
 
     def test_context_menu_actions_trigger_state_changes(self, qapp: QApplication) -> None:
-        sm = PetStateMachine(PetStats(hunger=20.0, energy=80.0, happiness=60.0))
-        anim = AnimationController(size=32)
+        sm = PetStateMachine(PetStats())
         quit_called: list[bool] = []
         reset_called: list[bool] = []
 
@@ -175,8 +180,8 @@ class TestPetWindowAndContextMenu:
             state_machine=sm,
             always_on_top=True,
             auto_wander=True,
-            on_feed=sm.feed,
-            on_play=sm.play,
+            on_feed=sm.refresh_metrics,
+            on_play=sm.toggle_pomodoro,
             on_toggle_sleep=lambda: sm.wake() if sm.state == PetState.SLEEPING else sm.rest(),
             on_reset_position=lambda: reset_called.append(True),
             on_toggle_on_top=lambda _val: None,
@@ -185,15 +190,14 @@ class TestPetWindowAndContextMenu:
         )
 
         action_texts = [a.text() for a in menu.actions() if not a.isSeparator()]
-        assert any("Feed" in t for t in action_texts)
-        assert any("Play" in t for t in action_texts)
-        assert any("Put to Sleep" in t for t in action_texts)
+        assert any("Refresh System Metrics" in t for t in action_texts)
+        assert any("Pomodoro" in t for t in action_texts)
+        assert any("Do Not Disturb" in t for t in action_texts)
         assert any("Reset Position" in t for t in action_texts)
         assert any("Quit" in t for t in action_texts)
 
-        menu.feed_action.trigger()
-        assert sm.stats.hunger > 20.0
-        assert sm.state == PetState.IDLE
+        menu.play_action.trigger()
+        assert sm.state == PetState.PLAYING
 
         menu.sleep_action.trigger()
         assert sm.state == PetState.SLEEPING
@@ -219,9 +223,9 @@ class TestPetWindowAndContextMenu:
 
             # Top-left corner must remain fully transparent when HUD is hidden
             assert canvas.pixelColor(0, 0).alpha() == 0
-            # Center of sprite region must have opaque pixel art rendered
+            # Center of sprite region must have visible (frosted, translucent) pixel art rendered
             sprite_center = win.sprite_center_point()
-            assert canvas.pixelColor(sprite_center.x(), sprite_center.y()).alpha() == 255
+            assert canvas.pixelColor(sprite_center.x(), sprite_center.y()).alpha() >= 100
         finally:
             win.shutdown()
             assert not win.has_active_timers()
@@ -284,3 +288,13 @@ class TestPetWindowAndContextMenu:
         finally:
             win.shutdown()
             win.close()
+
+    def test_export_windows_ico_writes_valid_multires_ico_header(
+        self, qapp: QApplication, tmp_path
+    ) -> None:
+        ico_file = export_windows_ico(tmp_path / "bytesprite.ico")
+        assert ico_file.exists()
+        raw = ico_file.read_bytes()
+        # ICO magic header: 00 00 01 00 + 6 images (06 00)
+        assert raw[:6] == b"\x00\x00\x01\x00\x06\x00"
+        assert len(raw) > 512

@@ -21,7 +21,7 @@ class TestSpriteMatrix:
 
         for frame_idx, frame in enumerate(frames):
             assert len(frame) == size, f"{state}[{frame_idx}] row count != {size}"
-            opaque_count = 0
+            visible_count = 0
             for y, row in enumerate(frame):
                 assert len(row) == size, f"{state}[{frame_idx}] row {y} length != {size}"
                 for pixel in row:
@@ -31,13 +31,14 @@ class TestSpriteMatrix:
                     assert 0 <= g <= 255
                     assert 0 <= b <= 255
                     assert 0 <= a <= 255
-                    if a == 255:
-                        opaque_count += 1
+                    # Frosted palette is translucent by design; count clearly visible texels
+                    if a >= 100:
+                        visible_count += 1
 
             # Corner pixels must remain transparent for window click pass-through
             assert frame[0][0][3] == 0
             assert frame[0][size - 1][3] == 0
-            assert opaque_count > (size * size) // 10
+            assert visible_count > (size * size) // 10
 
     @pytest.mark.parametrize("state", ["idle", "blink", "walk", "sleep", "excited"])
     def test_consecutive_frames_animate_distinct_pixels(self, state: str) -> None:

@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import random
+import struct
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
-from PyQt6.QtCore import QPoint, QRect, Qt, QTimer
+from PyQt6.QtCore import QDateTime, QPoint, QRect, QStandardPaths, Qt, QTimer
 from PyQt6.QtGui import (
     QCloseEvent,
     QColor,
     QContextMenuEvent,
+    QDragEnterEvent,
+    QDragLeaveEvent,
+    QDragMoveEvent,
+    QDropEvent,
     QEnterEvent,
     QFont,
     QGuiApplication,
@@ -22,13 +28,16 @@ from PyQt6.QtGui import (
     QPen,
     QPixmap,
 )
-from PyQt6.QtWidgets import QApplication, QWidget
+from PyQt6.QtWidgets import QApplication, QFileDialog, QWidget
 
 from src.engine.models import PetState, PetStats
 from src.engine.pet_state import PetStateMachine
 from src.graphics.animation_controller import AnimationController
 from src.graphics.sprite_matrix import FrameMatrix, get_sprite_frames
+from src.tools.file_forge import ForgeMode, ForgeWheelOption, get_wheel_options_for_paths
 from src.ui.context_menu import PetContextMenu
+from src.ui.drop_wheel import RadialDropWheel
+from src.ui.quick_tools import HumanTyper, OcrJob, SnipSession, TyperDialog
 
 
 @dataclass(frozen=True)
@@ -148,6 +157,59 @@ def build_app_icon(size: int = 64) -> QIcon:
     return QIcon(QPixmap.fromImage(qimg))
 
 
+def export_windows_ico(
+    output_path: Path | str,
+    sizes: Sequence[int] = (16, 32, 48, 64, 128, 256),
+) -> Path:
+    """Write a multi-resolution Windows .ico file with PNG-encoded nearest-neighbor frames."""
+    from PyQt6.QtCore import QBuffer, QIODevice
+
+    dest = Path(output_path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    base_frame = get_sprite_frames("idle", size=32)[0]
+    base_img = frame_matrix_to_qimage(base_frame)
+
+    png_blobs: list[tuple[int, bytes]] = []
+    for sz in sizes:
+        scaled = base_img.scaled(
+            sz,
+            sz,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.FastTransformation,
+        )
+        buf = QBuffer()
+        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        scaled.save(buf, "PNG")
+        png_blobs.append((sz, bytes(buf.data())))
+
+    count = len(png_blobs)
+    header = struct.pack("<HHH", 0, 1, count)
+    offset = 6 + (16 * count)
+    entries = bytearray()
+    payload = bytearray()
+
+    for sz, blob in png_blobs:
+        dim_byte = 0 if sz >= 256 else sz
+        entries.extend(
+            struct.pack(
+                "<BBBBHHII",
+                dim_byte,
+                dim_byte,
+                0,
+                0,
+                1,
+                32,
+                len(blob),
+                offset,
+            )
+        )
+        payload.extend(blob)
+        offset += len(blob)
+
+    dest.write_bytes(header + bytes(entries) + bytes(payload))
+    return dest
+
+
 class PetWindow(QWidget):
     """Borderless translucent desktop widget rendering ByteSprite and hover HUD."""
 
@@ -184,6 +246,7 @@ class PetWindow(QWidget):
 
         # Mouse drag and hover state
         self._press_global_pos: QPoint | None = None
+        self._last_drag_global_pos: QPoint | None = None
         self._drag_offset: QPoint | None = None
         self._did_drag: bool = False
         self._hovered: bool = False
@@ -199,6 +262,11 @@ class PetWindow(QWidget):
         self._walk_dx: int = 0
         self._walk_steps_remaining: int = 0
         self._is_shutting_down: bool = False
+        self._drop_wheel: RadialDropWheel | None = None
+        self._snip_session: SnipSession | None = None
+        self._ocr_jobs: list[OcrJob] = []
+        self._typer = HumanTyper(on_finished=self._on_typer_finished, parent=self)
+        self._typer_wpm: int = 65
 
         self._configure_window()
         self._sync_animation_to_pet_state(self._state_machine.state)
@@ -230,6 +298,7 @@ class PetWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
         self.setAutoFillBackground(False)
+        self.setAcceptDrops(True)
 
         palette = self.palette()
         palette.setColor(QPalette.ColorRole.Window, QColor(0, 0, 0, 0))
@@ -245,6 +314,7 @@ class PetWindow(QWidget):
         self.setWindowFlags(flags)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setAcceptDrops(True)
         if re_show and was_visible:
             self.show()
 
@@ -261,6 +331,9 @@ class PetWindow(QWidget):
             return
         self._always_on_top = bool(enabled)
         self._apply_window_flags(re_show=True)
+        if self._drop_wheel is not None:
+            self._drop_wheel._always_on_top = self._always_on_top
+            self._drop_wheel._configure_window()
 
     def set_auto_wander(self, enabled: bool) -> None:
         self._auto_wander = bool(enabled)
@@ -325,6 +398,14 @@ class PetWindow(QWidget):
         self.update()
 
     def _handle_stats_change(self, _stats: PetStats) -> None:
+        notifications = self._state_machine.pop_notifications()
+        if notifications:
+            toast_text, color_hex = notifications[-1]
+            if self._state_machine.state == PetState.IDLE:
+                self._anim.play_oneshot("excited")
+                self._schedule_next_anim_tick()
+            self._show_toast(toast_text, QColor(color_hex or "#38B764"))
+            return
         if self._is_hud_visible():
             self.update()
 
@@ -412,39 +493,250 @@ class PetWindow(QWidget):
         return self._hovered or self._hud_pinned_until_ticks > 0
 
     # ------------------------------------------------------------------
-    # Interactive Actions
+    # Interactive Multi-Tool Actions
     # ------------------------------------------------------------------
 
     def trigger_feed(self) -> None:
-        if self._state_machine.feed():
+        if self._state_machine.refresh_metrics():
             self._anim.play_oneshot("eating")
             self._schedule_next_anim_tick()
-            self._show_toast("+FOOD", QColor("#38B764"))
+            cpu = int(round(self._state_machine.stats.cpu_usage))
+            self._show_toast(f"CPU {cpu}%", QColor("#38B764"))
 
     def trigger_play(self) -> None:
-        if self._state_machine.play():
+        running = self._state_machine.toggle_pomodoro()
+        if running:
             self._anim.set_state("excited", force=True)
             self._schedule_next_anim_tick()
-            self._show_toast("+PLAY", QColor("#FFCD75"))
+            self._show_toast("FOCUS!", QColor("#FFCD75"))
         else:
-            self._show_toast("TIRED", QColor("#8A9AF2"))
+            self._sync_animation_to_pet_state(self._state_machine.state)
+            self._schedule_next_anim_tick()
+            self._show_toast("PAUSED", QColor("#8A9AF2"))
 
     def trigger_pet(self) -> None:
         if self._state_machine.state == PetState.SLEEPING:
-            self._show_toast("ZZZ...", QColor("#8A9AF2"))
+            self._show_toast("DND...", QColor("#8A9AF2"))
             return
-        if self._state_machine.pet():
-            self._anim.play_oneshot("excited")
+        plugin = self._state_machine.cycle_tool()
+        self._anim.play_oneshot("excited")
+        self._schedule_next_anim_tick()
+        badge = plugin.tool_id.upper()[:6] if plugin is not None else "TOOL"
+        self._show_toast(badge, QColor("#73EFF7"))
+
+    def trigger_select_tool(self, tool_id: str) -> None:
+        if self._state_machine.select_tool(tool_id):
+            self._show_toast(tool_id.upper()[:6], QColor("#73EFF7"))
+
+    def trigger_drop_files(
+        self,
+        paths: Sequence[Path | str],
+        *,
+        mode: ForgeMode | None = None,
+    ) -> bool:
+        """Feed local files or folders into FileForge with eating animation."""
+        if self._state_machine.submit_files(paths, mode=mode):
+            self._anim.play_oneshot("eating")
             self._schedule_next_anim_tick()
-            self._show_toast("+HAPPY", QColor("#FF77A8"))
+            self._show_toast("FORGING..", QColor("#FFCD75"))
+            return True
+        forge = self._state_machine.forge_plugin
+        if forge is not None and forge.busy:
+            self._show_toast("BUSY!", QColor("#EF7D57"))
+        return False
+
+    @property
+    def drop_wheel(self) -> RadialDropWheel | None:
+        return self._drop_wheel
+
+    def _on_wheel_option_dropped(
+        self,
+        paths: list[Path],
+        option: ForgeWheelOption,
+    ) -> None:
+        self._hovered = False
+        self.trigger_drop_files(paths, mode=option.mode)
+
+    def _on_wheel_cancelled(self) -> None:
+        self._hovered = False
+        self._show_toast("SKIPPED", QColor("#8A9AF2"))
+
+    def _spawn_drop_wheel(self, paths: list[Path], local_cursor: QPoint) -> None:
+        if self._drop_wheel is None:
+            self._drop_wheel = RadialDropWheel(
+                on_option_dropped=self._on_wheel_option_dropped,
+                on_cancelled=self._on_wheel_cancelled,
+                always_on_top=self._always_on_top,
+            )
+        options = get_wheel_options_for_paths(paths)
+        sprite_global = self.mapToGlobal(self.sprite_center_point())
+        ideal_x = sprite_global.x() - int(RadialDropWheel.CENTER_X)
+        ideal_y = sprite_global.y() - int(RadialDropWheel.CENTER_Y)
+        wx, wy = clamp_position_to_screens(
+            ideal_x,
+            ideal_y,
+            RadialDropWheel.WHEEL_WIDTH,
+            RadialDropWheel.WHEEL_HEIGHT,
+            self.available_screen_rects(),
+        )
+        self._drop_wheel.open_for_paths(
+            paths,
+            options,
+            window_top_left=QPoint(wx, wy),
+            initial_global_cursor=self.mapToGlobal(local_cursor),
+        )
+
+    def _clipboard_local_paths(self) -> list[Path]:
+        app = QApplication.instance()
+        if app is None:
+            return []
+        cb = app.clipboard()
+        if cb is None:
+            return []
+        mime = cb.mimeData()
+        if mime is not None and mime.hasUrls():
+            urls = [
+                Path(u.toLocalFile())
+                for u in mime.urls()
+                if u.isLocalFile() and u.toLocalFile()
+            ]
+            valid = [p for p in urls if p.exists()]
+            if valid:
+                return valid
+        raw_txt = (cb.text() or "").strip().strip('"')
+        if raw_txt and len(raw_txt) <= 1024:
+            try:
+                candidate = Path(raw_txt)
+                if candidate.exists():
+                    return [candidate]
+            except OSError:
+                pass
+        return []
+
+    # ------------------------------------------------------------------
+    # Screen Snip / OCR / Color Pick / Human Typer
+    # ------------------------------------------------------------------
+
+    @property
+    def typer(self) -> HumanTyper:
+        return self._typer
+
+    def trigger_snip(self, mode: str) -> None:
+        if self._snip_session is not None:
+            return
+        # Hide ByteSprite and let the context menu fade so neither lands in the frozen grab
+        self.hide()
+        QTimer.singleShot(180, lambda: self._begin_snip(mode))
+
+    def _begin_snip(self, mode: str) -> None:
+        if self._is_shutting_down:
+            return
+        self._snip_session = SnipSession(mode, self._on_snip_result)
+
+    def _on_snip_result(self, mode: str, result: object | None) -> None:
+        self._snip_session = None
+        self.show()
+        if result is None:
+            self._show_toast("CANCEL", QColor("#8A9AF2"))
+            return
+        cb = QGuiApplication.clipboard()
+        if mode == "color" and isinstance(result, str):
+            if cb is not None:
+                cb.setText(result)
+            self._show_toast(result, QColor("#73EFF7"))
+            return
+        if not isinstance(result, QImage):
+            return
+        if mode == "text":
+            job = OcrJob(self)
+            job.finished.connect(lambda text, j=job: self._on_ocr_finished(j, text))
+            self._ocr_jobs.append(job)
+            job.start(result)
+            self._show_toast("READING", QColor("#FFCD75"))
+            return
+        if cb is not None:
+            cb.setImage(result)
+        pictures = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.PicturesLocation)
+        out_dir = Path(pictures or Path.home()) / "ByteSprite"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stamp = QDateTime.currentDateTime().toString("yyyyMMdd_HHmmss_zzz")
+        result.save(str(out_dir / f"snip_{stamp}.png"), "PNG")
+        self._show_toast("SNIPPED", QColor("#38B764"))
+
+    def _on_ocr_finished(self, job: OcrJob, text: str) -> None:
+        if job in self._ocr_jobs:
+            self._ocr_jobs.remove(job)
+        job.deleteLater()
+        if self._is_shutting_down:
+            return
+        if not text:
+            self._show_toast("NO TEXT", QColor("#EF7D57"))
+            return
+        cb = QGuiApplication.clipboard()
+        if cb is not None:
+            cb.setText(text)
+        self._show_toast("TEXT OK", QColor("#38B764"))
+
+    def trigger_open_typer(self) -> None:
+        if self._typer.running:
+            self._typer.stop("STOPPED")
+            return
+        dialog = TyperDialog(self, wpm=self._typer_wpm)
+        try:
+            if dialog.exec() != TyperDialog.DialogCode.Accepted or not dialog.text:
+                return
+            self._typer_wpm = dialog.wpm
+            self._typer.start(dialog.text, dialog.wpm)
+            self._show_toast("CLICK..", QColor("#FFCD75"))
+        finally:
+            dialog.deleteLater()
+
+    def _on_typer_finished(self, reason: str) -> None:
+        if not self._is_shutting_down:
+            self._show_toast(reason, QColor("#38B764" if reason == "TYPED" else "#8A9AF2"))
+
+    def trigger_tool_action(self, callback_id: str) -> None:
+        if callback_id.startswith("snip:"):
+            self.trigger_snip(callback_id.split(":", 1)[1])
+            return
+        if callback_id == "typer:open":
+            self.trigger_open_typer()
+            return
+        if callback_id == "forge:pick_files":
+            selected, _flt = QFileDialog.getOpenFileNames(
+                self,
+                "ByteSprite File Forge - Select File(s)",
+            )
+            if selected:
+                self.trigger_drop_files(selected)
+            return
+        if callback_id == "forge:pick_folder":
+            folder = QFileDialog.getExistingDirectory(
+                self,
+                "ByteSprite File Forge - Select Folder to Compress",
+            )
+            if folder:
+                self.trigger_drop_files([folder])
+            return
+        if callback_id == "forge:clipboard_files":
+            clip_paths = self._clipboard_local_paths()
+            if not clip_paths:
+                self._show_toast("NO FILE", QColor("#EF7D57"))
+                return
+            self.trigger_drop_files(clip_paths)
+            return
+
+        handled, toast_text, color_hex = self._state_machine.execute_tool_action(callback_id)
+        if handled and toast_text:
+            self._show_toast(toast_text, QColor(color_hex or "#73EFF7"))
 
     def trigger_toggle_sleep(self) -> None:
         if self._state_machine.state == PetState.SLEEPING:
             self._state_machine.wake()
-            self._show_toast("AWAKE", QColor("#73EFF7"))
+            self._show_toast("ONLINE", QColor("#73EFF7"))
         else:
             self._state_machine.rest()
-            self._show_toast("SLEEP", QColor("#8A9AF2"))
+            self._show_toast("DND", QColor("#8A9AF2"))
 
     def trigger_quit(self) -> None:
         if self._on_quit_requested is not None:
@@ -507,6 +799,7 @@ class PetWindow(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             global_pos = event.globalPosition().toPoint()
             self._press_global_pos = global_pos
+            self._last_drag_global_pos = global_pos
             self._drag_offset = global_pos - self.frameGeometry().topLeft()
             self._did_drag = False
             self._walk_steps_remaining = 0
@@ -532,8 +825,14 @@ class PetWindow(QWidget):
             if delta.manhattanLength() >= self.DRAG_THRESHOLD_PX:
                 self._did_drag = True
             if self._did_drag:
-                if delta.x() != 0:
-                    self._anim.facing_left = delta.x() < 0
+                step_dx = (
+                    (global_pos.x() - self._last_drag_global_pos.x())
+                    if self._last_drag_global_pos is not None
+                    else delta.x()
+                )
+                if step_dx != 0:
+                    self._anim.facing_left = step_dx < 0
+                self._last_drag_global_pos = global_pos
                 candidate = global_pos - self._drag_offset
                 self.move_clamped(candidate.x(), candidate.y())
             event.accept()
@@ -546,6 +845,7 @@ class PetWindow(QWidget):
         if event.button() == Qt.MouseButton.LeftButton and self._press_global_pos is not None:
             was_drag = self._did_drag
             self._press_global_pos = None
+            self._last_drag_global_pos = None
             self._drag_offset = None
             self._did_drag = False
             if not was_drag:
@@ -563,6 +863,76 @@ class PetWindow(QWidget):
         self._open_context_menu(event.globalPos())
         event.accept()
 
+    @staticmethod
+    def _extract_drop_paths(mime) -> list[Path]:
+        if mime is None or not mime.hasUrls():
+            return []
+        result: list[Path] = []
+        for url in mime.urls():
+            if url.isLocalFile():
+                local = url.toLocalFile()
+                if local:
+                    p = Path(local)
+                    if p.exists():
+                        result.append(p)
+        return result
+
+    def dragEnterEvent(self, event: QDragEnterEvent | None) -> None:
+        if event is None:
+            return
+        paths = self._extract_drop_paths(event.mimeData())
+        if paths:
+            forge = self._state_machine.forge_plugin
+            if forge is not None and forge.busy:
+                self._show_toast("BUSY!", QColor("#EF7D57"))
+                event.ignore()
+                return
+            self._hovered = True
+            self._walk_steps_remaining = 0
+            self._spawn_drop_wheel(paths, event.position().toPoint())
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dragMoveEvent(self, event: QDragMoveEvent | None) -> None:
+        if event is None:
+            return
+        if self._extract_drop_paths(event.mimeData()):
+            if self._drop_wheel is not None and self._drop_wheel.isVisible():
+                self._drop_wheel.update_hover_from_global(
+                    self.mapToGlobal(event.position().toPoint())
+                )
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dragLeaveEvent(self, event: QDragLeaveEvent | None) -> None:
+        self._hovered = False
+        self.update()
+        if event is not None:
+            super().dragLeaveEvent(event)
+
+    def dropEvent(self, event: QDropEvent | None) -> None:
+        if event is None:
+            return
+        paths = self._extract_drop_paths(event.mimeData())
+        if self._drop_wheel is not None and self._drop_wheel.isVisible():
+            chosen = self._drop_wheel.update_hover_from_global(
+                self.mapToGlobal(event.position().toPoint())
+            )
+            self._drop_wheel.dismiss()
+            if chosen is not None and paths:
+                self.trigger_drop_files(paths, mode=chosen.mode)
+            else:
+                self._on_wheel_cancelled()
+            event.acceptProposedAction()
+            return
+        if paths:
+            self.trigger_drop_files(paths)
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
     def build_context_menu(self) -> PetContextMenu:
         return PetContextMenu(
             state_machine=self._state_machine,
@@ -571,6 +941,8 @@ class PetWindow(QWidget):
             on_feed=self.trigger_feed,
             on_play=self.trigger_play,
             on_pet=self.trigger_pet,
+            on_select_tool=self.trigger_select_tool,
+            on_tool_action=self.trigger_tool_action,
             on_toggle_sleep=self.trigger_toggle_sleep,
             on_reset_position=self.reset_to_default_position,
             on_toggle_on_top=self.set_always_on_top,
@@ -641,64 +1013,53 @@ class PetWindow(QWidget):
         painter.setPen(QPen(QColor(82, 108, 152, 190), 1))
         painter.drawRect(r.adjusted(3, 3, -4, -4))
 
-        stats = self._state_machine.stats
+        hud = self._state_machine.get_hud_data()
         state = self._state_machine.state
 
         title_font = QFont("Consolas", 8, QFont.Weight.Bold)
         title_font.setStyleHint(QFont.StyleHint.Monospace)
         painter.setFont(title_font)
 
-        # Level badge + state pill
+        # Tool title badge + operational status pill
         painter.setPen(QColor("#73EFF7"))
         painter.drawText(
-            QRect(r.left() + 8, r.top() + 5, 76, 13),
+            QRect(r.left() + 8, r.top() + 5, 86, 13),
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-            f"LV.{stats.level:02d}",
+            hud.badge_left,
         )
 
-        state_colors = {
-            PetState.IDLE: QColor("#38B764"),
-            PetState.PLAYING: QColor("#FFCD75"),
-            PetState.HUNGRY: QColor("#EF7D57"),
-            PetState.SLEEPING: QColor("#8A9AF2"),
-        }
-        painter.setPen(state_colors.get(state, QColor("#F0F7F4")))
+        badge_color = (
+            QColor("#8A9AF2")
+            if state == PetState.SLEEPING
+            else QColor(hud.badge_right_color)
+        )
+        badge_right_text = "DND" if state == PetState.SLEEPING else hud.badge_right
+        painter.setPen(badge_color)
         painter.drawText(
-            QRect(r.left() + 68, r.top() + 5, r.width() - 76, 13),
+            QRect(r.left() + 78, r.top() + 5, r.width() - 86, 13),
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-            state.value.upper(),
+            badge_right_text,
         )
 
-        # Three segmented retro stat bars
-        food_color = (
-            QColor("#38B764")
-            if stats.hunger > 50.0
-            else (QColor("#FFCD75") if stats.hunger > 25.0 else QColor("#EF7D57"))
-        )
-        bars = [
-            ("FD", stats.hunger, food_color),
-            ("EN", stats.energy, QColor("#41A6F6")),
-            ("HP", stats.happiness, QColor("#FF77A8")),
-        ]
         bar_font = QFont("Consolas", 7, QFont.Weight.Bold)
         painter.setFont(bar_font)
 
-        for idx, (label, val, color) in enumerate(bars):
+        for idx, bar in enumerate(hud.bars[:3]):
             row_y = r.top() + 21 + idx * 12
             painter.setPen(QColor("#C2D3CD"))
             painter.drawText(
                 QRect(r.left() + 8, row_y - 1, 20, 10),
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                label,
+                bar.label,
             )
 
             track = QRect(r.left() + 28, row_y + 1, r.width() - 62, 7)
             painter.fillRect(track, QColor(16, 18, 30, 255))
 
-            fill_w = int(round((max(0.0, min(100.0, val)) / 100.0) * (track.width() - 2)))
+            fill_w = int(round((bar.clamped_value / 100.0) * (track.width() - 2)))
             if fill_w > 0:
                 fill_rect = QRect(track.left() + 1, track.top() + 1, fill_w, track.height() - 2)
-                painter.fillRect(fill_rect, color)
+                painter.fillRect(fill_rect, QColor(bar.color_hex))
                 # Specular 1px top highlight on bar
                 painter.fillRect(
                     QRect(fill_rect.left(), fill_rect.top(), fill_rect.width(), 1),
@@ -709,7 +1070,7 @@ class PetWindow(QWidget):
             painter.drawText(
                 QRect(track.right() + 4, row_y - 1, 26, 10),
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                f"{int(round(val)):3d}",
+                bar.formatted_value,
             )
 
     def _paint_toast(self, painter: QPainter) -> None:
@@ -717,7 +1078,7 @@ class PetWindow(QWidget):
         rise_px = int(progress * 8)
         alpha = max(80, min(255, int(255 * (self._toast_steps / max(1, self._toast_max_steps)) * 1.35)))
 
-        pill_w = 68
+        pill_w = max(68, min(self.width() - 12, len(self._toast_text) * 7 + 16))
         pill_h = 18
         pill_x = (self.width() - pill_w) // 2
         min_y = (self._hud_rect.bottom() + 3) if self._is_hud_visible() else 4
@@ -757,12 +1118,22 @@ class PetWindow(QWidget):
         self._anim_timer.stop()
         self._ambient_timer.stop()
         self._overlay_timer.stop()
+        self._typer.stop("STOPPED")
+        if self._snip_session is not None:
+            self._snip_session.close()
+            self._snip_session = None
+        if self._drop_wheel is not None:
+            self._drop_wheel.dismiss()
+            self._drop_wheel.close()
+            self._drop_wheel.deleteLater()
+            self._drop_wheel = None
         if self._unsub_state is not None:
             self._unsub_state()
             self._unsub_state = None  # type: ignore[assignment]
         if self._unsub_stats is not None:
             self._unsub_stats()
             self._unsub_stats = None  # type: ignore[assignment]
+        self._state_machine.shutdown()
 
     def closeEvent(self, event: QCloseEvent | None) -> None:
         if not self._is_shutting_down:

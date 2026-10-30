@@ -30,11 +30,13 @@ class TestByteSpriteAppIntegration:
         state_file = tmp_path / "state.json"
         storage = StorageManager(state_file)
         storage.save(
-            stats=PetStats(hunger=35.0, energy=72.0, happiness=64.0, experience=120),
+            stats=PetStats(cpu_usage=35.0, ram_usage=72.0, disk_usage=64.0, completed_sessions=8),
             state=PetState.IDLE,
             position=(150, 180),
             always_on_top=False,
             auto_wander=False,
+            active_tool="pomodoro",
+            tools_data={"pomodoro": {"completed_sessions": 8, "remaining_seconds": 1200}},
         )
 
         controller = ByteSpriteApp(
@@ -44,20 +46,21 @@ class TestByteSpriteAppIntegration:
         )
         try:
             assert controller.auto_save_timer.interval() == AUTO_SAVE_INTERVAL_MS == 60_000
-            assert controller.state_machine.stats.hunger == 35.0
-            assert controller.state_machine.stats.level == 2
+            assert controller.state_machine.active_tool_id == "pomodoro"
+            assert controller.state_machine.stats.completed_sessions == 8
+            assert controller.state_machine.stats.level == 3
             assert controller.window.always_on_top is False
             assert controller.window.auto_wander is False
 
-            controller.window.trigger_feed()
-            assert controller.state_machine.stats.hunger == 60.0
+            controller.window.trigger_play()
+            assert controller.state_machine.state == PetState.PLAYING
         finally:
             controller.shutdown()
 
-        # Verify save-on-shutdown wrote updated stats atomically
+        # Verify save-on-shutdown wrote updated tool state atomically
         reloaded = storage.load()
-        assert reloaded.stats.hunger == 60.0
-        assert reloaded.stats.experience == 130
+        assert reloaded.active_tool == "pomodoro"
+        assert reloaded.state == PetState.PLAYING
         assert not controller.has_active_timers()
 
     def test_window_close_event_triggers_full_app_shutdown_not_frozen_tray(
@@ -71,7 +74,7 @@ class TestByteSpriteAppIntegration:
 
         assert not controller.has_active_timers()
         saved = storage.load()
-        assert saved.stats.experience > 0
+        assert saved.active_tool == "pomodoro"
 
     def test_requirements_txt_is_valid_utf8_without_utf16_bom(self) -> None:
         req_path = Path(__file__).resolve().parents[1] / "requirements.txt"
@@ -79,3 +82,17 @@ class TestByteSpriteAppIntegration:
         assert not raw.startswith((b"\xff\xfe", b"\xfe\xff", b"\xef\xbb\xbf"))
         decoded = raw.decode("utf-8")
         assert "PyQt6" in decoded
+
+    def test_venv_pythonw_uses_windows_gui_subsystem_without_console(self) -> None:
+        import struct
+
+        pythonw = Path(__file__).resolve().parents[1] / ".venv" / "Scripts" / "pythonw.exe"
+        if pythonw.exists():
+            raw = pythonw.read_bytes()
+            pe_offset = struct.unpack_from("<I", raw, 0x3C)[0]
+            subsystem = struct.unpack_from("<H", raw, pe_offset + 0x5C)[0]
+            assert subsystem == 2  # IMAGE_SUBSYSTEM_WINDOWS_GUI
+            # Ensure it uses CPython's venvwlauncher (which resolves pyvenv.cfg) rather than
+            # uv's console trampoline or a bare pythonw.exe that directly imports python312.dll
+            assert b"python.exe\x02PAD" not in raw
+            assert b"python312.dll" not in raw
