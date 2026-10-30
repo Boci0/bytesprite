@@ -1,4 +1,4 @@
-"""Frameless translucent pixel radial drop wheel for interactive File Forge selection."""
+"""Frameless translucent frosted radial drop wheel for interactive File Forge selection."""
 
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ from PyQt6.QtGui import (
     QDragLeaveEvent,
     QDragMoveEvent,
     QDropEvent,
-    QFont,
     QImage,
     QPainter,
     QPalette,
@@ -28,6 +27,16 @@ from PyQt6.QtWidgets import QWidget
 
 from src.graphics.sprite_matrix import get_sprite_frames
 from src.tools.file_forge import ForgeWheelOption
+from src.ui.theme import (
+    DANGER_HEX,
+    GLASS_RAISED_RGBA,
+    GLASS_RGBA,
+    HAIRLINE_RGBA,
+    TEXT_DIM_HEX,
+    TEXT_HEX,
+    qcolor,
+    ui_font,
+)
 
 
 def _build_hub_sprite_qimage() -> QImage:
@@ -334,121 +343,105 @@ class RadialDropWheel(QWidget):
 
     def _header_preview_text(self) -> tuple[str, QColor]:
         if not self._paths:
-            return ("DROP WHEEL", QColor("#73EFF7"))
+            return ("Drop to convert", QColor(TEXT_DIM_HEX))
         lead = self._paths[0].name
-        if len(lead) > 16:
-            lead = f"{lead[:13]}..."
-        src_label = f"{len(self._paths)} ITEMS" if len(self._paths) > 1 else lead
+        if len(lead) > 18:
+            lead = f"{lead[:15]}..."
+        src_label = f"{len(self._paths)} items" if len(self._paths) > 1 else lead
 
         chosen = self.selected_option()
         if chosen is None:
-            return (f"{src_label} : PICK SLICE", QColor("#C2D3CD"))
-        return (f"{src_label} -> {chosen.preview_suffix}", QColor(chosen.color_hex))
+            return (f"{src_label}  ·  pick a slice", QColor(TEXT_DIM_HEX))
+        return (f"{src_label}  ->  {chosen.preview_suffix}", QColor(TEXT_HEX))
 
     def paintEvent(self, _event) -> None:  # type: ignore[override]
         painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
 
         # Near-zero alpha hit layer keeps Win32 OLE DragOver contiguous across gaps
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         painter.fillRect(
             QRect(4, 4, self.width() - 8, self.height() - 8),
             QColor(18, 16, 30, 4),
         )
+        hairline = QPen(qcolor(HAIRLINE_RGBA), 1.0)
 
-        # Top preview header pill
-        banner = QRect(14, 6, self.width() - 28, 24)
-        painter.fillRect(banner.adjusted(2, 0, -2, 0), QColor(24, 20, 37, 242))
-        painter.fillRect(banner.adjusted(0, 2, 0, -2), QColor(24, 20, 37, 242))
+        # Header pill with the live "file -> result" preview
         header_text, header_color = self._header_preview_text()
-        border_col = QColor(header_color)
-        border_col.setAlpha(200)
-        painter.setPen(QPen(border_col, 1))
-        painter.drawRect(banner.adjusted(2, 2, -3, -3))
-
-        banner_font = QFont("Consolas", 8, QFont.Weight.Bold)
-        banner_font.setStyleHint(QFont.StyleHint.Monospace)
-        painter.setFont(banner_font)
+        banner = QRectF(18.5, 8.5, self.width() - 37.0, 26.0)
+        painter.setPen(hairline)
+        painter.setBrush(qcolor(GLASS_RGBA))
+        painter.drawRoundedRect(banner, 13.0, 13.0)
+        chosen = self.selected_option()
+        if chosen is not None:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(chosen.color_hex))
+            painter.drawEllipse(QPointF(banner.left() + 14.0, banner.center().y()), 3.5, 3.5)
+        painter.setFont(ui_font(8.5, bold=True))
         painter.setPen(header_color)
         painter.drawText(banner, Qt.AlignmentFlag.AlignCenter, header_text)
 
-        # Smooth antialiased radial wedges
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-
-        # Subtle dark backdrop halo behind ring
+        # Frosted ring backdrop
+        center = QPointF(self.CENTER_X, self.CENTER_Y)
         halo_r = self.OUTER_RADIUS + 6.0
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(18, 16, 30, 165))
-        painter.drawEllipse(QPointF(self.CENTER_X, self.CENTER_Y), halo_r, halo_r)
+        painter.setPen(hairline)
+        painter.setBrush(qcolor(GLASS_RGBA))
+        painter.drawEllipse(center, halo_r, halo_r)
 
         for idx, opt in enumerate(self._options):
             is_hot = idx == self._hovered_index
             poly = self._hover_polys[idx] if is_hot else self._normal_polys[idx]
-            accent = QColor(opt.color_hex)
-
             if is_hot:
-                fill = QColor(accent.red(), accent.green(), accent.blue(), 68)
-                pen = QPen(accent, 2.2)
+                accent = QColor(opt.color_hex)
+                accent.setAlpha(230)
+                painter.setBrush(QColor(68, 72, 84, 245))
+                painter.setPen(QPen(accent, 2.0))
             else:
-                fill = QColor(34, 40, 66, 232)
-                muted = QColor(82, 108, 152, 195)
-                pen = QPen(muted, 1.2)
-
-            painter.setBrush(fill)
-            painter.setPen(pen)
+                painter.setBrush(qcolor(GLASS_RAISED_RGBA))
+                painter.setPen(hairline)
             painter.drawPolygon(poly)
 
-        # Center neutral / cancel hub
+        # Center cancel hub
         hub_r = self.INNER_RADIUS - 5.0
         hub_is_neutral = self._hovered_index < 0
-        hub_border = QColor("#EF7D57") if hub_is_neutral else QColor("#3A4466")
-        painter.setBrush(QColor(24, 20, 37, 245))
-        painter.setPen(QPen(hub_border, 1.8 if hub_is_neutral else 1.2))
-        painter.drawEllipse(QPointF(self.CENTER_X, self.CENTER_Y), hub_r, hub_r)
+        painter.setBrush(qcolor(GLASS_RGBA))
+        painter.setPen(QPen(QColor(DANGER_HEX), 1.6) if hub_is_neutral else hairline)
+        painter.drawEllipse(center, hub_r, hub_r)
 
-        # Crisp pixel-art sprite + labels (disable antialiasing)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        # Crisp pixel-art sprite (no smoothing)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
-
-        sprite_rect = QRect(
-            int(self.CENTER_X) - 16,
-            int(self.CENTER_Y) - 22,
-            32,
-            32,
-        )
+        sprite_rect = QRect(int(self.CENTER_X) - 16, int(self.CENTER_Y) - 24, 32, 32)
         painter.drawImage(sprite_rect, self._hub_sprite)
 
-        sub_font = QFont("Consolas", 7, QFont.Weight.Bold)
-        sub_font.setStyleHint(QFont.StyleHint.Monospace)
+        sub_font = ui_font(7.0)
         painter.setFont(sub_font)
-        painter.setPen(QColor("#EF7D57") if hub_is_neutral else QColor("#8B9BB4"))
+        painter.setPen(QColor(DANGER_HEX) if hub_is_neutral else QColor(TEXT_DIM_HEX))
         painter.drawText(
-            QRect(int(self.CENTER_X) - 28, int(self.CENTER_Y) + 10, 56, 12),
+            QRect(int(self.CENTER_X) - 28, int(self.CENTER_Y) + 9, 56, 13),
             Qt.AlignmentFlag.AlignCenter,
-            "SKIP",
+            "Skip",
         )
 
-        label_font = QFont("Consolas", 8, QFont.Weight.Bold)
-        label_font.setStyleHint(QFont.StyleHint.Monospace)
-
+        label_font = ui_font(9.0, bold=True)
         for idx, opt in enumerate(self._options):
             is_hot = idx == self._hovered_index
             pt = self._label_centers[idx]
-            box = QRectF(pt.x() - 34.0, pt.y() - 13.0, 68.0, 26.0)
+            box = QRectF(pt.x() - 34.0, pt.y() - 14.0, 68.0, 28.0)
 
             painter.setFont(label_font)
-            painter.setPen(QColor("#FFFFFF") if is_hot else QColor(opt.color_hex))
+            painter.setPen(QColor("#FFFFFF") if is_hot else QColor(TEXT_HEX))
             painter.drawText(
-                QRectF(box.left(), box.top(), box.width(), 14.0),
+                QRectF(box.left(), box.top(), box.width(), 15.0),
                 Qt.AlignmentFlag.AlignCenter,
                 opt.label,
             )
 
             painter.setFont(sub_font)
-            painter.setPen(QColor(opt.color_hex) if is_hot else QColor("#9BAEC8"))
+            painter.setPen(QColor(opt.color_hex) if is_hot else QColor(TEXT_DIM_HEX))
             painter.drawText(
-                QRectF(box.left(), box.top() + 12.0, box.width(), 12.0),
+                QRectF(box.left(), box.top() + 14.0, box.width(), 13.0),
                 Qt.AlignmentFlag.AlignCenter,
-                opt.subtitle,
+                opt.subtitle.capitalize(),
             )
 
         painter.end()

@@ -189,7 +189,13 @@ class TestPetWindowAndContextMenu:
             on_quit=lambda: quit_called.append(True),
         )
 
-        action_texts = [a.text() for a in menu.actions() if not a.isSeparator()]
+        def all_actions(m):
+            for a in m.actions():
+                yield a
+                if a.menu() is not None:
+                    yield from all_actions(a.menu())
+
+        action_texts = [a.text() for a in all_actions(menu) if not a.isSeparator()]
         assert any("Refresh System Metrics" in t for t in action_texts)
         assert any("Pomodoro" in t for t in action_texts)
         assert any("Do Not Disturb" in t for t in action_texts)

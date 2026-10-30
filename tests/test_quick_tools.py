@@ -135,3 +135,29 @@ def test_snip_save_falls_back_when_pictures_dir_refuses_writes(
     saved = pet_window.PetWindow._save_snip_png(img)
     assert saved is not None and saved.parent == tmp_path / "home" / ".bytesprite" / "snips"
     assert saved.exists()
+
+
+def test_submenu_titles_render_literal_ampersand(qapp: QApplication, tmp_path: Path) -> None:
+    controller = ByteSpriteApp(
+        app=qapp, storage=StorageManager(tmp_path / "s.json"), enable_tray=False
+    )
+    try:
+        menu = controller.window.build_context_menu()
+        titles = [sub.title() for sub in menu.plugin_submenus.values()] + [menu.quick_menu.title()]
+        # "&&" is how Qt shows a literal "&"; a lone "&" would be swallowed as a mnemonic
+        assert "Screenshot && Typing" in titles
+        assert all("&" not in t.replace("&&", "") for t in titles)
+        menu.deleteLater()
+    finally:
+        controller.shutdown()
+
+
+def test_closing_a_dialog_does_not_quit_the_app(qapp: QApplication, tmp_path: Path) -> None:
+    # Pet windows are Qt.Tool, so Qt would treat a closed TyperDialog as the last window
+    controller = ByteSpriteApp(
+        app=qapp, storage=StorageManager(tmp_path / "s.json"), enable_tray=False
+    )
+    try:
+        assert qapp.quitOnLastWindowClosed() is False
+    finally:
+        controller.shutdown()
