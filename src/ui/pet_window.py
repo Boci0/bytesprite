@@ -46,6 +46,7 @@ from src.tools.web_drop import WebImageJob, is_web_image_source, web_image_stem
 from src.ui.context_menu import PetContextMenu, style_menu
 from src.ui.drop_wheel import RadialDropWheel
 from src.ui.quick_tools import OcrJob, SnipSession
+from src.ui.sfx import preload_tick_sounds
 from src.ui.tool_wheel import WEB_SHORTCUTS, ToolWheel, ToolWheelOption, google_search_url
 from src.ui.theme import GLASS_RGBA, HAIRLINE_RGBA, HOVER_RGBA, TEXT_DIM_HEX, TEXT_HEX, qcolor, ui_font
 
@@ -298,10 +299,12 @@ class PetWindow(QWidget):
         self._ocr_jobs: list[OcrJob] = []
         # Image dragged out of a browser (URL or raw image), fetched only once a slice is chosen
         self._pending_web_source: str | QImage | None = None
+        self._drag_paths: list[Path] = []  # cached at drag-enter; re-stat per move lags big drops
         self._web_jobs: list[WebImageJob] = []
         # Clean PNG from a web drop, deleted once File Forge converts it to the chosen format
         self._web_intermediate: Path | None = None
         self.recent = RecentFiles()
+        QTimer.singleShot(0, preload_tick_sounds)  # wheels are built lazily; sounds must be ready first
 
         self._configure_window()
         self._sync_animation_to_pet_state(self._state_machine.state)
@@ -1199,7 +1202,7 @@ class PetWindow(QWidget):
         if event is None:
             return
         mime = event.mimeData()
-        paths = self._extract_drop_paths(mime)
+        paths = self._drag_paths = self._extract_drop_paths(mime)
         self._pending_web_source = None if paths else self._web_drop_source(mime)
         if paths or self._pending_web_source is not None:
             forge = self._state_machine.forge_plugin
@@ -1228,7 +1231,7 @@ class PetWindow(QWidget):
     def dragMoveEvent(self, event: QDragMoveEvent | None) -> None:
         if event is None:
             return
-        if self._pending_web_source is not None or self._extract_drop_paths(event.mimeData()):
+        if self._pending_web_source is not None or self._drag_paths:
             if self._drop_wheel is not None and self._drop_wheel.isVisible():
                 self._drop_wheel.update_hover_from_global(
                     self.mapToGlobal(event.position().toPoint())

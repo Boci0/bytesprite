@@ -9,11 +9,16 @@ import struct
 import tempfile
 import wave
 
-from PyQt6.QtCore import QObject, QUrl
+from PyQt6.QtCore import QCoreApplication, QObject, QUrl
 
 SAMPLE_RATE = 22050
 # C major pentatonic from C5: sliding around the wheel plays a rising scale, never a clash
 _TICK_SEMITONES = (0, 2, 4, 7, 9, 12, 14, 16, 19, 21)
+
+# One app-wide bank: QSoundEffect loads asynchronously, so a bank built when a wheel first opens
+# is still loading during its first hovers and those ticks are silent
+_effects: list = []
+_devices: object = None
 
 
 def _synth_tick(semitones: int) -> bytes:
@@ -36,24 +41,40 @@ def _synth_tick(semitones: int) -> bytes:
     return buf.getvalue()
 
 
+def preload_tick_sounds() -> list:
+    """Build the shared tick bank once; call at startup so it is ready before any wheel opens."""
+    global _devices
+    if _effects or os.environ.get("QT_QPA_PLATFORM", "").lower() == "offscreen":
+        return _effects
+    from PyQt6.QtMultimedia import QMediaDevices, QSoundEffect
+
+    app = QCoreApplication.instance()
+    for semitones in _TICK_SEMITONES:
+        path = os.path.join(tempfile.gettempdir(), f"bytesprite_tick_{semitones}.wav")
+        try:
+            with open(path, "wb") as f:
+                f.write(_synth_tick(semitones))
+        except OSError:
+            pass  # another running instance holds it; its identical copy still loads
+        effect = QSoundEffect(app)
+        effect.setSource(QUrl.fromLocalFile(path))
+        effect.setVolume(0.25)
+        _effects.append(effect)
+
+    # Effects stay bound to the device they first opened; follow speaker/headphone switches
+    _devices = QMediaDevices(app)
+    _devices.audioOutputsChanged.connect(  # type: ignore[attr-defined]
+        lambda: [e.setAudioDevice(QMediaDevices.defaultAudioOutput()) for e in _effects]
+    )
+    return _effects
+
+
 class TickSounds(QObject):
-    """One preloaded QSoundEffect per pitch, so a tick starts instantly and overlaps its neighbours."""
+    """Plays pitched ticks from the shared preloaded bank, so a tick starts instantly and overlaps."""
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
-        self._effects: list = []
-        if os.environ.get("QT_QPA_PLATFORM", "").lower() == "offscreen":
-            return
-        from PyQt6.QtMultimedia import QSoundEffect
-
-        for semitones in _TICK_SEMITONES:
-            path = os.path.join(tempfile.gettempdir(), f"bytesprite_tick_{semitones}.wav")
-            with open(path, "wb") as f:
-                f.write(_synth_tick(semitones))
-            effect = QSoundEffect(self)
-            effect.setSource(QUrl.fromLocalFile(path))
-            effect.setVolume(0.25)
-            self._effects.append(effect)
+        self._effects = preload_tick_sounds()
 
     def play(self, index: int) -> None:
         if self._effects:

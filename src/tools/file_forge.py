@@ -1239,7 +1239,7 @@ def get_wheel_options_for_paths(paths: Sequence[Path | str]) -> list[ForgeWheelO
         ]
 
     # Single or batch images: offer all image conversions + archive compression
-    if all(not p.is_dir() and p.suffix.lower() in _IMAGE_EXTS for p in existing):
+    if all(p.suffix.lower() in _IMAGE_EXTS and not p.is_dir() for p in existing):
         lead_ext = existing[0].suffix.lower() if len(existing) == 1 else ""
         return [
             ForgeWheelOption(

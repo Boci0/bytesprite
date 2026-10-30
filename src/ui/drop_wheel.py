@@ -350,7 +350,8 @@ class RadialDropWheel(QWidget):
     def dragEnterEvent(self, event: QDragEnterEvent | None) -> None:
         if event is None:
             return
-        paths = self._extract_paths(event.mimeData())
+        # Paths were validated when the wheel opened; re-statting them here stalls big drops
+        paths = [] if self._paths else self._extract_paths(event.mimeData())
         if paths or self._paths:
             if paths:
                 self._paths = paths
