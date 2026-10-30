@@ -33,6 +33,10 @@ _PEAR_LOG_TAIL = 256 * 1024
 _RETRY_S = 8.0
 # Pear writes <id>.lrc 10..65s after a song starts, so its cache is re-checked this often until it lands
 _PEAR_POLL_S = 1.0
+# Pear tracks wait this long for Pear's own lyrics (what Pear displays, matched on its real title and artist)
+# before ByteSprite asks LRCLIB itself: Pear radio titles reach SMTC with the placeholder artist "Pear Radio",
+# so an LRCLIB guess can be another artist's song of the same name
+_PEAR_GRACE_S = 12.0
 _LOADING_MAX_S = 45.0  # stop the "looking up" dots after this; most songs that have lyrics are found by then
 
 # One long-lived PowerShell prints a JSON line every 300ms; spawning it per poll would cost far more.
@@ -62,6 +66,7 @@ while ($true) {
                 pos    = $tl.Position.TotalMilliseconds
                 dur    = $tl.EndTime.TotalMilliseconds
                 at     = $tl.LastUpdatedTime.ToUnixTimeMilliseconds()
+                app    = $s.SourceAppUserModelId
             } | ConvertTo-Json -Compress
         }
     } catch {}
@@ -234,6 +239,8 @@ class LyricsPlugin:
         self._track_started = 0.0
         self._pear_path: Path | None = None
         self._pear_check_at = 0.0
+        self._from_pear = False  # Pear's lines replace an LRCLIB guess, never the other way round
+        self._lrclib_at: float | None = None  # when to ask LRCLIB; None once asked
         self._was_loading = False
 
     @property
@@ -323,14 +330,18 @@ class LyricsPlugin:
         playing = snap.get("status") == "Playing" and bool(track[0])
         now = time.monotonic()
         if track != self._track:
-            self._track, self._lines, self._retries = track, None, 0
-            self._track_started, self._pear_path, self._pear_check_at = now, None, now + _PEAR_POLL_S
-            if track[0]:
-                self._start_fetch(track, snap)
-        elif not self._lines and track[0] and now >= self._pear_check_at:
+            from_pear_app = re.search(r"peerm|pear", str(snap.get("app") or ""), re.IGNORECASE) is not None
+            self._track, self._lines, self._retries, self._from_pear = track, None, 0, False
+            self._track_started, self._pear_path, self._pear_check_at = now, None, now
+            self._lrclib_at = now + _PEAR_GRACE_S if from_pear_app else now
+        if track[0] and not self._from_pear and now >= self._pear_check_at:
             self._pear_check_at = now + _PEAR_POLL_S
             self._poll_pear_cache(track)
-        elif self._lines == [] and track[0] and self._retries < _MAX_RETRIES and time.monotonic() >= self._retry_at:
+        if track[0] and self._lrclib_at is not None and now >= self._lrclib_at and not self._lines:
+            self._lrclib_at = None
+            self._start_fetch(track, snap)
+        elif (self._lines == [] and track[0] and self._lrclib_at is None and self._retries < _MAX_RETRIES
+              and now >= self._retry_at):
             # A miss is often transient: LRCLIB timed out, or SMTC still held the previous song's duration
             self._lines, self._retries = None, self._retries + 1
             self._start_fetch(track, snap)
@@ -359,7 +370,7 @@ class LyricsPlugin:
         except OSError:
             return
         if lines:
-            self._lines = lines
+            self._lines, self._from_pear = lines, True
             self._cache[track] = lines
 
     def desired_state(self) -> CompanionState | None:

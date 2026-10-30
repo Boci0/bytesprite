@@ -54,7 +54,7 @@ powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\ByteSprite\app\unins
 ## Pear Music lyrics
 
 Right-click > **Lyrics > Show Song Lyrics**. ByteSprite reads the playing track from Windows media
-controls (no Pear plugin needed), then shows the current line in a bubble with a karaoke sweep. Lyrics
+controls (no Pear plugin needed), then shows the current line in a small card. Lyrics
 come from Pear's own lyrics cache first, so anything Pear can show works, then from
 [LRCLIB](https://lrclib.net). Turning it on sends the song title and artist to LRCLIB. While a song
 plays, the paperclip grooves along.

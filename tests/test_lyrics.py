@@ -135,3 +135,35 @@ def test_late_pear_cache_is_picked_up_without_waiting_for_retry(monkeypatch, tmp
     plugin._reader.snap = _playing(2000)  # type: ignore[attr-defined]
     plugin.tick()
     assert plugin.line == "late line" and not plugin.loading
+
+
+def test_pear_track_prefers_pear_lyrics_over_an_lrclib_guess(monkeypatch, tmp_path) -> None:
+    import src.tools.lyrics as lyrics
+
+    (tmp_path / "lyrics_cache").mkdir()
+    (tmp_path / "peerm_debug.log").write_text(
+        '[1] [player] === playSong START === token=1 song="Song" id=stream_y source=stream\n', encoding="utf-8")
+    monkeypatch.setattr(lyrics, "_PEAR_DIR", tmp_path)
+    calls: list[str] = []
+
+    def wrong_song(title: str, artist: str, duration_s: float) -> list[tuple[int, str]]:
+        calls.append(title)
+        return [(0, "another artist's song")]  # same name, wrong artist
+
+    monkeypatch.setattr(lyrics, "fetch_synced_lyrics", wrong_song)
+    monkeypatch.setattr(lyrics.threading, "Thread", lambda target, args, daemon: type("T", (), {"start": lambda self: target(*args)})())
+    plugin = LyricsPlugin()
+    plugin.load_dict({"enabled": True})
+    plugin._reader = _FakeReader({**_playing(1500), "app": "com.peerm.app"})  # type: ignore[assignment]
+    plugin.tick()
+    assert calls == [] and plugin.loading  # Pear track: wait for Pear's own lyrics first
+
+    plugin._lrclib_at = 0.0  # grace over, Pear still has nothing: fall back to LRCLIB
+    plugin.tick()
+    assert calls == ["Song"] and plugin.line == "another artist's song"
+
+    # Pear's lyrics land later and replace the guess
+    (tmp_path / "lyrics_cache" / "stream_y.lrc").write_text("[00:01.00]the real line", encoding="utf-8")
+    plugin._pear_check_at = 0.0
+    plugin.tick()
+    assert plugin.line == "the real line"
