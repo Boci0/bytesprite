@@ -59,6 +59,7 @@ class HudData:
     badge_right: str
     badge_right_color: str = "#38B764"
     bars: tuple[HudBar, ...] = ()
+    detail: str = ""
 
 
 @dataclass(frozen=True)

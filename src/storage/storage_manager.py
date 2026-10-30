@@ -7,6 +7,7 @@ import logging
 import math
 import os
 import shutil
+import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,6 +16,54 @@ from typing import Any
 from src.engine.models import PetState, PetStats
 
 logger = logging.getLogger(__name__)
+
+_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+_RUN_VALUE = "ByteSprite"
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def autostart_command() -> str:
+    """Console-free launch command; a Run key has no working dir, so put the root on sys.path."""
+    exe = Path(sys.executable)
+    gui_exe = exe.with_name("pythonw.exe")
+    launcher = gui_exe if gui_exe.exists() else exe
+    code = f"import sys;sys.path.insert(0,r'{_PROJECT_ROOT}');from src.main import main;raise SystemExit(main())"
+    return f'"{launcher}" -c "{code}"'
+
+
+def autostart_enabled() -> bool:
+    """The HKCU Run value is the source of truth for Start with Windows (not state.json)."""
+    if sys.platform != "win32":
+        return False
+    import winreg
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY) as key:
+            winreg.QueryValueEx(key, _RUN_VALUE)
+        return True
+    except OSError:
+        return False
+
+
+def set_autostart(enabled: bool) -> bool:
+    """Add or remove the HKCU Run value; returns False if the registry refused."""
+    if sys.platform != "win32":
+        return False
+    import winreg
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
+            if enabled:
+                winreg.SetValueEx(key, _RUN_VALUE, 0, winreg.REG_SZ, autostart_command())
+            else:
+                try:
+                    winreg.DeleteValue(key, _RUN_VALUE)
+                except FileNotFoundError:
+                    pass
+        return True
+    except OSError:
+        logger.warning("Could not update Start with Windows registry value", exc_info=True)
+        return False
 
 
 @dataclass

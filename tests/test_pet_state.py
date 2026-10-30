@@ -196,3 +196,26 @@ class TestMultiToolEngine:
         unsubscribe()
         sm.rest()
         assert len(events) == 2
+
+
+def test_pomodoro_long_break_lengths_and_phase_notices() -> None:
+    pomo = PomodoroPlugin(work_seconds=2, break_seconds=1)
+    pomo.completed_sessions = 3
+    pomo.start_work()
+    pomo.tick(2)
+    # 4th session completed -> long break and a FOCUS DONE notice
+    assert pomo.phase == PomodoroPhase.BREAK
+    assert pomo.remaining_seconds == PomodoroPlugin.LONG_BREAK_SECONDS
+    assert pomo.pop_notification() == ("FOCUS DONE", "#73EFF7")
+    assert pomo.pop_notification() is None
+    pomo.tick(PomodoroPlugin.LONG_BREAK_SECONDS)
+    assert pomo.phase == PomodoroPhase.IDLE
+    assert pomo.pop_notification()[0] == "BREAK OVER"
+
+    assert pomo.execute_action("pomodoro:work:50")[0] is True
+    assert pomo.execute_action("pomodoro:brk:10")[0] is True
+    assert pomo.remaining_seconds == 50 * 60  # idle -> applies immediately
+    restored = PomodoroPlugin()
+    restored.load_dict(pomo.to_dict())
+    assert restored.work_minutes == 50
+    assert any(i.callback_id == "pomodoro:brk:10" and i.checked for i in restored.get_menu_items())

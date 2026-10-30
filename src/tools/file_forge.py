@@ -1670,6 +1670,14 @@ class FileForgePlugin:
         mode_tag = self._mode.value.upper()[:4]
         badge_right = "WORK" if busy else (status_badge if status_badge != "DROP" else mode_tag)
         jobs_bar_val = min(100.0, float(jobs) * 10.0)
+        if busy:
+            detail = f"Working... {int(progress)}%"
+        elif status_badge == "ERR":
+            detail = "Last job failed"
+        elif status_badge == "DONE":
+            detail = f"Done, saved {saved_pct:.0f}% of size"
+        else:
+            detail = "Drop files on me to convert"
 
         return HudData(
             badge_left="FILE.FRG",
@@ -1677,22 +1685,24 @@ class FileForgePlugin:
             badge_right_color=status_color,
             bars=(
                 HudBar(
-                    label="PR",
+                    label="Job",
                     value=progress,
                     color_hex="#FFCD75" if busy else "#38B764",
                 ),
                 HudBar(
-                    label="SV",
+                    label="Saved",
                     value=saved_pct,
                     color_hex="#73EFF7",
+                    display_text=f"{-int(round(saved_pct)):+d}%" if round(saved_pct) else "0%",
                 ),
                 HudBar(
-                    label="JB",
+                    label="Total",
                     value=jobs_bar_val,
                     color_hex="#FF77A8",
                     display_text=f"{min(999, jobs):3d}",
                 ),
             ),
+            detail=detail,
         )
 
     def get_menu_items(self) -> list[ToolMenuItem]:

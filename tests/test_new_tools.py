@@ -546,3 +546,20 @@ class TestDragDropAndMenuIntegration:
                     continue
                 content = py_file.read_text(encoding="utf-8")
                 assert "\u2014" not in content, f"Em dash found in {py_file}"
+
+
+def test_clip_vault_pins_survive_rotation_and_clear() -> None:
+    written: list[str] = []
+    vault = ClipVaultPlugin(read_text=lambda: "", write_text=written.append)
+    vault.capture_text("keep me")
+    assert vault.execute_action("clipvault:pin")[1] == "PINNED"
+    assert vault.execute_action("clipvault:pin")[1] == "PINNED"  # same digest not pinned twice
+    assert len(vault.pins) == 1
+    for i in range(ClipVaultPlugin.MAX_SLOTS + 1):
+        vault.capture_text(f"filler {i}")
+    vault.execute_action("clipvault:clear")
+    assert vault.execute_action("clipvault:pinned:0")[0] is True
+    assert written[-1] == "keep me"
+    assert vault.get_hud_data().detail.startswith("Latest: keep me")
+    vault.execute_action("clipvault:clear_pins")
+    assert vault.pins == ()

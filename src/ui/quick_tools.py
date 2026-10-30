@@ -44,6 +44,8 @@ class SnipOverlay(QWidget):
     ) -> None:
         super().__init__(None)
         self._shot = shot
+        # Converted once: per-move toImage() on a 4K grab made the color picker stutter
+        self._image = shot.toImage()
         self._mode = mode
         self._on_done = on_done
         self._origin: QPoint | None = None
@@ -75,7 +77,7 @@ class SnipOverlay(QWidget):
 
     def pixel_color(self, pos: QPoint) -> QColor:
         dev = self._to_device(QRect(pos, pos))
-        return self._shot.toImage().pixelColor(dev.x(), dev.y())
+        return self._image.pixelColor(dev.x(), dev.y())
 
     def crop(self, rect: QRect) -> QImage:
         return self._shot.copy(self._to_device(rect)).toImage()
@@ -96,9 +98,41 @@ class SnipOverlay(QWidget):
         }.get(self._mode, "")
         if self._mode == "color" and self.rect().contains(self._hover):
             hint = f"{self.pixel_color(self._hover).name().upper()}  |  {hint}"
+            self._paint_loupe(painter)
         painter.setPen(QColor("#F0F7F4"))
         painter.drawText(QRect(0, 12, self.width(), 24), Qt.AlignmentFlag.AlignHCenter, hint)
         painter.end()
+
+    LOUPE_CELLS: int = 11
+    LOUPE_ZOOM: int = 10
+
+    def _paint_loupe(self, painter: QPainter) -> None:
+        """Nearest-neighbor zoom of the pixels around the cursor, center cell outlined."""
+        cells, zoom = self.LOUPE_CELLS, self.LOUPE_ZOOM
+        size = cells * zoom
+        center = self._to_device(QRect(self._hover, self._hover)).topLeft()
+        source = QRect(center.x() - cells // 2, center.y() - cells // 2, cells, cells)
+        x = self._hover.x() + 20
+        y = self._hover.y() + 20
+        if x + size > self.width():
+            x = self._hover.x() - 20 - size
+        if y + size + 16 > self.height():
+            y = self._hover.y() - 20 - size - 16
+        target = QRect(x, y, size, size)
+        painter.fillRect(target, QColor(0, 0, 0))
+        painter.drawImage(target, self._image, source)
+        painter.setPen(QPen(QColor("#F0F7F4"), 1))
+        painter.drawRect(target.adjusted(0, 0, -1, -1))
+        mid = (cells // 2) * zoom
+        painter.setPen(QPen(QColor("#73EFF7"), 1))
+        painter.drawRect(QRect(x + mid, y + mid, zoom - 1, zoom - 1))
+        painter.fillRect(QRect(x, y + size, size, 16), QColor(24, 24, 28, 230))
+        painter.setPen(QColor("#F0F7F4"))
+        painter.drawText(
+            QRect(x, y + size, size, 16),
+            Qt.AlignmentFlag.AlignCenter,
+            self.pixel_color(self._hover).name().upper(),
+        )
 
     def _finish(self, result: object | None) -> None:
         self._on_done(self._mode, result)
@@ -241,6 +275,62 @@ class OcrJob(QObject):
             leftover.unlink(missing_ok=True)
         png.parent.rmdir()
         self.finished.emit(text)
+
+
+# ---------------------------------------------------------------------------
+# Global snip hotkeys (RegisterHotKey on a worker thread, no nativeEvent)
+# ---------------------------------------------------------------------------
+
+_MOD_ALT, _MOD_CONTROL, _MOD_SHIFT, _MOD_NOREPEAT = 0x1, 0x2, 0x4, 0x4000
+_WM_HOTKEY, _WM_QUIT = 0x0312, 0x0012
+HOTKEY_LABEL = "Ctrl+Shift+Alt"
+HOTKEY_MODES: dict[int, tuple[str, str]] = {1: ("S", "image"), 2: ("T", "text"), 3: ("C", "color")}
+
+
+class GlobalHotkeys(QObject):
+    """Ctrl+Shift+Alt+S/T/C system-wide hotkeys; `triggered` delivers the snip mode on the Qt thread.
+
+    Thread-level hotkeys (hWnd NULL) post WM_HOTKEY to the registering thread's queue, so a
+    plain GetMessageW loop on a worker thread receives them without touching nativeEvent.
+    """
+
+    triggered = pyqtSignal(str)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._thread_id = 0
+        self._ready = threading.Event()
+        self.registered: list[str] = []
+
+    def start(self) -> None:
+        if sys.platform != "win32":
+            return
+        threading.Thread(target=self._run, daemon=True).start()
+        self._ready.wait(2.0)
+
+    def _run(self) -> None:
+        user32 = ctypes.windll.user32
+        msg = wintypes.MSG()
+        user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 0)  # create the queue before close() can post
+        self._thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
+        mods = _MOD_CONTROL | _MOD_SHIFT | _MOD_ALT | _MOD_NOREPEAT
+        for hk_id, (key, mode) in HOTKEY_MODES.items():
+            # Combos already owned by another app fail here and are skipped
+            if user32.RegisterHotKey(None, hk_id, mods, ord(key)):
+                self.registered.append(mode)
+        self._ready.set()
+        try:
+            while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+                if msg.message == _WM_HOTKEY and msg.wParam in HOTKEY_MODES:
+                    self.triggered.emit(HOTKEY_MODES[msg.wParam][1])
+        finally:
+            for hk_id in HOTKEY_MODES:
+                user32.UnregisterHotKey(None, hk_id)
+
+    def close(self) -> None:
+        if self._thread_id:
+            ctypes.windll.user32.PostThreadMessageW(self._thread_id, _WM_QUIT, 0, 0)
+            self._thread_id = 0
 
 
 # ---------------------------------------------------------------------------

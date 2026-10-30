@@ -17,7 +17,13 @@ from PyQt6.QtWidgets import QApplication
 from src.main import ByteSpriteApp
 from src.storage.storage_manager import StorageManager
 from src.ui.context_menu import QUICK_TOOL_ITEMS
-from src.ui.quick_tools import HumanTyper, SnipOverlay, human_delay_ms, ocr_image_file
+from src.ui.quick_tools import (
+    GlobalHotkeys,
+    HumanTyper,
+    SnipOverlay,
+    human_delay_ms,
+    ocr_image_file,
+)
 
 
 @pytest.fixture(scope="module")
@@ -161,3 +167,29 @@ def test_closing_a_dialog_does_not_quit_the_app(qapp: QApplication, tmp_path: Pa
         assert qapp.quitOnLastWindowClosed() is False
     finally:
         controller.shutdown()
+
+
+def test_color_loupe_paints_without_error(qapp: QApplication) -> None:
+    img = QImage(200, 100, QImage.Format.Format_RGB32)
+    img.fill(QColor("#102030"))
+    overlay = SnipOverlay(QPixmap.fromImage(img), QRect(0, 0, 200, 100), "color", lambda _m, _r: None)
+    try:
+        for hover in (QPoint(5, 5), QPoint(195, 95)):  # loupe flips near the far edges
+            overlay._hover = hover
+            overlay.grab()
+    finally:
+        overlay.deleteLater()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Win32 hotkeys")
+def test_global_hotkeys_start_and_close_cleanly(qapp: QApplication) -> None:
+    hotkeys = GlobalHotkeys()
+    hotkeys.start()
+    assert hotkeys._thread_id != 0
+    hotkeys.close()
+    time.sleep(0.2)  # let the worker leave its loop and unregister
+    # Combos are released, so a second instance can register them again
+    again = GlobalHotkeys()
+    again.start()
+    assert set(again.registered) >= set(hotkeys.registered)
+    again.close()

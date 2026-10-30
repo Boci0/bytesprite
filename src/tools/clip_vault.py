@@ -57,6 +57,7 @@ class ClipVaultPlugin:
     """Event-driven O(1) Clipboard Ring and instant text/JSON/Base64/SHA-256 utility."""
 
     MAX_SLOTS: int = 9
+    MAX_PINS: int = 3
     MAX_CLIP_BYTES: int = 32_768  # 32 KiB per slot (< 300 KiB worst-case heap)
     SUBMENU_NAME: str = "Clip Vault & Quick Transforms"
 
@@ -69,6 +70,8 @@ class ClipVaultPlugin:
         on_change: Callable[[], None] | None = None,
     ) -> None:
         self._ring: collections.deque[ClipEntry] = collections.deque(maxlen=self.MAX_SLOTS)
+        # Pinned entries survive ring rotation and Clear Vault; RAM-only like the ring
+        self._pins: list[ClipEntry] = []
         self._transform_count: int = 0
         self._ignore_digest: bytes | None = None
         self._attached_clipboard: Any = None
@@ -93,6 +96,10 @@ class ClipVaultPlugin:
     @property
     def entries(self) -> tuple[ClipEntry, ...]:
         return tuple(self._ring)
+
+    @property
+    def pins(self) -> tuple[ClipEntry, ...]:
+        return tuple(self._pins)
 
     @property
     def transform_count(self) -> int:
@@ -228,24 +235,25 @@ class ClipVaultPlugin:
             badge_right_color="#73EFF7" if count > 0 else "#38B764",
             bars=(
                 HudBar(
-                    label="SL",
+                    label="Slots",
                     value=slot_pct,
                     color_hex="#73EFF7",
                     display_text=f"{count}/{self.MAX_SLOTS}",
                 ),
                 HudBar(
-                    label="SZ",
+                    label="Size",
                     value=size_pct,
                     color_hex="#41A6F6",
                     display_text=_format_byte_badge(latest_bytes),
                 ),
                 HudBar(
-                    label="TX",
+                    label="Edits",
                     value=tx_pct,
                     color_hex="#FFCD75",
                     display_text=f"{min(999, self._transform_count):3d}",
                 ),
             ),
+            detail=f"Latest: {self._ring[0].preview}" if self._ring else "Copy text to fill the vault",
         )
 
     def get_menu_items(self) -> list[ToolMenuItem]:
@@ -280,6 +288,24 @@ class ClipVaultPlugin:
                     submenu=sub,
                 )
             )
+        for idx, entry in enumerate(self._pins):
+            items.append(
+                ToolMenuItem(
+                    label=f"Pinned #{idx + 1}: {entry.preview}",
+                    callback_id=f"clipvault:pinned:{idx}",
+                    submenu=sub,
+                )
+            )
+        items.append(
+            ToolMenuItem(
+                label=f"Pin Latest Clip ({len(self._pins)}/{self.MAX_PINS})",
+                callback_id="clipvault:pin",
+                enabled=bool(self._ring) and len(self._pins) < self.MAX_PINS,
+                submenu=sub,
+            )
+        )
+        if self._pins:
+            items.append(ToolMenuItem(label="Clear Pins", callback_id="clipvault:clear_pins", submenu=sub))
         items.append(
             ToolMenuItem(
                 label=f"Clear Vault ({len(self._ring)}/{self.MAX_SLOTS})",
@@ -294,6 +320,27 @@ class ClipVaultPlugin:
         if callback_id == "clipvault:clear":
             self._ring.clear()
             return (True, "CLEARED", "#8A9AF2")
+
+        if callback_id == "clipvault:pin":
+            if not self._ring:
+                return (True, "EMPTY", "#EF7D57")
+            if any(p.digest == self._ring[0].digest for p in self._pins):
+                return (True, "PINNED", "#8A9AF2")
+            if len(self._pins) >= self.MAX_PINS:
+                return (True, "PINS FULL", "#EF7D57")
+            self._pins.append(self._ring[0])
+            return (True, "PINNED", "#73EFF7")
+
+        if callback_id == "clipvault:clear_pins":
+            self._pins.clear()
+            return (True, "UNPINNED", "#8A9AF2")
+
+        if callback_id.startswith("clipvault:pinned:"):
+            idx_txt = callback_id.removeprefix("clipvault:pinned:")
+            if idx_txt.isdigit() and int(idx_txt) < len(self._pins):
+                self._set_current_text(self._pins[int(idx_txt)].text)
+                return (True, f"PIN #{int(idx_txt) + 1}", "#73EFF7")
+            return (True, "EMPTY", "#EF7D57")
 
         if callback_id.startswith("clipvault:restore:"):
             try:

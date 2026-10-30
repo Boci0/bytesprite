@@ -8,7 +8,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from PyQt6.QtCore import QDateTime, QPoint, QRect, QStandardPaths, Qt, QTimer
+from PyQt6.QtCore import QDateTime, QPoint, QRect, QRectF, QStandardPaths, Qt, QTimer
 from PyQt6.QtGui import (
     QCloseEvent,
     QColor,
@@ -38,6 +38,7 @@ from src.tools.file_forge import ForgeMode, ForgeWheelOption, get_wheel_options_
 from src.ui.context_menu import PetContextMenu
 from src.ui.drop_wheel import RadialDropWheel
 from src.ui.quick_tools import HumanTyper, OcrJob, SnipSession, TyperDialog
+from src.ui.theme import GLASS_RGBA, HAIRLINE_RGBA, HOVER_RGBA, TEXT_DIM_HEX, TEXT_HEX, qcolor, ui_font
 
 
 @dataclass(frozen=True)
@@ -226,6 +227,7 @@ class PetWindow(QWidget):
         always_on_top: bool = True,
         auto_wander: bool = True,
         on_quit_requested: Callable[[], None] | None = None,
+        on_notification: Callable[[str], None] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -234,12 +236,13 @@ class PetWindow(QWidget):
         self._always_on_top = always_on_top
         self._auto_wander = auto_wander
         self._on_quit_requested = on_quit_requested
+        self._on_notification = on_notification
 
         self._sprite_size_px = 128
         sprite_x = (self.WINDOW_WIDTH - self._sprite_size_px) // 2
         sprite_y = self.WINDOW_HEIGHT - self._sprite_size_px - 6
         self._sprite_rect = QRect(sprite_x, sprite_y, self._sprite_size_px, self._sprite_size_px)
-        self._hud_rect = QRect(8, 4, self.WINDOW_WIDTH - 16, 60)
+        self._hud_rect = QRect(8, 4, self.WINDOW_WIDTH - 16, 72)
 
         # Cached QImages keyed by (clip_name, frame_index, facing_left)
         self._image_cache: dict[tuple[str, int, bool], QImage] = {}
@@ -405,6 +408,8 @@ class PetWindow(QWidget):
                 self._anim.play_oneshot("spin")
                 self._schedule_next_anim_tick()
             self._show_toast(toast_text, QColor(color_hex or "#38B764"))
+            if self._on_notification is not None:
+                self._on_notification(toast_text)
             return
         if self._is_hud_visible():
             self.update()
@@ -1017,75 +1022,77 @@ class PetWindow(QWidget):
         painter.end()
 
     def _paint_hud(self, painter: QPainter) -> None:
+        """Frosted-graphite card matching PetContextMenu: rounded panel, hairline, Segoe UI."""
         r = self._hud_rect
-        # Stepped retro pixel panel frame
-        painter.fillRect(r.adjusted(2, 0, -2, 0), QColor(24, 20, 37, 242))
-        painter.fillRect(r.adjusted(0, 2, 0, -2), QColor(24, 20, 37, 242))
-        painter.fillRect(r.adjusted(2, 2, -2, -2), QColor(34, 40, 66, 238))
-
-        # Inner 1px pixel highlight border
-        painter.setPen(QPen(QColor(82, 108, 152, 190), 1))
-        painter.drawRect(r.adjusted(3, 3, -4, -4))
-
         hud = self._state_machine.get_hud_data()
-        state = self._state_machine.state
+        sleeping = self._state_machine.state == PetState.SLEEPING
+        plugin = self._state_machine.active_plugin
+        title = plugin.display_name if plugin is not None else hud.badge_left
 
-        title_font = QFont("Consolas", 8, QFont.Weight.Bold)
-        title_font.setStyleHint(QFont.StyleHint.Monospace)
-        painter.setFont(title_font)
+        painter.save()
+        # Smooth shapes only inside the card; the sprite keeps nearest-neighbor rendering
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        painter.setPen(QPen(qcolor(HAIRLINE_RGBA), 1))
+        painter.setBrush(qcolor(GLASS_RGBA))
+        painter.drawRoundedRect(QRectF(r).adjusted(0.5, 0.5, -0.5, -0.5), 10, 10)
 
-        # Tool title badge + operational status pill
-        painter.setPen(QColor("#73EFF7"))
+        # Header: name + colored status dot, like the menu header card
+        header = QRect(r.left() + 10, r.top() + 5, r.width() - 20, 14)
+        status_text = "DND" if sleeping else hud.badge_right
+        # Short codes (OK, DND, ERR) stay upper case; words read like the menu's "Online"
+        status = f"● {status_text if len(status_text) <= 3 else status_text.title()}"
+        painter.setFont(ui_font(7))
+        painter.setPen(QColor("#8A9AF2") if sleeping else QColor(hud.badge_right_color))
+        painter.drawText(header, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, status)
+        status_w = painter.fontMetrics().horizontalAdvance(status) + 6
+
+        painter.setFont(ui_font(8.5, bold=True))
+        painter.setPen(QColor(TEXT_HEX))
+        title_w = header.width() - status_w
         painter.drawText(
-            QRect(r.left() + 8, r.top() + 5, 86, 13),
+            QRect(header.left(), header.top(), title_w, header.height()),
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-            hud.badge_left,
+            painter.fontMetrics().elidedText(title, Qt.TextElideMode.ElideRight, title_w),
         )
 
-        badge_color = (
-            QColor("#8A9AF2")
-            if state == PetState.SLEEPING
-            else QColor(hud.badge_right_color)
-        )
-        badge_right_text = "DND" if state == PetState.SLEEPING else hud.badge_right
-        painter.setPen(badge_color)
-        painter.drawText(
-            QRect(r.left() + 78, r.top() + 5, r.width() - 86, 13),
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-            badge_right_text,
-        )
-
-        bar_font = QFont("Consolas", 7, QFont.Weight.Bold)
-        painter.setFont(bar_font)
+        painter.setPen(QPen(qcolor(HAIRLINE_RGBA), 1))
+        painter.drawLine(r.left() + 10, r.top() + 21, r.right() - 10, r.top() + 21)
 
         for idx, bar in enumerate(hud.bars[:3]):
-            row_y = r.top() + 21 + idx * 12
-            painter.setPen(QColor("#C2D3CD"))
+            row = QRect(r.left() + 10, r.top() + 25 + idx * 11, r.width() - 20, 10)
+            painter.setFont(ui_font(6.5))
+            painter.setPen(QColor(TEXT_DIM_HEX))
             painter.drawText(
-                QRect(r.left() + 8, row_y - 1, 20, 10),
+                QRect(row.left(), row.top(), 34, row.height()),
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                 bar.label,
             )
-
-            track = QRect(r.left() + 28, row_y + 1, r.width() - 62, 7)
-            painter.fillRect(track, QColor(16, 18, 30, 255))
-
-            fill_w = int(round((bar.clamped_value / 100.0) * (track.width() - 2)))
+            track = QRectF(row.left() + 36, row.center().y() - 1.5, row.width() - 68, 4)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(qcolor(HOVER_RGBA))
+            painter.drawRoundedRect(track, 2, 2)
+            fill_w = (bar.clamped_value / 100.0) * track.width()
             if fill_w > 0:
-                fill_rect = QRect(track.left() + 1, track.top() + 1, fill_w, track.height() - 2)
-                painter.fillRect(fill_rect, QColor(bar.color_hex))
-                # Specular 1px top highlight on bar
-                painter.fillRect(
-                    QRect(fill_rect.left(), fill_rect.top(), fill_rect.width(), 1),
-                    QColor(255, 255, 255, 90),
-                )
-
-            painter.setPen(QColor("#F0F7F4"))
+                painter.setBrush(QColor(bar.color_hex))
+                painter.drawRoundedRect(QRectF(track.left(), track.top(), max(4.0, fill_w), track.height()), 2, 2)
+            painter.setPen(QColor(TEXT_HEX))
             painter.drawText(
-                QRect(track.right() + 4, row_y - 1, 26, 10),
+                QRect(row.right() - 28, row.top(), 28, row.height()),
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                bar.formatted_value,
+                bar.formatted_value.strip(),
             )
+
+        if hud.detail:
+            detail_rect = QRect(r.left() + 10, r.top() + 58, r.width() - 20, 11)
+            painter.setFont(ui_font(6.5))
+            painter.setPen(QColor(TEXT_DIM_HEX))
+            painter.drawText(
+                detail_rect,
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                painter.fontMetrics().elidedText(hud.detail, Qt.TextElideMode.ElideRight, detail_rect.width()),
+            )
+        painter.restore()
 
     def _paint_toast(self, painter: QPainter) -> None:
         progress = 1.0 - (self._toast_steps / max(1, self._toast_max_steps))

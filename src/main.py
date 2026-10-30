@@ -16,6 +16,7 @@ from src.engine.pet_state import PetStateMachine
 from src.graphics.animation_controller import AnimationController
 from src.storage.storage_manager import StorageManager
 from src.ui.pet_window import PetWindow, build_app_icon
+from src.ui.quick_tools import GlobalHotkeys
 
 SIMULATION_TICK_INTERVAL_MS: int = 2_000
 AUTO_SAVE_INTERVAL_MS: int = 60_000
@@ -65,6 +66,7 @@ class ByteSpriteApp:
             always_on_top=saved.always_on_top,
             auto_wander=saved.auto_wander,
             on_quit_requested=self.quit,
+            on_notification=self._show_tray_message,
         )
 
         if saved.position is not None:
@@ -97,8 +99,20 @@ class ByteSpriteApp:
             tray.show()
             self.tray_icon = tray
 
+        # System-wide snip hotkeys share the desktop-integration switch with the tray, so
+        # headless tests never grab real key combos
+        self.hotkeys: GlobalHotkeys | None = None
+        if enable_tray:
+            self.hotkeys = GlobalHotkeys()
+            self.hotkeys.triggered.connect(self.window.trigger_snip)
+            self.hotkeys.start()
+
         self._app.aboutToQuit.connect(self.shutdown)
         self._app.commitDataRequest.connect(lambda _mgr: self.save_state())
+
+    def _show_tray_message(self, text: str) -> None:
+        if self.tray_icon is not None:
+            self.tray_icon.showMessage("ByteSprite", text, build_app_icon(64), 4_000)
 
     def _desired_tick_interval_ms(self) -> int:
         return self.state_machine.registry.min_active_tick_interval_ms(self._base_tick_ms)
@@ -166,6 +180,9 @@ class ByteSpriteApp:
             self._unsub_sim_sync = None  # type: ignore[assignment]
         self.sim_timer.stop()
         self.auto_save_timer.stop()
+        if self.hotkeys is not None:
+            self.hotkeys.close()
+            self.hotkeys = None
         self.save_state()
         self.window.shutdown()
         self.state_machine.shutdown()

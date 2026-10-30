@@ -193,21 +193,22 @@ class SystemMonitorPlugin:
             badge_right_color=status_color,
             bars=(
                 HudBar(
-                    label="CP",
+                    label="CPU",
                     value=self._metrics.cpu_percent,
                     color_hex=_metric_color(self._metrics.cpu_percent, "#38B764"),
                 ),
                 HudBar(
-                    label="RM",
+                    label="RAM",
                     value=self._metrics.ram_percent,
                     color_hex=_metric_color(self._metrics.ram_percent, "#41A6F6"),
                 ),
                 HudBar(
-                    label="DK",
+                    label="Disk",
                     value=self._metrics.disk_percent,
                     color_hex=_metric_color(self._metrics.disk_percent, "#FF77A8"),
                 ),
             ),
+            detail="CPU or RAM over 90% alerts" if is_alert else "Alerts at 90% CPU or RAM",
         )
 
     def get_menu_items(self) -> list[ToolMenuItem]:

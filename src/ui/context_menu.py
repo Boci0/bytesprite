@@ -10,6 +10,8 @@ from PyQt6.QtWidgets import QLabel, QMenu, QWidget, QWidgetAction
 
 from src.engine.models import PetState
 from src.engine.pet_state import PetStateMachine
+from src.storage.storage_manager import autostart_enabled, set_autostart
+from src.ui.quick_tools import HOTKEY_LABEL
 from src.ui.theme import (
     FONT_FAMILY,
     GLASS_RGBA,
@@ -60,9 +62,9 @@ QMenu::right-arrow {{
 """
 
 QUICK_TOOL_ITEMS: tuple[tuple[str, str], ...] = (
-    ("Snip Region -> Copy Image", "snip:image"),
-    ("Snip Region -> Copy Text (OCR)", "snip:text"),
-    ("Pick Screen Color -> Copy HEX", "snip:color"),
+    (f"Snip Region -> Copy Image	{HOTKEY_LABEL}+S", "snip:image"),
+    (f"Snip Region -> Copy Text (OCR)	{HOTKEY_LABEL}+T", "snip:text"),
+    (f"Pick Screen Color -> Copy HEX	{HOTKEY_LABEL}+C", "snip:color"),
     ("Human Typer...", "typer:open"),
 )
 
@@ -179,7 +181,7 @@ class PetContextMenu(QMenu):
         pomo_label = (
             "Pause Pomodoro Timer"
             if (pomo is not None and pomo.running)
-            else "Start / Resume Pomodoro (25m)"
+            else f"Start / Resume Pomodoro ({pomo.work_minutes if pomo is not None else 25}m)"
         )
         self.play_action = QAction(pomo_label, self)
         self.play_action.triggered.connect(lambda _checked=False: on_play())
@@ -237,6 +239,12 @@ class PetContextMenu(QMenu):
         self.auto_wander_action.setChecked(auto_wander)
         self.auto_wander_action.toggled.connect(on_toggle_wander)
         self.settings_menu.addAction(self.auto_wander_action)
+
+        self.autostart_action = QAction("Start with Windows", self.settings_menu)
+        self.autostart_action.setCheckable(True)
+        self.autostart_action.setChecked(autostart_enabled())
+        self.autostart_action.toggled.connect(set_autostart)
+        self.settings_menu.addAction(self.autostart_action)
 
         self.reset_position_action = QAction("Reset Position", self.settings_menu)
         self.reset_position_action.triggered.connect(
