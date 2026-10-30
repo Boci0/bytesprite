@@ -563,3 +563,105 @@ def test_clip_vault_pins_survive_rotation_and_clear() -> None:
     assert vault.get_hud_data().detail.startswith("Latest: keep me")
     vault.execute_action("clipvault:clear_pins")
     assert vault.pins == ()
+
+
+def test_dev_transforms() -> None:
+    from src.tools.clip_vault import (
+        convert_case,
+        decode_jwt,
+        toggle_string_escape,
+        toggle_timestamp,
+        toggle_url_encoding,
+    )
+
+    import base64 as b64
+
+    def seg(obj: dict) -> str:
+        return b64.urlsafe_b64encode(json.dumps(obj).encode()).decode().rstrip("=")
+
+    token = f"{seg({'alg': 'HS256'})}.{seg({'sub': 'ab'})}.sig"
+    assert json.loads(decode_jwt(token)) == {"header": {"alg": "HS256"}, "payload": {"sub": "ab"}}
+    with pytest.raises(ValueError):
+        decode_jwt("not.a")
+
+    enc, badge = toggle_url_encoding("a b&c=d")
+    assert (enc, badge) == ("a%20b%26c%3Dd", "URL ENC")
+    assert toggle_url_encoding(enc) == ("a b&c=d", "URL DEC")
+
+    assert toggle_timestamp("0000000000")[0] == "1970-01-01T00:00:00+00:00"
+    assert toggle_timestamp("1700000000000")[0].startswith("2023-11-14T22:13:20")
+    assert toggle_timestamp("2023-11-14T22:13:20Z") == ("1700000000", "EPOCH")
+    with pytest.raises(ValueError):
+        toggle_timestamp("hello")
+
+    assert convert_case("parseHTTPResponse code", "snake") == "parse_http_response_code"
+    assert convert_case("user-id_value", "camel") == "userIdValue"
+    assert convert_case("MyClassName", "kebab") == "my-class-name"
+
+    escaped, badge = toggle_string_escape('say "hi"\n')
+    assert (escaped, badge) == ('"say \\"hi\\"\\n"', "ESCAPED")
+    assert toggle_string_escape(escaped) == ('say "hi"\n', "UNESCAPED")
+
+
+def test_dev_transform_actions_write_clipboard() -> None:
+    written: list[str] = []
+    vault = ClipVaultPlugin(read_text=lambda: "hello world", write_text=written.append)
+    assert vault.execute_action("clipvault:dev:camel")[1] == "CAMEL"
+    assert written[-1] == "helloWorld"
+    assert vault.execute_action("clipvault:dev:jwt")[1] == "NO MATCH"
+    assert vault.execute_action("clipvault:dev:uuid")[1] == "UUID"
+    assert len(written[-1]) == 36
+    assert any(i.submenu == ClipVaultPlugin.DEV_SUBMENU for i in vault.get_menu_items())
+
+
+def test_parse_git_status() -> None:
+    from src.tools.project import parse_git_status
+
+    out = (
+        "# branch.oid abc\n# branch.head main\n# branch.upstream origin/main\n"
+        "# branch.ab +2 -1\n1 .M N... 100644 100644 100644 a b src/x.py\n? new.txt\n"
+    )
+    st = parse_git_status(out)
+    assert (st.branch, st.changed, st.ahead, st.behind) == ("main", 2, 2, 1)
+    st = parse_git_status("# branch.oid abc\n# branch.head (detached)\n")
+    assert (st.branch, st.changed, st.ahead, st.behind) == ("detached", 0, 0, 0)
+
+
+def test_project_plugin_persists_and_reads_git(tmp_path: Path) -> None:
+    from src.tools.project import ProjectPlugin
+
+    plugin = ProjectPlugin()
+    assert plugin.get_hud_data().detail == "Pick a project folder"
+    for i in range(ProjectPlugin.MAX_RECENT + 2):
+        plugin.set_repo(tmp_path / f"p{i}")
+    assert len(plugin.recent) == ProjectPlugin.MAX_RECENT
+    assert plugin.recent[0] == str(tmp_path / f"p{ProjectPlugin.MAX_RECENT + 1}")
+
+    restored = ProjectPlugin()
+    restored.load_dict(plugin.to_dict())
+    assert restored.repo == plugin.repo and restored.recent == plugin.recent
+
+    # This checkout is a git repo: tick until the background git call lands
+    repo = ProjectPlugin()
+    repo.set_repo(Path(__file__).resolve().parents[1])
+    if repo._git is None:
+        pytest.skip("git not installed")
+    deadline = time.monotonic() + 10
+    while repo.status is None and time.monotonic() < deadline:
+        repo.tick()
+        time.sleep(0.05)
+    assert repo.status is not None and repo.status.branch
+    repo.close()
+
+
+def test_port_kill_guards() -> None:
+    from src.tools.ports import can_kill, kill_pid, list_listening_ports
+    from src.tools.system_monitor import SystemMonitorPlugin
+
+    assert not can_kill(0) and not can_kill(4) and not can_kill(os.getpid())
+    assert kill_pid(os.getpid()) is False
+    ports = list_listening_ports()
+    assert isinstance(ports, list)
+    assert all(1024 <= p.port < 49152 for p in ports)
+    ok, toast, _ = SystemMonitorPlugin().execute_action("sysmon:kill:99999999:1")
+    assert (ok, toast) == (True, "PORT FREE")

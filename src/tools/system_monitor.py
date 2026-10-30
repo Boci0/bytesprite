@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from src.engine.models import CompanionState, HudBar, HudData, ToolMenuItem
+from src.tools.ports import PROTECTED, can_kill, kill_pid, list_listening_ports
 
 
 @dataclass(frozen=True)
@@ -145,6 +146,7 @@ class SystemMonitorPlugin:
     """Live CPU, RAM, and Disk telemetry tool plugin for ByteSprite."""
 
     ALERT_THRESHOLD: float = 90.0
+    PORTS_SUBMENU: str = "Ports"
 
     def __init__(
         self,
@@ -212,7 +214,7 @@ class SystemMonitorPlugin:
         )
 
     def get_menu_items(self) -> list[ToolMenuItem]:
-        return [
+        items = [
             ToolMenuItem(
                 label=(
                     f"Refresh Metrics (CPU {int(round(self._metrics.cpu_percent))}% | "
@@ -221,11 +223,38 @@ class SystemMonitorPlugin:
                 callback_id="sysmon:refresh",
             ),
         ]
+        ports = list_listening_ports()
+        items.extend(
+            ToolMenuItem(
+                label=f":{p.port}  {p.name} (pid {p.pid}) - Kill",
+                callback_id=f"sysmon:kill:{p.pid}:{p.port}",
+                enabled=can_kill(p.pid) and p.name != PROTECTED,
+                submenu=self.PORTS_SUBMENU,
+            )
+            for p in ports
+        )
+        if not ports:
+            items.append(ToolMenuItem(
+                label="No dev ports listening", callback_id="sysmon:noports",
+                enabled=False, submenu=self.PORTS_SUBMENU,
+            ))
+        return items
 
     def execute_action(self, callback_id: str) -> tuple[bool, str, str]:
         if callback_id == "sysmon:refresh":
             self.tick()
             return (True, f"CPU {int(round(self._metrics.cpu_percent))}%", "#73EFF7")
+        if callback_id.startswith("sysmon:kill:"):
+            pid_txt, _, port_txt = callback_id.removeprefix("sysmon:kill:").partition(":")
+            if not (pid_txt.isdigit() and port_txt.isdigit()):
+                return (True, "KILL ERR", "#EF7D57")
+            pid, port = int(pid_txt), int(port_txt)
+            # The menu can be stale: only kill if this pid still owns the port
+            if not any(p.pid == pid and p.port == port for p in list_listening_ports()):
+                return (True, "PORT FREE", "#8A9AF2")
+            if kill_pid(pid):
+                return (True, f"KILLED :{port}", "#38B764")
+            return (True, "KILL ERR", "#EF7D57")
         return (False, "", "")
 
     def to_dict(self) -> dict[str, Any]:

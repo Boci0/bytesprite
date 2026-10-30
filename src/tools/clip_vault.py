@@ -8,8 +8,11 @@ import collections
 import hashlib
 import json
 import re
+import urllib.parse
+import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +28,59 @@ _PRIVACY_MIME_MARKERS: frozenset[str] = frozenset(
 )
 
 _BLANK_LINES_RE = re.compile(r"\n{3,}")
+_URL_ESCAPE_RE = re.compile(r"%[0-9A-Fa-f]{2}")
+_WORD_RE = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+")
+
+
+def decode_jwt(token: str) -> str:
+    """Return header and payload of a JWT as pretty JSON (signature is not verified)."""
+    parts = token.strip().split(".")
+    if len(parts) != 3:
+        raise ValueError("not a JWT")
+    decoded = []
+    for part in parts[:2]:
+        raw = base64.urlsafe_b64decode(part + "=" * (-len(part) % 4))
+        decoded.append(json.loads(raw))
+    return json.dumps({"header": decoded[0], "payload": decoded[1]}, indent=2, ensure_ascii=False)
+
+
+def toggle_url_encoding(text: str) -> tuple[str, str]:
+    if _URL_ESCAPE_RE.search(text):
+        return urllib.parse.unquote(text), "URL DEC"
+    return urllib.parse.quote(text, safe=""), "URL ENC"
+
+
+def toggle_timestamp(text: str) -> tuple[str, str]:
+    """Epoch seconds (10 digits) or ms (13 digits) to ISO 8601 UTC, or ISO back to epoch."""
+    raw = text.strip()
+    if raw.isdigit() and len(raw) in (10, 13):
+        seconds = int(raw) / (1000 if len(raw) == 13 else 1)
+        return datetime.fromtimestamp(seconds, tz=timezone.utc).isoformat(), "ISO DATE"
+    parsed = datetime.fromisoformat(raw)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return str(int(parsed.timestamp())), "EPOCH"
+
+
+def convert_case(text: str, style: str) -> str:
+    words = [w.lower() for w in _WORD_RE.findall(text.strip())]
+    if not words:
+        raise ValueError("no words")
+    if style == "camel":
+        return words[0] + "".join(w.capitalize() for w in words[1:])
+    return ("_" if style == "snake" else "-").join(words)
+
+
+def toggle_string_escape(text: str) -> tuple[str, str]:
+    raw = text.strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] == '"':
+        try:
+            value = json.loads(raw)
+            if isinstance(value, str):
+                return value, "UNESCAPED"
+        except json.JSONDecodeError:
+            pass
+    return json.dumps(text, ensure_ascii=False), "ESCAPED"
 
 
 @dataclass(frozen=True)
@@ -60,6 +116,17 @@ class ClipVaultPlugin:
     MAX_PINS: int = 3
     MAX_CLIP_BYTES: int = 32_768  # 32 KiB per slot (< 300 KiB worst-case heap)
     SUBMENU_NAME: str = "Clip Vault & Quick Transforms"
+    DEV_SUBMENU: str = "Dev Transforms"
+    DEV_ITEMS: tuple[tuple[str, str], ...] = (
+        ("Decode JWT (no signature check)", "jwt"),
+        ("URL Encode / Decode", "url"),
+        ("Timestamp <-> ISO Date", "time"),
+        ("To camelCase", "camel"),
+        ("To snake_case", "snake"),
+        ("To kebab-case", "kebab"),
+        ("Escape / Unescape String", "escape"),
+        ("Copy New UUID", "uuid"),
+    )
 
     def __init__(
         self,
@@ -280,6 +347,10 @@ class ClipVaultPlugin:
                 submenu=sub,
             ),
         ]
+        items.extend(
+            ToolMenuItem(label=label, callback_id=f"clipvault:dev:{key}", submenu=self.DEV_SUBMENU)
+            for label, key in self.DEV_ITEMS
+        )
         for idx, entry in enumerate(self._ring):
             items.append(
                 ToolMenuItem(
@@ -352,6 +423,9 @@ class ClipVaultPlugin:
                 self._set_current_text(chosen.text)
                 return (True, f"CLIP #{idx + 1}", "#73EFF7")
             return (True, "EMPTY", "#EF7D57")
+
+        if callback_id.startswith("clipvault:dev:"):
+            return self._run_dev_transform(callback_id.removeprefix("clipvault:dev:"))
 
         if callback_id == "clipvault:json_toggle":
             raw = self._get_current_text().strip()
@@ -437,6 +511,33 @@ class ClipVaultPlugin:
             return (True, "SHA256!", "#FFCD75")
 
         return (False, "", "")
+
+    def _run_dev_transform(self, key: str) -> tuple[bool, str, str]:
+        if key == "uuid":
+            self._set_current_text(str(uuid.uuid4()))
+            self._transform_count += 1
+            return (True, "UUID", "#73EFF7")
+        raw = self._get_current_text()
+        if not raw.strip():
+            return (True, "NO TEXT", "#EF7D57")
+        try:
+            if key == "jwt":
+                result, badge = decode_jwt(raw), "JWT"
+            elif key == "url":
+                result, badge = toggle_url_encoding(raw)
+            elif key == "time":
+                result, badge = toggle_timestamp(raw)
+            elif key in ("camel", "snake", "kebab"):
+                result, badge = convert_case(raw, key), key.upper()
+            elif key == "escape":
+                result, badge = toggle_string_escape(raw)
+            else:
+                return (False, "", "")
+        except (ValueError, binascii.Error, OverflowError, OSError):
+            return (True, "NO MATCH", "#EF7D57")
+        self._set_current_text(result)
+        self._transform_count += 1
+        return (True, badge, "#38B764")
 
     def close(self) -> None:
         if self._attached_clipboard is not None:

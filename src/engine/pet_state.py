@@ -11,6 +11,7 @@ from src.tools.base import ToolPlugin, ToolRegistry
 from src.tools.clip_vault import ClipVaultPlugin
 from src.tools.file_forge import FileForgePlugin, ForgeMode
 from src.tools.pomodoro import PomodoroPhase, PomodoroPlugin
+from src.tools.project import ProjectPlugin
 from src.tools.system_monitor import SystemMonitorPlugin
 
 StateChangeCallback = Callable[[PetState, PetState, PetStats], None]
@@ -42,7 +43,7 @@ class PetStateMachine:
             pomodoro.completed_sessions = self._stats.completed_sessions
             forge = FileForgePlugin()
             clipvault = ClipVaultPlugin()
-            self._registry = ToolRegistry([sysmon, pomodoro, forge, clipvault])
+            self._registry = ToolRegistry([sysmon, pomodoro, forge, clipvault, ProjectPlugin()])
 
         self._sync_stats_from_tools()
 

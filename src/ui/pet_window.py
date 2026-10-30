@@ -715,6 +715,13 @@ class PetWindow(QWidget):
             if folder:
                 self.trigger_drop_files([folder])
             return
+        if callback_id == "project:pick":
+            folder = QFileDialog.getExistingDirectory(self, "ByteSprite - Choose Project Folder")
+            project = self._state_machine.registry.get_plugin("project")
+            if folder and project is not None:
+                project.set_repo(folder)
+                self._show_toast(Path(folder).name[:10].upper(), QColor("#73EFF7"))
+            return
         if callback_id == "forge:clipboard_files":
             clip_paths = self._clipboard_local_paths()
             if not clip_paths:
