@@ -337,15 +337,8 @@ class RadialDropWheel(QWidget):
     def _extract_paths(mime) -> list[Path]:
         if mime is None or not mime.hasUrls():
             return []
-        out: list[Path] = []
-        for url in mime.urls():
-            if url.isLocalFile():
-                local = url.toLocalFile()
-                if local:
-                    p = Path(local)
-                    if p.exists():
-                        out.append(p)
-        return out
+        # No exists() here: a stat per file stalls big drops, and File Forge filters missing paths
+        return [Path(u.toLocalFile()) for u in mime.urls() if u.isLocalFile() and u.toLocalFile()]
 
     def dragEnterEvent(self, event: QDragEnterEvent | None) -> None:
         if event is None:

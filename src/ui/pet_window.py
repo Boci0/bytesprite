@@ -1188,15 +1188,8 @@ class PetWindow(QWidget):
     def _extract_drop_paths(mime) -> list[Path]:
         if mime is None or not mime.hasUrls():
             return []
-        result: list[Path] = []
-        for url in mime.urls():
-            if url.isLocalFile():
-                local = url.toLocalFile()
-                if local:
-                    p = Path(local)
-                    if p.exists():
-                        result.append(p)
-        return result
+        # No exists() here: a stat per file stalls big drops, and File Forge filters missing paths
+        return [Path(u.toLocalFile()) for u in mime.urls() if u.isLocalFile() and u.toLocalFile()]
 
     def dragEnterEvent(self, event: QDragEnterEvent | None) -> None:
         if event is None:
@@ -1213,7 +1206,9 @@ class PetWindow(QWidget):
                 return
             self._hovered = True
             self._walk_steps_remaining = 0
-            if paths:
+            if self._drop_wheel is not None and self._drop_wheel.isVisible():
+                pass  # cursor slid back off the wheel mid-drag; respawning restarts its open animation
+            elif paths:
                 self._spawn_drop_wheel(paths, event.position().toPoint())
             else:
                 source = self._pending_web_source
