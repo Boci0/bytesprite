@@ -274,6 +274,8 @@ class PetWindow(QWidget):
         self._toast_color: QColor = QColor("#73EFF7")
         self._toast_steps: int = 0
         self._toast_max_steps: int = 12
+        # Synced lyric shown in a speech bubble above the sprite (Lyrics tool)
+        self._lyric_line: str = ""
 
         # Gentle autonomous walk steps
         self._walk_dx: int = 0
@@ -318,6 +320,12 @@ class PetWindow(QWidget):
         self._ambient_timer.timeout.connect(self._on_ambient_tick)
         self._ambient_timer.start()
 
+        # Other topmost windows can push the pet down the z-order; Qt sets the flag only once
+        self._topmost_timer = QTimer(self)
+        self._topmost_timer.setInterval(2000)
+        self._topmost_timer.timeout.connect(self._reassert_topmost)
+        self._topmost_timer.start()
+
         # HUD auto-hide countdown timer (250ms resolution only while HUD/toast active)
         self._overlay_timer = QTimer(self)
         self._overlay_timer.setInterval(90)
@@ -358,6 +366,15 @@ class PetWindow(QWidget):
     @property
     def auto_wander(self) -> bool:
         return self._auto_wander
+
+    def _reassert_topmost(self) -> None:
+        if sys.platform != "win32" or not self._always_on_top or not self.isVisible():
+            return
+        # HWND_TOPMOST, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE: re-raise without stealing focus
+        set_pos = ctypes.windll.user32.SetWindowPos
+        set_pos.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
+                            ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+        set_pos(int(self.winId()), -1, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)
 
     def set_always_on_top(self, enabled: bool) -> None:
         if self._always_on_top == bool(enabled):
@@ -435,6 +452,10 @@ class PetWindow(QWidget):
 
     def _handle_stats_change(self, _stats: PetStats) -> None:
         self._collect_forge_outputs()
+        lyric = self._state_machine.lyric_line
+        if lyric != self._lyric_line:
+            self._lyric_line = lyric
+            self.update()
         notifications = self._state_machine.pop_notifications()
         if notifications:
             toast_text, color_hex = notifications[-1]
@@ -1296,6 +1317,8 @@ class PetWindow(QWidget):
 
         if self._is_hud_visible():
             self._paint_hud(painter)
+        elif self._lyric_line:
+            self._paint_lyric(painter)
 
         if self._toast_steps > 0 and self._toast_text:
             self._paint_toast(painter)
@@ -1375,6 +1398,26 @@ class PetWindow(QWidget):
             )
         painter.restore()
 
+    def _paint_lyric(self, painter: QPainter) -> None:
+        """Speech bubble in the frosted-graphite style, bottom-anchored just above the sprite."""
+        flags = Qt.TextFlag.TextWordWrap
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        painter.setFont(ui_font(11, bold=True))
+        max_w = self.width() - 16
+        text_rect = painter.fontMetrics().boundingRect(QRect(0, 0, max_w - 16, 1000), flags, self._lyric_line)
+        # Three lines at most keeps the bubble clear of the top of the window
+        text_h = min(text_rect.height(), painter.fontMetrics().lineSpacing() * 3)
+        bubble_w = max(40, min(max_w, text_rect.width() + 16))
+        bubble = QRect((self.width() - bubble_w) // 2, self._sprite_rect.top() - 4 - (text_h + 12), bubble_w, text_h + 12)
+        painter.setPen(QPen(qcolor(HAIRLINE_RGBA), 1))
+        painter.setBrush(qcolor(GLASS_RGBA))
+        painter.drawRoundedRect(QRectF(bubble).adjusted(0.5, 0.5, -0.5, -0.5), 9, 9)
+        painter.setPen(QColor(TEXT_HEX))
+        painter.drawText(bubble.adjusted(8, 6, -8, -6), int(Qt.AlignmentFlag.AlignCenter) | int(flags), self._lyric_line)
+        painter.restore()
+
     def _paint_toast(self, painter: QPainter) -> None:
         progress = 1.0 - (self._toast_steps / max(1, self._toast_max_steps))
         rise_px = int(progress * 8)
@@ -1419,6 +1462,7 @@ class PetWindow(QWidget):
         self._is_shutting_down = True
         self._anim_timer.stop()
         self._ambient_timer.stop()
+        self._topmost_timer.stop()
         self._overlay_timer.stop()
         if self._snip_session is not None:
             self._snip_session.close()

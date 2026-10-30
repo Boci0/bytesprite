@@ -11,6 +11,7 @@ from src.tools.base import ToolPlugin, ToolRegistry
 from src.tools.clip_vault import ClipVaultPlugin
 from src.tools.file_forge import FileForgePlugin, ForgeMode
 from src.tools.pomodoro import PomodoroPhase, PomodoroPlugin
+from src.tools.lyrics import LyricsPlugin
 from src.tools.project import ProjectPlugin
 from src.tools.system_monitor import SystemMonitorPlugin
 
@@ -43,7 +44,7 @@ class PetStateMachine:
             pomodoro.completed_sessions = self._stats.completed_sessions
             forge = FileForgePlugin()
             clipvault = ClipVaultPlugin()
-            self._registry = ToolRegistry([sysmon, pomodoro, forge, clipvault, ProjectPlugin()])
+            self._registry = ToolRegistry([sysmon, pomodoro, forge, clipvault, ProjectPlugin(), LyricsPlugin()])
 
         self._sync_stats_from_tools()
 
@@ -95,6 +96,12 @@ class PetStateMachine:
     def clip_vault_plugin(self) -> ClipVaultPlugin | None:
         plugin = self._registry.get_plugin("clipvault")
         return plugin if isinstance(plugin, ClipVaultPlugin) else None
+
+    @property
+    def lyric_line(self) -> str:
+        """Current synced lyric for the pet's speech bubble ('' when the Lyrics tool is off or idle)."""
+        plugin = self._registry.get_plugin("lyrics")
+        return plugin.line if isinstance(plugin, LyricsPlugin) else ""
 
     def on_state_change(self, callback: StateChangeCallback) -> Callable[[], None]:
         """Register a listener for state transitions; returns an unsubscribe callable."""
