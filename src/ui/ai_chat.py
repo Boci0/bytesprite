@@ -232,7 +232,7 @@ class Chip(_Frosted):
         row.addLayout(text)
         if on_remove is not None:
             close = IconButton("close", "Remove", size=22)
-            close.clicked.connect(on_remove)
+            close.clicked.connect(lambda _checked=False: on_remove())  # never leak `checked` into on_remove's defaults
             row.addWidget(close, 0, Qt.AlignmentFlag.AlignTop)
         self.refresh()
 
@@ -799,9 +799,11 @@ class AiChat(QWidget):
         return self._add_row(role, text, attachments)[1]
 
     def new_chat(self) -> None:
-        if self._job is not None and not self._testing:
-            return
+        """Fresh start: drops a pending reply, the thread, the draft and any attachments."""
+        self.stop()
         self._history.clear()
+        self._draft.clear()
+        self._clear_attachments()
         while self._thread_layout.count():
             item = self._thread_layout.takeAt(0)
             if item is not None and item.widget() is not None:

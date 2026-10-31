@@ -232,6 +232,53 @@ def test_chat_attachments_are_sent_as_text(monkeypatch: pytest.MonkeyPatch, api:
         chat.close()
 
 
+def test_chip_x_removes_the_attachment_and_it_is_not_sent(monkeypatch: pytest.MonkeyPatch, api: str) -> None:
+    """clicked(bool) used to land in on_remove's `it=item` default, so the X removed nothing."""
+    from PyQt6.QtGui import QImage
+
+    from src.ui import ai_chat
+
+    app, _plugin, chat = _chat(monkeypatch, api)
+    try:
+        monkeypatch.setattr(ai_chat.OcrJob, "start", lambda self, _img: self.finished.emit("secret region text"))
+        image = QImage(40, 20, QImage.Format.Format_RGB32)
+        image.fill(0xFFFFFF)
+        chat.attach_image(image, "Screen region")
+        chat._chips[0].findChild(ai_chat.IconButton).click()  # a real click, as the user does
+        assert chat._attachments == [] and chat._chips == [] and chat._chip_box.isHidden()
+        chat.insert_text("hi")
+        chat.send()
+        _wait(app, lambda: chat._job is None and len(chat._history) == 2)
+        assert "secret region text" not in _Api.seen[0]["body"]["messages"][-1]["content"]
+    finally:
+        chat.close()
+
+
+def test_new_chat_clears_thread_draft_and_attachments_even_while_waiting(
+        monkeypatch: pytest.MonkeyPatch, api: str, tmp_path) -> None:
+    app, _plugin, chat = _chat(monkeypatch, api)
+    _Api.mode = "slow"
+    try:
+        chat.insert_text("question")
+        chat.send()
+        notes = tmp_path / "notes.txt"
+        notes.write_text("x", encoding="utf-8")
+        chat.attach_path(notes)
+        chat.insert_text("half typed")
+        chat._new_btn.click()  # used to do nothing while a reply was pending, and never cleared draft or chips
+        assert chat._job is None and chat._history == [] and chat._draft.toPlainText() == ""
+        assert chat._attachments == [] and chat._chip_box.isHidden() and chat._panel.isHidden()
+        import time
+
+        end = time.monotonic() + 0.8  # outlast the slow reply so its thread is done before chat is destroyed
+        while time.monotonic() < end:
+            app.processEvents()
+            time.sleep(0.01)
+        assert len(_Api.seen) == 1 and chat._history == []  # the late reply never lands in the fresh chat
+    finally:
+        chat.close()
+
+
 def test_oversize_attachment_is_not_read_into_memory(tmp_path) -> None:
     import tracemalloc
 
