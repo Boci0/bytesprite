@@ -38,6 +38,10 @@ class _Api(BaseHTTPRequestHandler):
             self.wfile.write(b"NOT-HTTP\r\n\r\n")
             self.close_connection = True
             return
+        if _Api.mode == "slow":  # still answering after the user pressed Stop
+            import time
+
+            time.sleep(0.4)
         payload = {"choices": [{"message": {"content": "  It is a stack trace.  "}}], "usage": {"total_tokens": 42}}
         if _Api.mode == "huge":
             payload["choices"][0]["message"]["content"] = "x" * (ai_assist.MAX_RESPONSE_BYTES + 10)
@@ -276,6 +280,30 @@ def test_chat_stop_drops_the_pending_reply(monkeypatch: pytest.MonkeyPatch, api:
         for _ in range(30):
             app.processEvents()
         assert chat._history == [] and plugin.asks == 0  # the late reply is ignored
+    finally:
+        chat.close()
+
+
+def test_chat_stop_keeps_the_job_alive_until_its_thread_is_done(monkeypatch: pytest.MonkeyPatch, api: str) -> None:
+    """Stop used to deleteLater() the AiJob while its thread was still waiting on the reply."""
+    import time
+
+    from PyQt6.QtCore import QEvent
+
+    errors: list[str] = []
+    monkeypatch.setattr(threading, "excepthook", lambda a: errors.append(f"{a.exc_type.__name__}: {a.exc_value}"))
+    app, _plugin, chat = _chat(monkeypatch, api)
+    _Api.mode = "slow"
+    try:
+        chat.insert_text("question")
+        chat.send()
+        chat.stop()
+        end = time.monotonic() + 1.2
+        while time.monotonic() < end:
+            app.processEvents()
+            app.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)  # what the real event loop does
+            time.sleep(0.01)
+        assert len(_Api.seen) == 1 and errors == []
     finally:
         chat.close()
 

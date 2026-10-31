@@ -694,7 +694,9 @@ class AiChat(QWidget):
         """Drop the pending reply (the request may still finish, but its answer is ignored)."""
         if self._job is None or self._testing:
             return
-        self._job.finished.disconnect(self._on_done)
+        job, self._job = self._job, None
+        job.finished.disconnect(self._on_done)
+        job.finished.connect(job.deleteLater)  # its thread still emits: deleting it now races that emit
         self._on_done("", "stopped", 0)
 
     def _start_job(self, messages: list[dict[str, str]]) -> None:
