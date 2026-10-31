@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import os
+import random
 import struct
 
 from PyQt6.QtCore import QCoreApplication, QIODevice, QObject, QTimer
@@ -12,7 +13,7 @@ SAMPLE_RATE = 48000
 VOLUME = 0.25
 SINK_BUFFER_BYTES = 4800  # ~50ms of mono Int16: tick latency vs underruns while Python is busy
 IDLE_SUSPEND_MS = 20_000  # keep the stream running this long after the last wheel closes
-# C major pentatonic from C5: sliding around the wheel plays a rising scale, never a clash
+# C major pentatonic from C4: sliding around the wheel plays a rising scale, never a clash
 _TICK_SEMITONES = (0, 2, 4, 7, 9, 12, 14, 16, 19, 21)
 
 # Why one sink, kept running between wheels, suspended only after IDLE_SUSPEND_MS:
@@ -32,17 +33,44 @@ _awake: set[int] = set()  # ids of TickSounds whose wheel is open
 
 
 def _synth_tick(semitones: int) -> bytes:
-    """Short glassy pluck with a tiny click at the start, pitched by slice."""
-    freq = 523.25 * 2 ** (semitones / 12)
+    """Short woody marimba knock, pitched by slice."""
+    freq = 261.63 * 2 ** (semitones / 12)
     n = int(SAMPLE_RATE * 0.12)
     out = bytearray()
     for i in range(n):
         t = i / SAMPLE_RATE
-        env = min(1.0, t / 0.001) * math.exp(-t * 32.0)
-        tone = math.sin(2 * math.pi * freq * t) + 0.4 * math.sin(4 * math.pi * freq * t)
-        click = math.exp(-t * 600.0) * math.sin(2 * math.pi * 3000 * t)
+        env = min(1.0, t / 0.001) * math.exp(-t * 45.0)
+        # Bar-like 4x overtone that dies fast, so the attack knocks and the tail stays mellow
+        tone = math.sin(2 * math.pi * freq * t) + 0.3 * math.exp(-t * 120.0) * math.sin(8 * math.pi * freq * t)
+        click = math.exp(-t * 400.0) * math.sin(2 * math.pi * 900 * t)
         out += struct.pack("<h", int(32767 * VOLUME * math.tanh(1.3 * (0.6 * env * tone + 0.35 * click))))
     return bytes(out)
+
+
+def _synth_soft(semitones: float) -> bytes:
+    """Soft picker-style tick: rounded attack, one mid tone with a tiny drop, almost no tail.
+
+    Hover ticks fire constantly, so they stay the lightest sound: short, quiet, no sharp click.
+    """
+    rng = random.Random(int(semitones * 10))  # fixed seed: same slice, same tick
+    freq = 620.0 * 2 ** (semitones / 12)
+    n = int(SAMPLE_RATE * 0.035)
+    wave = []
+    phase = lp = 0.0
+    for i in range(n):
+        t = i / SAMPLE_RATE
+        # The ear times a tick by its transient: a 2ms fade-in with a faint one felt late
+        attack = 0.5 - 0.5 * math.cos(math.pi * min(1.0, t / 0.0003))
+        phase += 2 * math.pi * freq * (1 + 0.12 * math.exp(-t * 300.0)) / SAMPLE_RATE
+        lp += 0.5 * (rng.uniform(-1.0, 1.0) - lp)
+        wave.append(attack * (math.exp(-t * 110.0) * math.sin(phase) + 0.45 * math.exp(-t * 2500.0) * lp))
+    peak = max(map(abs, wave)) or 1.0
+    return b"".join(struct.pack("<h", int(32767 * VOLUME * 0.6 * s / peak)) for s in wave)
+
+
+# Small even steps around the ring: hints direction without playing a tune (big jumps grate)
+_SOFT_STEPS = tuple(i * 0.4 for i in range(10))
+_VOICE, _VOICE_STEPS = _synth_soft, _SOFT_STEPS  # or _synth_tick, _TICK_SEMITONES for the marimba
 
 
 class _TickStream(QIODevice):
@@ -145,7 +173,7 @@ def preload_tick_sounds() -> list[bytes]:
     global _devices, _idle_timer
     if _bank or os.environ.get("QT_QPA_PLATFORM", "").lower() == "offscreen":
         return _bank
-    _bank.extend(_synth_tick(s) for s in _TICK_SEMITONES)
+    _bank.extend(_VOICE(s) for s in _VOICE_STEPS)
     app = QCoreApplication.instance()
     _idle_timer = QTimer(app)
     _idle_timer.setSingleShot(True)
