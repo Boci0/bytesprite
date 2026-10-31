@@ -228,6 +228,24 @@ def test_chat_attachments_are_sent_as_text(monkeypatch: pytest.MonkeyPatch, api:
         chat.close()
 
 
+def test_oversize_attachment_is_not_read_into_memory(tmp_path) -> None:
+    import tracemalloc
+
+    from src.ui.ai_chat import read_text_file
+
+    huge = tmp_path / "huge.log"
+    with huge.open("wb") as f:
+        f.truncate(64 * 1024 * 1024)
+    tracemalloc.start()
+    try:
+        with pytest.raises(ValueError, match="too large"):
+            read_text_file(huge)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak < 4 * 1024 * 1024  # read_bytes() pulled all 64 MB onto the GUI thread
+
+
 def test_screen_glow_is_click_through_and_finishes() -> None:
     from PyQt6.QtCore import Qt
     from PyQt6.QtWidgets import QApplication

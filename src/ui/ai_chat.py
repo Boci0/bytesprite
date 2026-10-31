@@ -54,7 +54,8 @@ def friendly_error(error: str) -> str:
 
 def read_text_file(path: Path) -> str:
     """Content of a small text file; raises ValueError('too large' / 'not text')."""
-    data = path.read_bytes()[: MAX_FILE_BYTES + 1]
+    with path.open("rb") as f:  # never pull a multi-GB file into RAM on the GUI thread
+        data = f.read(MAX_FILE_BYTES + 1)
     if len(data) > MAX_FILE_BYTES:
         raise ValueError("too large")
     if b"\x00" in data[:8192]:
