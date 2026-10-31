@@ -38,6 +38,19 @@ _PEAR_POLL_S = 1.0
 # so an LRCLIB guess can be another artist's song of the same name
 _PEAR_GRACE_S = 12.0
 _LOADING_MAX_S = 45.0  # stop the "looking up" dots after this; most songs that have lyrics are found by then
+# Browser media sessions are YouTube videos and streams, not songs (music goes through Pear or a desktop
+# player). Firefox reports a hashed app id, so long sessions are also skipped by length.
+_BROWSER_APP_RE = re.compile(r"msedge|chrome|firefox|brave|opera|vivaldi", re.IGNORECASE)
+_MAX_SONG_S = 15 * 60
+
+
+def _is_song(snap: dict[str, Any]) -> bool:
+    if _BROWSER_APP_RE.search(str(snap.get("app") or "")):
+        return False
+    try:
+        return float(snap.get("dur") or 0) / 1000 <= _MAX_SONG_S
+    except (TypeError, ValueError):
+        return True
 
 # One long-lived PowerShell prints a JSON line every 300ms; spawning it per poll would cost far more.
 # Prefers Pear Music (peerm_app.exe) and falls back to whatever Windows treats as the current session.
@@ -326,7 +339,9 @@ class LyricsPlugin:
                 self._enabled = False
                 return True
         snap = self._reader.latest()
-        track = (str(snap.get("title") or ""), str(snap.get("artist") or ""))
+        if not _is_song(snap):
+            snap = {}  # a browser tab or long video: no lyrics card, no lookup, no music groove
+        track =(str(snap.get("title") or ""), str(snap.get("artist") or ""))
         playing = snap.get("status") == "Playing" and bool(track[0])
         now = time.monotonic()
         if track != self._track:

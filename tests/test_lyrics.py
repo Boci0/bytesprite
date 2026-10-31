@@ -167,3 +167,22 @@ def test_pear_track_prefers_pear_lyrics_over_an_lrclib_guess(monkeypatch, tmp_pa
     plugin._pear_check_at = 0.0
     plugin.tick()
     assert plugin.line == "the real line"
+
+
+def test_browser_and_long_sessions_are_not_songs(monkeypatch) -> None:
+    import src.tools.lyrics as lyrics_mod
+
+    monkeypatch.setattr(lyrics_mod, "fetch_synced_lyrics", lambda *_a: [])
+    monkeypatch.setattr(lyrics_mod, "pear_lyrics_path", lambda _t: None)
+    plugin = LyricsPlugin()
+    plugin.load_dict({"enabled": True})
+    reader = _FakeReader({**_playing(1000), "app": "MSEdge", "dur": 240000})
+    plugin._reader = reader  # type: ignore[assignment]
+    plugin.tick()
+    assert not plugin.playing and plugin.title == "" and not plugin.loading
+    reader.snap = {**_playing(1000), "app": "308046B0AF4A39CB", "dur": 3876341}  # Firefox, 64 min video
+    plugin.tick()
+    assert not plugin.playing and plugin.title == ""
+    reader.snap = {**_playing(1000), "app": "Spotify.exe", "dur": 240000}
+    plugin.tick()
+    assert plugin.playing and plugin.title == "Song"
