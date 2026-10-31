@@ -363,7 +363,7 @@ def test_long_press_wheel_hold_drag_release_runs_slice(qapp: QApplication) -> No
         win.close()
 
 
-def test_long_press_wheel_release_on_hub_enters_click_mode(qapp: QApplication) -> None:
+def test_long_press_wheel_release_on_hub_closes(qapp: QApplication) -> None:
     sm = PetStateMachine(PetStats())
     win = PetWindow(state_machine=sm, animation_controller=AnimationController(size=32), auto_wander=False)
     fired: list[str] = []
@@ -373,17 +373,10 @@ def test_long_press_wheel_release_on_hub_enters_click_mode(qapp: QApplication) -
         win.mousePressEvent(_mouse(QEvent.Type.MouseButtonPress, win, start, Qt.MouseButton.LeftButton))
         win._on_hold_timeout()
         wheel = win.tool_wheel
-        assert wheel is not None
+        assert wheel is not None and wheel.isVisible()
         hub = wheel.mapToGlobal(wheel.hub_center_point())
-        win.mouseReleaseEvent(_mouse(QEvent.Type.MouseButtonRelease, win, hub, Qt.MouseButton.NoButton))
-        assert wheel.isVisible() and wheel.click_mode and fired == []
-
-        local = QPointF(wheel.slice_center_point(0))
-        wheel.mousePressEvent(QMouseEvent(
-            QEvent.Type.MouseButtonPress, local, QPointF(wheel.mapToGlobal(local.toPoint())),
-            Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
-        ))
-        assert fired == ["snip:text"] and not wheel.isVisible()
+        win.mouseReleaseEvent(_mouse(QEvent.Type.MouseButtonRelease, win, hub, Qt.MouseButton.LeftButton))
+        assert not wheel.isVisible() and fired == []
     finally:
         win.shutdown()
         win.close()
