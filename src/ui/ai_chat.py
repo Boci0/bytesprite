@@ -1,7 +1,7 @@
 """AI Assist chat: a pill input bar with the conversation growing above it.
 
-One window for everything: chatting, attachments (chips in the bar: images are read by the offline
-Windows OCR, text files by content) and the Setup page behind the gear. Nothing is sent until the
+One window for everything: chatting, attachments (chips in the bar: images are sent as images plus their offline
+Windows OCR text, text files by content) and the Setup page behind the gear. Nothing is sent until the
 user presses Enter or the send button. Replies are plain text, never rendered or acted on.
 """
 
@@ -11,15 +11,16 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from PyQt6.QtCore import QMimeData, QPoint, QPointF, QRect, QRectF, Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtCore import QBuffer, QByteArray, QIODevice, QMimeData, QPoint, QPointF, QRect, QRectF, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import (QColor, QDesktopServices, QDragEnterEvent, QDropEvent, QGuiApplication, QImage,
                          QKeyEvent, QPainter, QPainterPath, QPen, QPixmap)
-from PyQt6.QtWidgets import (QAbstractButton, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
+from PyQt6.QtWidgets import (QAbstractButton, QComboBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
                              QLabel, QLineEdit, QMenu, QPlainTextEdit, QPushButton, QScrollArea, QStackedWidget,
                              QVBoxLayout, QWidget)
 
-from src.tools.ai_assist import (KEY_PAGES, MAX_INPUT_CHARS, PRESETS, AiAssistPlugin, AiJob, chat_messages,
-                                 load_key, save_key, valid_key, valid_model, validate_base_url)
+from src.tools.ai_assist import (KEY_PAGES, MAX_INPUT_CHARS, PRESETS, THINKING_LEVELS, AiAssistPlugin, AiJob,
+                                 AiReply, ModelInfo, ask, chat_messages, list_models, load_key, save_key, valid_key,
+                                 valid_model, validate_base_url)
 from src.ui.context_menu import style_menu
 from src.ui.quick_tools import OcrJob
 from src.ui.sfx import play_cue
@@ -28,6 +29,7 @@ from src.ui.theme import (DANGER_HEX, FONT_FAMILY, GLASS_RAISED_RGBA, GLASS_RGBA
 
 MAX_FILE_BYTES = 512 * 1024
 MAX_ATTACHMENTS = 4
+MAX_IMAGE_SIDE = 1568  # longest side sent to vision models: bigger only costs tokens
 _IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp")
 _FRIENDLY_ERRORS = {
     "bad key": "The API key was rejected. Check it in Setup (gear).",
@@ -36,6 +38,8 @@ _FRIENDLY_ERRORS = {
     "bad model or url": "Model or URL not found. Check them in Setup (gear).",
     "network": "Could not reach the provider. Check your connection.",
     "forbidden": "The provider refused this key for that model.",
+    "bad request": "The provider rejected the request. If Thinking is on, this model may not support it: set it Off.",
+    "cut off": "The model spent its whole token budget thinking. Try a lower Thinking level.",
 }
 _FIELD_CSS = (
     f"background: {rgba_css(GLASS_RAISED_RGBA)}; color: {TEXT_HEX}; border: 1px solid {rgba_css(HAIRLINE_RGBA)};"
@@ -46,6 +50,39 @@ _BUTTON_CSS = (
     " border-radius: 6px; padding: 4px 12px; }"
     f" QPushButton:hover {{ background: {rgba_css(HOVER_RGBA)}; }}"
 )
+
+
+def image_data_url(image: QImage) -> str:
+    if max(image.width(), image.height()) > MAX_IMAGE_SIDE:
+        image = image.scaled(MAX_IMAGE_SIDE, MAX_IMAGE_SIDE, Qt.AspectRatioMode.KeepAspectRatio,
+                             Qt.TransformationMode.SmoothTransformation)
+    data = QByteArray()
+    buf = QBuffer(data)
+    buf.open(QIODevice.OpenModeFlag.WriteOnly)
+    image.save(buf, "PNG")
+    return "data:image/png;base64," + bytes(data.toBase64().data()).decode("ascii")
+
+
+def reply_details(reply: AiReply, asked_model: str, thinking: str) -> str:
+    """One dim line under a reply: the model that answered (and the alias it came through), thinking, tokens."""
+    served = reply.model or asked_model
+    parts = [served if served == asked_model else f"{asked_model} > {served}"]
+    if thinking != "off":
+        parts.append(f"thinking {thinking}")
+    if reply.total_tokens:
+        split = [f"{reply.prompt_tokens:,} in"]
+        if reply.reasoning_tokens:
+            split.append(f"{reply.reasoning_tokens:,} thinking")
+        split.append(f"{max(0, reply.completion_tokens - reply.reasoning_tokens):,} answer")
+        parts.append(f"{reply.total_tokens:,} tokens ({', '.join(split)})")
+    if reply.cut_off:
+        parts.append("cut off at the limit")
+    return "  -  ".join(parts)
+
+
+def model_label(model: ModelInfo) -> str:
+    label = f"{model.name}  ({model.id})" if model.name and model.name != model.id else model.id
+    return label + ("  -  sees images" if model.vision else "")
 
 
 def friendly_error(error: str) -> str:
@@ -80,9 +117,10 @@ class Attachment:
     detail: str = ""
     pending: bool = False
     thumb: QPixmap | None = None
+    image_url: str = ""  # PNG data URL, sent as an image part
 
     def as_prompt(self) -> str:
-        label = "Image (text read by OCR)" if self.kind == "image" else "File"
+        label = "Image (attached; its text read by OCR)" if self.kind == "image" else "File"
         return f"[{label}: {self.name}]\n{self.text}"
 
 
@@ -285,6 +323,14 @@ class _Draft(QPlainTextEdit):
                                         else Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
 
+class _ClickLabel(QLabel):
+    clicked = pyqtSignal()
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if event is not None and event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+
+
 class AiChat(QWidget):
     """The chat bar. `thinking_changed` lets the pet animate while a reply is pending."""
 
@@ -309,7 +355,10 @@ class AiChat(QWidget):
         self._chips: list[Chip] = []
         self._ocr_jobs: list[OcrJob] = []
         self._job: AiJob | None = None
+        self._models_job: AiJob | None = None
+        self._models: dict[str, list[ModelInfo]] = {}  # base URL -> its /models list, fetched on first open
         self._testing = False
+        self._asked = ("", "off")  # model and thinking level of the request in flight
         self._anchor: QRect | None = None  # the pet's sprite, in global coordinates
         self._above: bool | None = None  # which side of the sprite the card sits on, until the next open_near
         self._dots = 0
@@ -335,8 +384,11 @@ class AiChat(QWidget):
         titles.setSpacing(0)
         self._name = QLabel()
         self._name.setTextFormat(Qt.TextFormat.RichText)
-        self._title = QLabel()
+        self._title = _ClickLabel()
         self._title.setTextFormat(Qt.TextFormat.PlainText)
+        self._title.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._title.setToolTip("Switch model or thinking level")
+        self._title.clicked.connect(self._open_model_menu)
         self._title.setFont(ui_font(8.5))
         self._title.setStyleSheet(f"color: {TEXT_DIM_HEX};")
         titles.addWidget(self._name)
@@ -423,7 +475,7 @@ class AiChat(QWidget):
         self._url = QLineEdit()
         self._url.setPlaceholderText("https://... or http://localhost:port/v1")
         self._model = QLineEdit()
-        self._model.setPlaceholderText("model name, e.g. deepseek-chat")
+        self._model.setPlaceholderText("model name, e.g. deepseek-flash")
         self._key = QLineEdit()
         self._key.setEchoMode(QLineEdit.EchoMode.Password)
         self._get_key = QPushButton("Get a key")
@@ -431,22 +483,24 @@ class AiChat(QWidget):
         key_row = QHBoxLayout()
         key_row.addWidget(self._key, 1)
         key_row.addWidget(self._get_key)
-        self._effort = QCheckBox("Low reasoning effort (only for models that support it)")
+        self._thinking = QComboBox()
+        for level in THINKING_LEVELS:
+            self._thinking.addItem(level.title(), level)
+        self._thinking.setToolTip("Think before answering: slower and more tokens, better at math and science")
         self._status = QLabel()
         self._status.setWordWrap(True)
         self._status.setTextFormat(Qt.TextFormat.PlainText)
         self._save_btn = QPushButton("Save and test")
         self._save_btn.clicked.connect(self._save_and_test)
-        for widget in (self._provider, self._url, self._model, self._key):
+        for widget in (self._provider, self._url, self._model, self._key, self._thinking):
             widget.setStyleSheet(_FIELD_CSS)
         for widget in (self._get_key, self._save_btn):
             widget.setStyleSheet(_BUTTON_CSS)
             widget.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._effort.setStyleSheet(f"color: {TEXT_HEX};")
         for row_label, field in (("Provider", self._provider), ("Base URL", self._url), ("Model", self._model)):
             form.addRow(self._form_label(row_label), field)
         form.addRow(self._form_label("API key"), key_row)
-        form.addRow("", self._effort)
+        form.addRow(self._form_label("Thinking"), self._thinking)
         form.addRow("", self._save_btn)
         form.addRow("", self._status)
         return page
@@ -472,7 +526,7 @@ class AiChat(QWidget):
         self._key.clear()
         self._key_placeholder(p.has_key())
         self._get_key.setEnabled(p.provider in KEY_PAGES)
-        self._effort.setChecked(p.low_effort)
+        self._thinking.setCurrentIndex(max(0, self._thinking.findData(p.thinking)))
 
     def _on_provider_picked(self) -> None:
         key = self._provider.currentData()
@@ -528,7 +582,7 @@ class AiChat(QWidget):
             p.set_provider(provider)
         else:
             p.set_custom_url(url)
-        p.model, p.low_effort = model, self._effort.isChecked()
+        p.model, p.thinking = model, self._thinking.currentData()
         self._key_placeholder(True)
         self._refresh_title()
         self._set_status("Saved. Testing with a tiny request...")
@@ -589,8 +643,8 @@ class AiChat(QWidget):
         self._add_attachment(item)
 
     def attach_image(self, image: QImage, name: str) -> None:
-        """Image chips are read by the offline Windows OCR; only the text is ever sent."""
-        item = Attachment("image", name, pending=True, thumb=QPixmap.fromImage(image))
+        """Image chips are sent as images, plus their offline Windows OCR text for models without vision."""
+        item = Attachment("image", name, pending=True, thumb=QPixmap.fromImage(image), image_url=image_data_url(image))
         if not self._add_attachment(item):
             return
         job = OcrJob(self)
@@ -605,7 +659,7 @@ class AiChat(QWidget):
         item.pending = False
         item.text = text.strip()
         words = len(item.text.split())
-        item.detail = f"{words} words read" if words else "Can't read: no text found"
+        item.detail = f"{words} words read" if words else "Image, no text found"
         for chip in self._chips:
             if chip.item is item:
                 chip.refresh()
@@ -666,7 +720,7 @@ class AiChat(QWidget):
 
     def send(self) -> None:
         text = self._draft.toPlainText().strip()
-        usable = [a for a in self._attachments if a.text]
+        usable = [a for a in self._attachments if a.text or a.image_url]
         if (not text and not usable) or self._job is not None:
             return
         if any(a.pending for a in self._attachments):
@@ -677,7 +731,7 @@ class AiChat(QWidget):
             return
         content = "\n\n".join([text, *(a.as_prompt() for a in usable)]).strip()[:MAX_INPUT_CHARS]
         self._draft.clear()
-        self._history.append({"role": "user", "content": content})
+        self._history.append({"role": "user", "content": content, "images": [a.image_url for a in usable if a.image_url]})
         self._add_bubble("user", text, attachments=usable)
         self._clear_attachments()
         self._thinking_row, self._thinking_label = self._add_row("assistant", "")
@@ -699,26 +753,29 @@ class AiChat(QWidget):
         job, self._job = self._job, None
         job.finished.disconnect(self._on_done)
         job.finished.connect(job.deleteLater)  # its thread still emits: deleting it now races that emit
-        self._on_done("", "stopped", 0)
+        self._on_done(None, "stopped")
 
-    def _start_job(self, messages: list[dict[str, str]]) -> None:
+    def _start_job(self, messages: list[dict]) -> None:
         p = self._plugin
+        url, key, model, thinking = p.base_url, load_key(p.base_url), p.model, p.thinking
+        self._asked = (model, thinking)
         job = self._job = AiJob(self)
         job.finished.connect(self._on_done)
-        job.start(p.base_url, load_key(p.base_url), p.model, messages, p.low_effort)
+        job.start(lambda: ask(url, key, model, messages, thinking=thinking))
         self._set_busy(True)
 
-    def _on_done(self, reply: str, error: str, tokens: int) -> None:
+    def _on_done(self, reply: AiReply | None, error: str) -> None:
         if self._job is not None:
             self._job.deleteLater()
         self._job = None
         self._set_busy(False)
         if self._testing:
             self._testing = False
-            if error:
+            if error or reply is None:
                 self._set_status(friendly_error(error), False)
             else:
-                self._set_status("Connected. You can chat now.", True)
+                served = reply.model if reply is not None and reply.model else self._asked[0]
+                self._set_status(f"Connected: {served} answered. You can chat now.", True)
                 self._refresh_title()
                 QTimer.singleShot(900, self._leave_setup_if_ok)
             return
@@ -726,7 +783,7 @@ class AiChat(QWidget):
         if self._thinking_row is not None:
             self._thinking_row.deleteLater()
             self._thinking_row = self._thinking_label = None
-        if error:
+        if error or reply is None:
             failed = self._history.pop() if self._history and self._history[-1]["role"] == "user" else None
             if error != "stopped":
                 play_cue("error")
@@ -736,11 +793,104 @@ class AiChat(QWidget):
             if failed and not self._draft.toPlainText():
                 self._draft.setPlainText(failed["content"])  # nothing lost: edit and press Enter again
             return
-        self._history.append({"role": "assistant", "content": reply})
-        self._plugin.record(tokens)
-        self._add_bubble("assistant", reply)
+        self._history.append({"role": "assistant", "content": reply.text})
+        self._plugin.record(reply.total_tokens)
+        row, _label = self._add_row("assistant", reply.text)
+        self._add_details(row, reply)
         play_cue("reply")
-        self._refresh_title(tokens)
+        self._refresh_title()
+
+    def _add_details(self, row: QWidget, reply: AiReply) -> None:
+        """Dim line under a reply, plus a Show reasoning toggle when the model returned its thinking."""
+        layout = row.layout()
+        info = QLabel(reply_details(reply, *self._asked))
+        info.setTextFormat(Qt.TextFormat.PlainText)
+        info.setWordWrap(True)
+        info.setFont(ui_font(7.5))
+        info.setStyleSheet(f"color: {TEXT_DIM_HEX}; padding: 0 2px;")
+        layout.addWidget(info)
+        if not reply.reasoning:
+            return
+        toggle = _ClickLabel(f"Show reasoning ({reply.reasoning_tokens:,} tokens)" if reply.reasoning_tokens
+                             else "Show reasoning")
+        toggle.setFont(ui_font(7.5))
+        toggle.setStyleSheet(f"color: {TEXT_HEX}; padding: 0 2px; text-decoration: underline;")
+        toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        body = QLabel(reply.reasoning)
+        body.setTextFormat(Qt.TextFormat.PlainText)
+        body.setWordWrap(True)
+        body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        body.setFont(ui_font(8))
+        body.setStyleSheet(f"color: {TEXT_DIM_HEX}; padding: 4px 6px; border-left: 2px solid {rgba_css(HAIRLINE_RGBA)};")
+        body.hide()
+        shown_text, hidden_text = "Hide reasoning", toggle.text()
+
+        def flip() -> None:
+            body.setHidden(not body.isHidden())  # not isVisible(): that is False while the card itself is hidden
+            toggle.setText(hidden_text if body.isHidden() else shown_text)
+            QTimer.singleShot(0, self._relayout)
+
+        toggle.clicked.connect(flip)
+        layout.addWidget(toggle, 0, Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(body)
+
+    # ------------------------------------------------------------------ model switcher
+
+    def _open_model_menu(self) -> None:
+        """Header click: the provider's real model list (GET /models, fetched once per URL) and thinking levels."""
+        p = self._plugin
+        if p.base_url in self._models or not p.has_key():
+            self._show_model_menu(self._models.get(p.base_url, []), "" if p.has_key() else "no key")
+            return
+        if self._models_job is not None:
+            return
+        url, key = p.base_url, load_key(p.base_url)
+        job = self._models_job = AiJob(self)
+        job.finished.connect(lambda models, error, u=url: self._on_models(u, models, error))
+        job.start(lambda: list_models(url, key))
+        self._title.setText("Loading models...")
+
+    def _on_models(self, url: str, models: list[ModelInfo] | None, error: str) -> None:
+        if self._models_job is not None:
+            self._models_job.deleteLater()
+        self._models_job = None
+        if models:
+            self._models[url] = models
+        self._refresh_title()
+        if url == self._plugin.base_url and self.isVisible():
+            self._show_model_menu(models or [], error or ("" if models else "empty list"))
+
+    def _show_model_menu(self, models: list[ModelInfo], error: str = "") -> None:
+        p = self._plugin
+        menu = style_menu(QMenu(self))
+        menu.addSection("Model")
+        if p.model and all(m.id != p.model for m in models):
+            models = [ModelInfo(p.model), *models]
+        for model in models:
+            action = menu.addAction(model_label(model))
+            action.setCheckable(True)
+            action.setChecked(model.id == p.model)
+            action.triggered.connect(lambda _c=False, m=model.id: self._pick(model=m))
+        if error:
+            menu.addAction(f"Could not list models ({friendly_error(error)})").setEnabled(False)
+        menu.addSection("Thinking")
+        for level in THINKING_LEVELS:
+            action = menu.addAction(level.title())
+            action.setCheckable(True)
+            action.setChecked(level == p.thinking)
+            action.triggered.connect(lambda _c=False, t=level: self._pick(thinking=t))
+        menu.addSeparator()
+        menu.addAction("Setup...").triggered.connect(lambda _c=False: self.show_setup())
+        menu.exec(self._title.mapToGlobal(QPoint(0, self._title.height() + 2)))
+        menu.deleteLater()
+
+    def _pick(self, model: str | None = None, thinking: str | None = None) -> None:
+        p = self._plugin
+        if model is not None and valid_model(model):
+            p.model = model
+        if thinking in THINKING_LEVELS:
+            p.thinking = thinking
+        self._refresh_title()
 
     def _leave_setup_if_ok(self) -> None:
         if self._stack.currentIndex() == 1 and self._ready():
@@ -822,8 +972,8 @@ class AiChat(QWidget):
         self._refresh_title()
         self.thinking_changed.emit(busy)
 
-    def _refresh_title(self, tokens: int = 0) -> None:
-        """Menu-style header: name with a status dot, then the model and host (and last reply's tokens)."""
+    def _refresh_title(self) -> None:
+        """Menu-style header: name with a status dot, then the model, thinking level and host (click to switch)."""
         p = self._plugin
         if self._job is not None:
             state, color = "Thinking", "#E8D29F"
@@ -835,8 +985,8 @@ class AiChat(QWidget):
             f'<span style="font-family:\'{FONT_FAMILY}\'; font-size:10.5pt; font-weight:600; color:{TEXT_HEX};">'
             f'ByteSprite AI</span>&nbsp;&nbsp;<span style="font-family:\'{FONT_FAMILY}\'; font-size:9pt;'
             f' color:{color};">&#9679; {state}</span>')
-        extra = f"  -  {tokens} tokens" if tokens else ""
-        self._title.setText(f"{p.model or 'No model'} @ {p.host}{extra}")
+        thinking = "" if p.thinking == "off" else f", thinking {p.thinking}"
+        self._title.setText(f"{p.model or 'No model'}{thinking} @ {p.host}  \u25BE")
 
     def show_setup(self, message: str = "") -> None:
         self._load_setup()

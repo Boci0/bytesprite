@@ -11,7 +11,7 @@ import pytest
 
 from src.tools import ai_assist
 from src.tools.ai_assist import (MAX_INPUT_CHARS, AiAssistPlugin, ask, chat_messages, credential_target,
-                                 validate_base_url, valid_key, valid_model)
+                                 list_models, thinking_params, validate_base_url, valid_key, valid_model)
 
 KEY = "sk-test-0123456789abcdef"
 T = [{"role": "user", "content": "t"}]
@@ -34,6 +34,10 @@ class _Api(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(f'{{"error": "bad key {KEY}"}}'.encode())
             return
+        if _Api.mode == "no-vision" and any(isinstance(m["content"], list) for m in body["messages"]):
+            self.send_response(400)
+            self.end_headers()
+            return
         if _Api.mode == "garbage":  # not an HTTP response at all
             self.wfile.write(b"NOT-HTTP\r\n\r\n")
             self.close_connection = True
@@ -43,11 +47,31 @@ class _Api(BaseHTTPRequestHandler):
 
             time.sleep(0.4)
         payload = {"choices": [{"message": {"content": "  It is a stack trace.  "}}], "usage": {"total_tokens": 42}}
+        if _Api.mode == "thinking":  # DeepSeek's shape: served model, reasoning_content, reasoning token split
+            payload = {"model": "deepseek-flash", "usage": {"prompt_tokens": 43, "completion_tokens": 20,
+                                                            "total_tokens": 63,
+                                                            "completion_tokens_details": {"reasoning_tokens": 18}},
+                       "choices": [{"finish_reason": "stop", "message": {
+                           "content": "391", "reasoning_content": "17*20=340, +51=391."}}]}
+        if _Api.mode == "length":  # all budget spent thinking
+            payload = {"choices": [{"finish_reason": "length", "message": {"content": "", "reasoning_content": "hm"}}]}
         if _Api.mode == "huge":
             payload["choices"][0]["message"]["content"] = "x" * (ai_assist.MAX_RESPONSE_BYTES + 10)
         data = json.dumps(payload).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self) -> None:  # noqa: N802
+        _Api.seen.append({"path": self.path, "auth": self.headers.get("Authorization")})
+        data = json.dumps({"data": [
+            {"id": "deepseek-v4-pro", "name": "DeepSeek-V4-Pro", "input_modalities": ["text"]},
+            {"id": "deepseek-flash", "name": "DeepSeek-V4.1-Flash", "input_modalities": ["text", "image"]},
+            {"id": "models/gemini-x"}, {"id": "bad id with spaces"}, "junk", {"id": 5},
+        ]}).encode()
+        self.send_response(200)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -88,14 +112,45 @@ def test_chat_messages_keep_newest_turns_within_budget() -> None:
 
 
 def test_ask_sends_key_only_to_the_api_and_reads_reply(api: str) -> None:
-    reply, tokens = ask(api, KEY, "m1", chat_messages([{"role": "user", "content": "trace"}]), low_effort=True)
-    assert (reply, tokens) == ("It is a stack trace.", 42)
+    reply = ask(api, KEY, "m1", chat_messages([{"role": "user", "content": "trace"}]), thinking="low")
+    assert (reply.text, reply.total_tokens, reply.model) == ("It is a stack trace.", 42, "")
     req = _Api.seen[0]
     assert req["path"] == "/v1/chat/completions" and req["auth"] == f"Bearer {KEY}"
     assert req["body"]["model"] == "m1" and req["body"]["reasoning_effort"] == "low"
-    assert req["body"]["max_tokens"] == ai_assist.MAX_REPLY_TOKENS
+    assert req["body"]["max_tokens"] == ai_assist.MAX_THINKING_TOKENS and "thinking" not in req["body"]
     ask(api, KEY, "m1", T)
     assert "reasoning_effort" not in _Api.seen[1]["body"]
+    assert _Api.seen[1]["body"]["max_tokens"] == ai_assist.MAX_REPLY_TOKENS
+
+
+def test_thinking_params_per_provider() -> None:
+    ds, oa = "https://api.deepseek.com/v1", "https://api.openai.com/v1"
+    assert thinking_params(ds, "off") == {"thinking": {"type": "disabled"}}  # DeepSeek thinks unless told not to
+    assert thinking_params(ds, "max") == {"thinking": {"type": "enabled"}, "reasoning_effort": "max"}
+    assert thinking_params(oa, "off") == {} and thinking_params(oa, "max") == {"reasoning_effort": "high"}
+    assert thinking_params(oa, "bogus") == {}
+
+
+def test_reply_details_show_served_model_reasoning_and_tokens(api: str) -> None:
+    from src.ui.ai_chat import reply_details
+
+    _Api.mode = "thinking"
+    reply = ask(api, KEY, "deepseek-chat", T, thinking="low")
+    assert (reply.text, reply.model, reply.reasoning) == ("391", "deepseek-flash", "17*20=340, +51=391.")
+    assert (reply.prompt_tokens, reply.completion_tokens, reply.reasoning_tokens) == (43, 20, 18)
+    assert reply_details(reply, "deepseek-chat", "low") == (
+        "deepseek-chat > deepseek-flash  -  thinking low  -  63 tokens (43 in, 18 thinking, 2 answer)")
+    _Api.mode = "length"
+    with pytest.raises(ValueError, match="cut off"):
+        ask(api, KEY, "m", T, thinking="max")
+
+
+def test_list_models_reads_names_and_vision_and_skips_junk(api: str) -> None:
+    models = list_models(api, KEY)
+    assert [(m.id, m.name, m.vision) for m in models] == [
+        ("deepseek-flash", "DeepSeek-V4.1-Flash", True), ("deepseek-v4-pro", "DeepSeek-V4-Pro", False),
+        ("gemini-x", "", None)]
+    assert _Api.seen[-1]["path"] == "/v1/models" and _Api.seen[-1]["auth"] == f"Bearer {KEY}"
 
 
 def test_ask_refuses_redirects_and_never_echoes_the_key(api: str) -> None:
@@ -112,6 +167,20 @@ def test_ask_refuses_redirects_and_never_echoes_the_key(api: str) -> None:
         ask(api, KEY, "m", T)
     with pytest.raises(ValueError):
         ask("http://evil.example/v1", KEY, "m", T)  # plain HTTP off localhost
+
+
+def test_images_go_as_parts_and_fall_back_to_text(api: str) -> None:
+    url = "data:image/png;base64,AAAA"
+    msgs = chat_messages([{"role": "user", "content": "help [Image: x]\nC6H12O6", "images": [url]}])
+    assert msgs[1]["content"] == [{"type": "text", "text": "help [Image: x]\nC6H12O6"},
+                                  {"type": "image_url", "image_url": {"url": url}}]
+    assert ask(api, KEY, "vision", msgs).text == "It is a stack trace."
+    assert _Api.seen[-1]["body"]["messages"][1]["content"][1]["image_url"]["url"] == url
+    _Api.mode = "no-vision"  # text-only model: retried once without the image, then images are skipped
+    assert ask(api, KEY, "text-only", msgs).text == "It is a stack trace."
+    assert len(_Api.seen) == 3 and _Api.seen[-1]["body"]["messages"][1]["content"] == "help [Image: x]\nC6H12O6"
+    ask(api, KEY, "text-only", msgs)
+    assert len(_Api.seen) == 4
 
 
 def test_ask_maps_broken_http_replies_to_network(api: str) -> None:
@@ -137,19 +206,22 @@ def test_key_round_trips_through_credential_manager() -> None:
 def test_plugin_settings_persist_without_the_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ai_assist, "load_key", lambda _url: "")
     plugin = AiAssistPlugin()
-    assert plugin.model == "deepseek-chat" and plugin.host == "api.deepseek.com"
+    assert plugin.model == "deepseek-flash" and plugin.host == "api.deepseek.com" and plugin.thinking == "off"
     plugin.set_provider("openrouter")
-    plugin.low_effort = True
+    plugin.thinking = "high"
     plugin.model = "deepseek/deepseek-chat"
     saved = plugin.to_dict()
-    assert "key" not in json.dumps(saved).lower().replace("low_effort", "")
+    assert "key" not in json.dumps(saved).lower()
     restored = AiAssistPlugin()
     restored.load_dict(saved)
     assert restored.to_dict() == saved
     hostile = AiAssistPlugin()
-    hostile.load_dict({"provider": "custom", "base_url": "http://evil.example/v1", "model": "x y", "low_effort": "yes"})
-    assert hostile.base_url == ai_assist.PRESETS["deepseek"][1] and hostile.model == "deepseek-chat"
-    assert hostile.low_effort is False
+    hostile.load_dict({"provider": "custom", "base_url": "http://evil.example/v1", "model": "x y", "thinking": "ultra"})
+    assert hostile.base_url == ai_assist.PRESETS["deepseek"][1] and hostile.model == "deepseek-flash"
+    assert hostile.thinking == "off"
+    old = AiAssistPlugin()
+    old.load_dict({"provider": "deepseek", "model": "deepseek-chat", "low_effort": True})  # saved before levels
+    assert (old.model, old.thinking) == ("deepseek-chat", "low")
     labels = [i.label for i in plugin.get_menu_items()]
     assert labels[0].startswith("Open AI Chat") and "Remove API Key" in labels
 
@@ -177,6 +249,51 @@ def _wait(app, cond, timeout: float = 5.0) -> None:
     assert cond()
 
 
+def test_model_switcher_and_reasoning_toggle_work(monkeypatch: pytest.MonkeyPatch, api: str) -> None:
+    """The header lists the provider's real models, picks change the next request, and Show reasoning flips."""
+    from PyQt6.QtWidgets import QMenu
+
+    from src.ui import ai_chat
+
+    app, plugin, chat = _chat(monkeypatch, api)
+    menus: list[list[str]] = []
+    wanted: list[str] = []
+
+    def fake_exec(menu, *_args):
+        menus.append([a.text() for a in menu.actions()])
+        for action in menu.actions():
+            if action.text() in wanted:
+                action.trigger()
+
+    monkeypatch.setattr(QMenu, "exec", fake_exec)
+    try:
+        chat.show()  # the fetched list only pops up while the card is open
+        wanted[:] = ["DeepSeek-V4.1-Flash  (deepseek-flash)  -  sees images"]
+        chat._title.clicked.emit()
+        _wait(app, lambda: menus)
+        assert "m1" in menus[0] and "DeepSeek-V4-Pro  (deepseek-v4-pro)" in menus[0] and "Max" in menus[0]
+        wanted[:] = ["High"]
+        chat._title.clicked.emit()  # cached: no second GET /models
+        assert len(menus) == 2 and sum(s["path"] == "/v1/models" for s in _Api.seen) == 1
+        assert (plugin.model, plugin.thinking) == ("deepseek-flash", "high")
+        _Api.mode = "thinking"
+        chat.insert_text("17*23?")
+        chat.send()
+        _wait(app, lambda: chat._job is None and len(chat._history) == 2)
+        body = _Api.seen[-1]["body"]
+        assert body["model"] == "deepseek-flash" and body["reasoning_effort"] == "high"
+        row = chat._thread_layout.itemAt(chat._thread_layout.count() - 1).widget()
+        toggle = row.findChildren(ai_chat._ClickLabel)[0]
+        reasoning = [w for w in row.findChildren(ai_chat.QLabel) if w.text() == "17*20=340, +51=391."][0]
+        assert reasoning.isHidden() and toggle.text() == "Show reasoning (18 tokens)"
+        toggle.clicked.emit()  # works while the card is hidden too (isVisible() would read False)
+        assert not reasoning.isHidden() and toggle.text() == "Hide reasoning"
+        toggle.clicked.emit()
+        assert reasoning.isHidden()
+    finally:
+        chat.close()
+
+
 def test_chat_sends_only_on_enter_and_renders_plain_text(monkeypatch: pytest.MonkeyPatch, api: str) -> None:
     from PyQt6.QtCore import Qt
     from PyQt6.QtWidgets import QLabel
@@ -200,7 +317,7 @@ def test_chat_sends_only_on_enter_and_renders_plain_text(monkeypatch: pytest.Mon
         chat.close()
 
 
-def test_chat_attachments_are_sent_as_text(monkeypatch: pytest.MonkeyPatch, api: str, tmp_path) -> None:
+def test_chat_attachments_are_sent_as_text_and_images(monkeypatch: pytest.MonkeyPatch, api: str, tmp_path) -> None:
     from PyQt6.QtGui import QImage
 
     from src.ui import ai_chat
@@ -217,7 +334,7 @@ def test_chat_attachments_are_sent_as_text(monkeypatch: pytest.MonkeyPatch, api:
             chat.attach_path(path)
         details = [a.detail for a in chat._attachments]
         assert details[0].endswith("2 lines") and details[1].startswith("Can't") and details[2].startswith("Can't")
-        # Images go through local OCR; send waits until reading is done
+        # Images go as images plus local OCR text; send waits until reading is done
         monkeypatch.setattr(ai_chat.OcrJob, "start", lambda self, _img: self.finished.emit("hello from image"))
         image = QImage(40, 20, QImage.Format.Format_RGB32)
         image.fill(0xFFFFFF)
@@ -225,8 +342,10 @@ def test_chat_attachments_are_sent_as_text(monkeypatch: pytest.MonkeyPatch, api:
         assert chat._attachments[-1].detail == "3 words read" and len(chat._chips) == 4
         chat.send()
         _wait(app, lambda: chat._job is None and len(chat._history) == 2)
-        sent = _Api.seen[0]["body"]["messages"][-1]["content"]
+        text_part, image_part = _Api.seen[0]["body"]["messages"][-1]["content"]
+        sent = text_part["text"]
         assert "[File: notes.txt]\nline one" in sent and "hello from image" in sent and "blob.bin" not in sent
+        assert image_part["image_url"]["url"].startswith("data:image/png;base64,")
         assert chat._attachments == [] and chat._chip_box.isHidden()
     finally:
         chat.close()
