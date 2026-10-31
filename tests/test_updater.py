@@ -165,3 +165,29 @@ def test_update_job_installs_only_signed_releases(case: str, tmp_path: Path, mon
                 "tampered": ("error", "bad signature")}[case]
     assert results == [expected]
     assert (app / "src" / "main.py").read_text() == ("v99.0.0" if case == "signed" else "old")
+
+
+def test_update_job_reports_a_broken_http_reply(monkeypatch: pytest.MonkeyPatch) -> None:
+    """http.client.HTTPException killed the worker before `finished`: CHECKING, then silence."""
+    import socket
+
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+
+    def serve() -> None:
+        conn, _addr = server.accept()
+        conn.recv(65536)
+        conn.sendall(b"NOT-HTTP\r\n\r\n")
+        conn.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    monkeypatch.setattr(updater, "LATEST_API", f"http://127.0.0.1:{server.getsockname()[1]}/latest")
+    results: list[tuple[str, str]] = []
+    job = updater.UpdateJob()
+    job.finished.connect(lambda status, tag: results.append((status, tag)))
+    try:
+        job._run(install=True)
+    finally:
+        server.close()
+    assert [status for status, _tag in results] == ["error"]

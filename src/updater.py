@@ -9,6 +9,7 @@ newer, so an old signed release cannot be replayed under a new tag to downgrade 
 
 from __future__ import annotations
 
+import http.client
 import io
 import json
 import re
@@ -147,7 +148,7 @@ class UpdateJob(QObject):
             if not zip_url or not sig_url:
                 raise ValueError("unsigned release")
             install_source_zip(verified_bundle(_get(zip_url, _MAX_ZIP_BYTES), _get(sig_url, 1024), tag))
-        except (OSError, ValueError, KeyError, zipfile.BadZipFile) as exc:
+        except (OSError, ValueError, KeyError, zipfile.BadZipFile, http.client.HTTPException) as exc:
             self.finished.emit("error", str(exc) or tag)
             return
         self.finished.emit("installed", tag)
