@@ -293,6 +293,7 @@ class AiChat(QWidget):
     WIDTH = 380
     THREAD_MAX_H = 320
     GAP = 6  # between the pet's sprite and the card
+    MAX_H = 560  # tallest card: header, a full thread or Setup, chips and a 5-line draft (picks its side)
 
     def __init__(self, plugin: AiAssistPlugin, on_attach_screen: Callable[[], None] | None = None) -> None:
         super().__init__(None, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
@@ -310,6 +311,7 @@ class AiChat(QWidget):
         self._job: AiJob | None = None
         self._testing = False
         self._anchor: QRect | None = None  # the pet's sprite, in global coordinates
+        self._above: bool | None = None  # which side of the sprite the card sits on, until the next open_near
         self._dots = 0
         self._dots_timer = QTimer(self)
         self._dots_timer.setInterval(350)
@@ -320,7 +322,7 @@ class AiChat(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         # One card styled like the right-click menu: header, conversation or setup, then the input
-        card = _Frosted(10)
+        card = self._card = _Frosted(10)
         root.addWidget(card)
         layout = QVBoxLayout(card)
         layout.setContentsMargins(6, 6, 6, 6)
@@ -855,6 +857,7 @@ class AiChat(QWidget):
         """Show beside the pet's sprite (above it when there is room, else below), like its menu."""
         if anchor is not None:
             self._anchor = QRect(anchor)
+        self._above = None
         if not self._ready():
             self.show_setup("Pick a provider, paste your API key and press Save and test.")
         self._refresh_title()
@@ -872,7 +875,12 @@ class AiChat(QWidget):
             self._stack.setFixedHeight(max(0, min(self.THREAD_MAX_H, content + 4)))
         else:
             self._stack.setFixedHeight(self._stack.widget(1).sizeHint().height())
-        self.adjustSize()
+        # adjustSize() never shrinks while the layouts are stale (a just-hidden panel), so the slack stretched the card;
+        # activate inner to outer so the size hint is current
+        for layout in (self._panel.layout(), self._chip_box.layout(), self._card.layout(), self.layout()):
+            if layout is not None:
+                layout.activate()
+        self.resize(self.WIDTH, self.sizeHint().height())
         anchor = self._anchor
         screen = QGuiApplication.screenAt(anchor.center()) if anchor is not None else None
         screen = screen or QGuiApplication.primaryScreen()
@@ -882,9 +890,11 @@ class AiChat(QWidget):
         if anchor is None:
             anchor = QRect(area.center().x(), area.bottom() - 80, 1, 1)
         x = max(area.left() + 8, min(anchor.center().x() - self.WIDTH // 2, area.right() - self.WIDTH - 8))
-        room_above = anchor.top() - self.GAP - area.top()
-        room_below = area.bottom() - anchor.bottom() - self.GAP
-        if room_above >= self.height() or room_above >= room_below:
+        if self._above is None:  # picked once per open_near, so a resize never flips the card across the pet
+            room_above = anchor.top() - self.GAP - area.top()
+            room_below = area.bottom() - anchor.bottom() - self.GAP
+            self._above = room_above >= self.MAX_H or room_above >= room_below
+        if self._above:
             y = anchor.top() - self.GAP - self.height()  # grows upward, bottom edge stays by the pet
         else:
             y = anchor.bottom() + self.GAP

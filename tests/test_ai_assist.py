@@ -323,3 +323,47 @@ def test_chat_opens_beside_the_pet(monkeypatch: pytest.MonkeyPatch, api: str) ->
         assert chat.geometry().top() > top_pet.bottom() and area.contains(chat.geometry())
     finally:
         chat.close()
+
+
+def test_chat_card_hugs_content_and_keeps_its_side_through_save_and_test(
+        monkeypatch: pytest.MonkeyPatch, api: str) -> None:
+    """The card stayed tall (stretched header and input) after Setup closed, and Save and test made it
+    jump across the pet as the status line changed its height."""
+    from PyQt6.QtCore import QRect
+
+    app, plugin, chat = _chat(monkeypatch, api)
+    plugin.provider = "custom"  # Save and test keeps the fake API's URL
+    try:
+        chat.open_near(QRect(0, 0, 64, 64))
+        closed_h = chat.height()
+        chat.show_setup()
+        setup_h = chat.height()
+        assert setup_h > closed_h
+        area = app.primaryScreen().availableGeometry()
+        # Room above fits the closed card but not Setup, Setup fits below: the old rule flipped sides
+        pet = QRect(area.center().x(), area.top() + chat.GAP + closed_h + 20, 64, 64)
+        assert area.bottom() - pet.bottom() - chat.GAP > setup_h + 40
+        chat.hide()
+        chat.new_chat()
+        chat.open_near(pet)
+        edges: list[int] = []
+
+        def check() -> None:
+            app.processEvents()
+            assert chat.height() == chat.sizeHint().height()
+            edges.append(chat.geometry().top())  # below the pet: its top is the pet-side edge
+
+        check()
+        chat.show_setup()
+        check()
+        chat._save_and_test()
+        check()
+        _wait(app, lambda: chat._job is None)
+        check()
+        assert "Connected" in chat._status.text()
+        chat._leave_setup_if_ok()
+        check()
+        assert chat.height() == closed_h
+        assert all(abs(edge - (pet.bottom() + 1 + chat.GAP)) <= 1 for edge in edges), edges
+    finally:
+        chat.close()
