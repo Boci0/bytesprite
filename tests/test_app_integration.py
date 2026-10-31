@@ -147,6 +147,7 @@ def test_customize_wheel_extras_custom_and_persist(qapp: QApplication, tmp_path:
 
     win.trigger_tool_action("wheel:toggle:snip:text")
     win.trigger_tool_action("wheel:toggle:snip:color")
+    win.trigger_tool_action("wheel:toggle:web:https://github.com")  # room for two custom slices under MAX_SLICES
     assert win.wheel.add_custom("  My   Docs ", "https://docs.example.com") == "ADDED"
     assert win.wheel.add_custom("x", "C:/definitely/not/here.exe") == "BAD LINK"
     assert win.wheel.add_custom("Notes", str(tmp_path)) == "ADDED"  # a folder opens in Explorer

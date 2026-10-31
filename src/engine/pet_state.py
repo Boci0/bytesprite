@@ -8,6 +8,7 @@ from pathlib import Path
 
 from src.engine.models import CompanionState, HudData, PetState, PetStats, ToolMenuItem
 from src.tools.base import ToolPlugin, ToolRegistry
+from src.tools.ai_assist import AiAssistPlugin
 from src.tools.clip_vault import ClipVaultPlugin
 from src.tools.file_forge import FileForgePlugin, ForgeMode
 from src.tools.hints import HintsPlugin
@@ -46,7 +47,7 @@ class PetStateMachine:
             forge = FileForgePlugin()
             clipvault = ClipVaultPlugin()
             self._registry = ToolRegistry([sysmon, pomodoro, forge, clipvault, ProjectPlugin(), LyricsPlugin(),
-                                           HintsPlugin()])
+                                           HintsPlugin(), AiAssistPlugin()])
 
         self._sync_stats_from_tools()
 

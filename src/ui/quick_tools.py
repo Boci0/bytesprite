@@ -86,6 +86,7 @@ class SnipOverlay(QWidget):
             "image": "Drag to snip and copy image  |  Esc or right-click cancels",
             "text": "Drag over text to copy it  |  Esc or right-click cancels",
             "color": "Click a pixel to copy its HEX  |  Esc or right-click cancels",
+            "ask": "Drag over a region to add it to the AI chat  |  Esc or right-click cancels",
         }.get(self._mode, "")
         if self._mode == "color" and self.rect().contains(self._hover):
             hint = f"{self.pixel_color(self._hover).name().upper()}  |  {hint}"
@@ -319,11 +320,11 @@ class OcrJob(QObject):
 _MOD_ALT, _MOD_CONTROL, _MOD_SHIFT, _MOD_NOREPEAT = 0x1, 0x2, 0x4, 0x4000
 _WM_HOTKEY, _WM_QUIT = 0x0312, 0x0012
 HOTKEY_LABEL = "Ctrl+Shift+Alt"
-HOTKEY_MODES: dict[int, tuple[str, str]] = {1: ("S", "image"), 2: ("T", "text"), 3: ("C", "color")}
+HOTKEY_MODES: dict[int, tuple[str, str]] = {1: ("S", "image"), 2: ("T", "text"), 3: ("C", "color"), 4: ("A", "ai")}
 
 
 class GlobalHotkeys(QObject):
-    """Ctrl+Shift+Alt+S/T/C system-wide hotkeys; `triggered` delivers the snip mode on the Qt thread.
+    """Ctrl+Shift+Alt+S/T/C/A system-wide hotkeys; `triggered` delivers the snip mode ("ai" for A) on the Qt thread.
 
     Thread-level hotkeys (hWnd NULL) post WM_HOTKEY to the registering thread's queue, so a
     plain GetMessageW loop on a worker thread receives them without touching nativeEvent.

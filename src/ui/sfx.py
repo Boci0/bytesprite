@@ -198,6 +198,48 @@ def prewarm() -> None:
         _idle_timer.start()  # nothing opened after all: still suspend once quiet
 
 
+def _synth_notes(notes: tuple[tuple[float, float], ...], level: float = 0.5) -> bytes:
+    """Soft chiptune cue: rounded triangle notes (semitones from C5, seconds), each a quick decay."""
+    out = bytearray()
+    for semitones, length in notes:
+        freq = 523.25 * 2 ** (semitones / 12)
+        for i in range(int(SAMPLE_RATE * length)):
+            t = i / SAMPLE_RATE
+            env = min(1.0, t / 0.004) * math.exp(-t * 18.0)
+            tri = 2 * abs(2 * ((freq * t) % 1.0) - 1) - 1
+            out += struct.pack("<h", int(32767 * VOLUME * level * env * (0.7 * tri + 0.3 * math.sin(2 * math.pi * freq * t))))
+    return bytes(out)
+
+
+# AI chat cues: open sparkle, send blip, reply chime, error bump (all pentatonic, never harsh)
+_CUE_NOTES: dict[str, tuple[tuple[float, float], ...]] = {
+    "open": ((0, 0.06), (7, 0.06), (12, 0.16)),
+    "send": ((7, 0.05), (12, 0.09)),
+    "reply": ((9, 0.07), (16, 0.16)),
+    "error": ((-5, 0.08), (-8, 0.16)),
+}
+_cues: dict[str, bytes] = {}
+_WAKE_PAD = bytes(int(SAMPLE_RATE * 0.1) * 2)  # a suspended output swallows its first ~100ms
+
+
+def play_cue(name: str) -> None:
+    """One-off UI cue on the shared stream; the stream suspends again once quiet."""
+    if _stream is None or _sink is None or name not in _CUE_NOTES:
+        return
+    if name not in _cues:
+        _cues[name] = _synth_notes(_CUE_NOTES[name])
+    try:
+        from PyQt6.QtMultimedia import QAudio
+
+        waking = _sink.state() == QAudio.State.SuspendedState
+        _resume()
+        _stream.start_tick((_WAKE_PAD if waking else b"") + _cues[name])
+        if not _awake and _idle_timer is not None:
+            _idle_timer.start()
+    except Exception:
+        pass
+
+
 class TickSounds(QObject):
     """Pitched hover ticks for one wheel. wake() when it opens, sleep() when it closes."""
 

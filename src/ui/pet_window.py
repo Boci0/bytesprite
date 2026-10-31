@@ -44,13 +44,16 @@ from src.engine.pet_state import PetStateMachine
 from src.graphics.animation_controller import AnimationController
 from src.graphics.sprite_matrix import FrameMatrix, get_sprite_frames
 from src.tools.file_forge import ForgeMode, ForgeWheelOption, get_wheel_options_for_paths
+from src.tools.ai_assist import AiAssistPlugin
 from src.tools.hints import HintsPlugin, Suggestion, foreground_app
+from src.ui.ai_chat import AiChat
+from src.ui.screen_glow import ScreenGlow, play_screen_glow
 from src.storage.recent_files import RecentFiles
 from src.tools.web_drop import WebImageJob, html_image_src, is_web_image_source, web_image_stem
 from src.ui.context_menu import PetContextMenu, style_menu
 from src.ui.drop_wheel import RadialDropWheel
 from src.ui.quick_tools import OcrJob, SnipSession, open_folder_in_background
-from src.ui.sfx import preload_tick_sounds, prewarm as prewarm_ticks
+from src.ui.sfx import play_cue, preload_tick_sounds, prewarm as prewarm_ticks
 from src.ui.tool_wheel import WEB_SHORTCUTS, ToolWheel, ToolWheelOption, WheelLayout, google_search_url
 from src.updater import APP_DIR, RELEASES_URL, UpdateJob, is_installed
 from src.ui.theme import GLASS_RGBA, HAIRLINE_RGBA, HOVER_RGBA, TEXT_DIM_HEX, TEXT_HEX, qcolor, ui_font
@@ -317,6 +320,9 @@ class PetWindow(QWidget):
         self._hold_timer.setInterval(self.HOLD_TO_WHEEL_MS)
         self._hold_timer.timeout.connect(self._on_hold_timeout)
         self._ocr_jobs: list[OcrJob] = []
+        self._ai_chat: AiChat | None = None  # built on first open
+        self._ai_thinking: bool = False
+        self._glows: list[ScreenGlow] = []
         # Image dragged out of a browser (URL or raw image), fetched only once a slice is chosen
         self._pending_web_source: str | QImage | None = None
         # Raw path strings cached at drag-enter: re-reading or parsing thousands per event lags big drops
@@ -408,6 +414,8 @@ class PetWindow(QWidget):
     def _reassert_topmost(self) -> None:
         if sys.platform != "win32" or not self._always_on_top or not self.isVisible():
             return
+        if QApplication.activePopupWidget() is not None:  # raising over an open menu or dropdown hides it
+            return
         # HWND_TOPMOST, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE: re-raise without stealing focus
         set_pos = ctypes.windll.user32.SetWindowPos
         set_pos.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
@@ -417,6 +425,8 @@ class PetWindow(QWidget):
             set_pos(int(self.winId()), -1, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)
         for wheel in wheels:
             wheel.restack_topmost()  # wheels stay above the pet but below an in-flight drag image
+        if self._ai_chat is not None and self._ai_chat.isVisible():  # the pet never covers its own chat
+            set_pos(int(self._ai_chat.winId()), -1, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)
 
     def set_always_on_top(self, enabled: bool) -> None:
         if self._always_on_top == bool(enabled):
@@ -481,6 +491,8 @@ class PetWindow(QWidget):
             PetState.HUNGRY: "hungry",
         }
         clip = mapping.get(state, "idle")
+        if self._ai_thinking and clip == "idle":
+            return "focus"
         return "music" if clip == "idle" and self._state_machine.music_playing else clip
 
     def _sync_animation_to_pet_state(self, state: PetState) -> None:
@@ -804,6 +816,8 @@ class PetWindow(QWidget):
                        "version mismatch": "BAD VERSION"}.get(tag)
             self._show_toast("UP TO DATE" if status == "current" else refused or "UPDATE ERR",
                              QColor("#38B764" if status == "current" else "#E05A47"))
+            if refused and self._on_notification is not None:
+                self._on_notification(f"Update refused ({tag}): it is not a release signed by the ByteSprite key")
 
     def restart(self) -> None:
         self.trigger_quit()  # saves state.json before the new copy loads it
@@ -957,6 +971,7 @@ class PetWindow(QWidget):
         ]
         if sys.platform == "win32":
             options.append(ToolWheelOption("Mute", "speakers", "#8A9AF2", "pet:mute"))
+        options.append(ToolWheelOption("Ask AI", "chat", "#B48EF2", "ai:chat"))
         options.extend(
             ToolWheelOption(label, "open", color, f"web:{url}") for label, url, color in WEB_SHORTCUTS
         )
@@ -1049,8 +1064,13 @@ class PetWindow(QWidget):
     # ------------------------------------------------------------------
 
     def trigger_snip(self, mode: str) -> None:
+        if mode == "ai":  # Ctrl+Shift+Alt+A opens the chat bar
+            self.open_ai_chat()
+            return
         if self._snip_session is not None:
             return
+        if mode == "ask" and self._ai_chat is not None:
+            self._ai_chat.hide()  # keep the bar out of the frozen grab
         # Hide ByteSprite and let the context menu fade so neither lands in the frozen grab
         self.hide()
         QTimer.singleShot(180, lambda: self._begin_snip(mode))
@@ -1063,6 +1083,12 @@ class PetWindow(QWidget):
     def _on_snip_result(self, mode: str, result: object | None) -> None:
         self._snip_session = None
         self.show()
+        if mode == "ask":  # the chat's "Screen region" attachment
+            if self._ai_chat is not None:
+                if isinstance(result, QImage):
+                    self._ai_chat.attach_image(result, "Screen region")
+                self._ai_chat.open_near(self._sprite_global_rect())
+            return
         if result is None:
             self._show_toast("CANCEL", QColor("#8A9AF2"))
             return
@@ -1120,6 +1146,40 @@ class PetWindow(QWidget):
             cb.setText(text)
         self._show_toast("TEXT OK", QColor("#38B764"))
 
+    # ------------------------------------------------------------------
+    # AI Assist (manual only: nothing is sent until the user presses Send in the chat bar)
+    # ------------------------------------------------------------------
+
+    def open_ai_chat(self) -> None:
+        """Toggle the chat card beside the pet; opening plays the pixel sparkle effect and a chime."""
+        plugin = self._state_machine.registry.get_plugin("ai")
+        if not isinstance(plugin, AiAssistPlugin):
+            return
+        if self._ai_chat is None:
+            self._ai_chat = AiChat(plugin, on_attach_screen=lambda: self.trigger_snip("ask"))
+            self._ai_chat.thinking_changed.connect(self._on_ai_thinking)
+        elif self._ai_chat.isVisible():
+            self._ai_chat.hide()
+            return
+        sprite = self._sprite_global_rect()
+        glow = play_screen_glow(self.screen(), sprite.center())
+        if glow is not None:
+            self._glows.append(glow)
+            glow.destroyed.connect(lambda *_a, g=glow: self._glows.remove(g) if g in self._glows else None)
+        play_cue("open")
+        self._anim.play_oneshot("spin")
+        self._schedule_next_anim_tick()
+        self._ai_chat.open_near(sprite)
+
+    def _sprite_global_rect(self) -> QRect:
+        return QRect(self.mapToGlobal(self._sprite_rect.topLeft()), self._sprite_rect.size())
+
+    def _on_ai_thinking(self, thinking: bool) -> None:
+        self._ai_thinking = thinking
+        if not self._is_shutting_down:
+            self._sync_animation_to_pet_state(self._state_machine.state)
+            self._schedule_next_anim_tick()
+
     def trigger_tool_action(self, callback_id: str) -> None:
         if callback_id.startswith("snip:"):
             self.trigger_snip(callback_id.split(":", 1)[1])
@@ -1148,6 +1208,9 @@ class PetWindow(QWidget):
                 self.open_output_folder(self._web_drop_dir())
             elif key.isdigit():
                 self.reveal_recent(int(key))
+            return
+        if callback_id == "ai:chat":
+            self.open_ai_chat()
             return
         if callback_id.startswith("wheel:"):
             self._customize_wheel(callback_id.removeprefix("wheel:"))
@@ -1824,6 +1887,9 @@ class PetWindow(QWidget):
         self._overlay_timer.stop()
         self._lyric_timer.stop()
         self._hint_timer.stop()
+        if self._ai_chat is not None:
+            self._ai_chat.close()
+            self._ai_chat = None
         if self._snip_session is not None:
             self._snip_session.close()
             self._snip_session = None
