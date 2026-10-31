@@ -1,8 +1,14 @@
 # ByteSprite
 
+<p align="center">
+  <img src="docs/images/idle.png" width="144" alt="ByteSprite idling">
+  <img src="docs/images/music.png" width="144" alt="ByteSprite grooving to music">
+  <img src="docs/images/spin.png" width="144" alt="ByteSprite spinning">
+</p>
+
 A small frosted-glass paperclip that lives on your Windows desktop. It shows synced lyrics for whatever
-Pear Music is playing, and it carries a pocket full of developer and file tools behind a click, a hold
-or a drag.
+Pear Music is playing, carries a pocket full of developer and file tools behind a click, a hold
+or a drag, and can open an AI chat with the model and key you bring.
 
 Windows 10 / 11, Python 3.11+, PyQt6. No telemetry, no asset files: every sprite is generated in code.
 
@@ -65,18 +71,38 @@ come from Pear's own lyrics cache first, so anything Pear can show works, then f
 [LRCLIB](https://lrclib.net). Turning it on sends the song title and artist to LRCLIB. While a song
 plays, the paperclip grooves along.
 
+## AI chat (opt-in)
+
+Hold the pet and pick **Ask AI**, use **AI Assist > Open AI Chat**, or press `Ctrl+Shift+Alt+A`. The
+first time it opens on Setup: pick a provider (DeepSeek, OpenAI, OpenRouter, Google Gemini, or any
+OpenAI-compatible URL), a model and your API key. The key lives in Windows Credential Manager, never
+in the settings file. Nothing is sent until you press Enter, and nothing runs in the background.
+
+Attach with `+`, drag-and-drop or paste: text files up to 512 KB go as text, images are read with
+local OCR and only that text is sent, never the pixels. Replies are plain text and are never acted on.
+
+<p align="center">
+  <img src="docs/images/moods.png" width="720" alt="Idle, music, focus, spin, sleep and cheer poses">
+  <br><sub>Idle, music, focus, spin, sleep, cheer</sub>
+</p>
+
 ## What else it does
 
-- **Click** cycles the HUD: CPU / RAM / Disk, Pomodoro, File Forge, Clip Vault, Project (git), Lyrics.
+- **Click** cycles the HUD: CPU / RAM / Disk, Pomodoro, File Forge, Clip Vault, Project (git), Lyrics, Hints.
 - **Double-click** snips a screen region to the clipboard.
-- **Hold** opens a tool wheel: OCR, clipboard history, search, focus timer, mute, web shortcuts.
+- **Hold** opens a tool wheel: OCR, clipboard history, search, focus timer, mute, Ask AI, web shortcuts.
   Drag onto a slice and release to run it; release over the center or off the ring to close it.
+  **Settings > Customize Wheel** adds extra tools (Snip, Color, JSON, UUID, VS Code, Terminal, Lyrics)
+  or your own website and app slices, up to 10.
+- **Smart hints** (offline, no network): copy a JWT, an epoch timestamp or one-line JSON and the pet
+  offers to decode or format it; ten minutes in a code editor suggests a focus session. Click to run,
+  right-click to mute that hint. Turn off under **Hints > Smart Suggestions**.
 - **Drag files onto it** to convert or compress: WebP / PNG / JPG / ICO / BMP, CSV / TSV / JSON,
   ZIP / TAR.XZ / TAR.GZ / GZIP, extract, SHA-256. Drag an image out of a browser to save a clean copy.
   The output folder opens behind your current window (unless it is already open).
 - **Right-click** for everything else: ports inspector, dev transforms (JWT, URL, timestamps, case,
   UUID), recent files, Pomodoro, settings.
-- **Hotkeys:** `Ctrl+Shift+Alt+S` snip image, `T` snip text (OCR), `C` pick a color.
+- **Hotkeys:** `Ctrl+Shift+Alt+S` snip image, `T` snip text (OCR), `C` pick a color, `A` AI chat.
 
 ## Development
 
