@@ -799,7 +799,10 @@ class PetWindow(QWidget):
             if install and not is_installed():
                 QDesktopServices.openUrl(QUrl(RELEASES_URL))  # git checkout: update by hand
         elif install:  # the silent startup check never toasts "up to date" or errors
-            self._show_toast("UP TO DATE" if status == "current" else "UPDATE ERR",
+            # On error `tag` carries the reason; signature failures mean the release was refused
+            refused = {"bad signature": "BAD SIG", "unsigned release": "UNSIGNED",
+                       "version mismatch": "BAD VERSION"}.get(tag)
+            self._show_toast("UP TO DATE" if status == "current" else refused or "UPDATE ERR",
                              QColor("#38B764" if status == "current" else "#E05A47"))
 
     def restart(self) -> None:

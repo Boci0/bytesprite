@@ -1,4 +1,11 @@
-"""GitHub release check and in-place source update for an installed ByteSprite."""
+"""GitHub release check and in-place source update for an installed ByteSprite.
+
+Updates must be signed: a release carries `bytesprite.zip` plus `bytesprite.zip.sig`, an Ed25519
+signature made with the maintainer's offline key (scripts/release.py). HTTPS only proves the file
+came from GitHub; the signature proves it came from the key holder, so a hijacked GitHub account
+or an intercepted download cannot ship code. The version inside the zip must match the tag and be
+newer, so an old signed release cannot be replayed under a new tag to downgrade an install.
+"""
 
 from __future__ import annotations
 
@@ -14,6 +21,7 @@ from pathlib import Path
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from src import __version__
+from src.signing import verify
 
 REPO = "Boci0/bytesprite"
 LATEST_API = f"https://api.github.com/repos/{REPO}/releases/latest"
@@ -22,6 +30,10 @@ APP_DIR = Path(__file__).resolve().parents[1]
 # install.ps1 writes this marker; a git checkout has none, so the updater never overwrites dev work
 INSTALL_MARKER = ".installed"
 _MAX_ZIP_BYTES = 20 * 1024 * 1024
+ASSET_NAME = "bytesprite.zip"
+SIG_NAME = ASSET_NAME + ".sig"
+# Public half of the release signing key; the private half never leaves the maintainer's PC
+RELEASE_PUBLIC_KEY = bytes.fromhex("f0cc212a80d53fe877827253c020e2c01d023c4280eebf47423c6032a0259316")
 _TIMEOUT_S = 15
 
 
@@ -47,14 +59,42 @@ def _get(url: str, limit: int) -> bytes:
     return data
 
 
-def latest_release() -> tuple[str, str]:
-    """(tag, source zipball url) of the newest published GitHub release."""
+def latest_release() -> tuple[str, str, str]:
+    """(tag, zip url, signature url) of the newest release; urls are '' when it is not signed."""
     info = json.loads(_get(LATEST_API, 1024 * 1024))
-    return str(info["tag_name"]), str(info["zipball_url"])
+    assets = {a.get("name"): str(a.get("browser_download_url") or "") for a in info.get("assets") or []
+              if isinstance(a, dict)}
+    return str(info["tag_name"]), assets.get(ASSET_NAME, ""), assets.get(SIG_NAME, "")
+
+
+def zip_version(data: bytes) -> str:
+    """`__version__` declared in the bundle's src/__init__.py ('' if missing)."""
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        for name in zf.namelist():
+            parts = Path(name).parts
+            if len(parts) == 3 and parts[1:] == ("src", "__init__.py"):
+                match = re.search(r"__version__\s*=\s*[\"']([^\"']+)", zf.read(name).decode("utf-8", "replace"))
+                return match.group(1) if match else ""
+    return ""
+
+
+def verified_bundle(data: bytes, sig_text: bytes, tag: str, public: bytes | None = None,
+                    current: str = __version__) -> bytes:
+    """Return `data` only if it is signed by the release key and really is the newer `tag`; else raise."""
+    try:
+        signature = bytes.fromhex(sig_text.decode("ascii").strip())
+    except ValueError:
+        raise ValueError("bad signature") from None
+    if not verify(public or RELEASE_PUBLIC_KEY, data, signature):
+        raise ValueError("bad signature")
+    version = zip_version(data)
+    if not version or parse_version(version) != parse_version(tag) or not is_newer(version, current):
+        raise ValueError("version mismatch")
+    return data
 
 
 def install_source_zip(data: bytes, app_dir: Path = APP_DIR) -> None:
-    """Swap `app_dir/src` for the `src/` folder inside a GitHub source zipball.
+    """Swap `app_dir/src` for the `src/` folder inside a verified release bundle.
 
     The new tree is fully extracted next to the old one before a rename swap, so a bad zip
     leaves the running install untouched.
@@ -65,7 +105,7 @@ def install_source_zip(data: bytes, app_dir: Path = APP_DIR) -> None:
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         for info in zf.infolist():
             parts = Path(info.filename).parts
-            # GitHub zipballs wrap everything in one '<owner>-<repo>-<sha>/' folder
+            # Bundles wrap everything in one top folder ('bytesprite/', or '<owner>-<repo>-<sha>/')
             if len(parts) < 3 or parts[1] != "src" or info.is_dir():
                 continue
             rel = Path(*parts[2:])
@@ -97,14 +137,16 @@ class UpdateJob(QObject):
     def _run(self, install: bool) -> None:
         tag = ""
         try:
-            tag, zip_url = latest_release()
+            tag, zip_url, sig_url = latest_release()
             if not is_newer(tag):
                 self.finished.emit("current", tag)
                 return
             if not install or not is_installed():
                 self.finished.emit("available", tag)
                 return
-            install_source_zip(_get(zip_url, _MAX_ZIP_BYTES))
+            if not zip_url or not sig_url:
+                raise ValueError("unsigned release")
+            install_source_zip(verified_bundle(_get(zip_url, _MAX_ZIP_BYTES), _get(sig_url, 1024), tag))
         except (OSError, ValueError, KeyError, zipfile.BadZipFile) as exc:
             self.finished.emit("error", str(exc) or tag)
             return
