@@ -47,6 +47,10 @@ def test_bad_update_keeps_running_install(tmp_path: Path) -> None:
         install_source_zip(_zipball({"src/other.py": "no main"}), app)
     with pytest.raises(ValueError):
         install_source_zip(_zipball({"src/../../evil.py": "x", "src/main.py": "new"}), app)
+    # On Windows 'src.new' / 'Q:evil.py' is just 'Q:evil.py': another drive's working folder
+    other_drive = "Q" if not str(tmp_path).upper().startswith("Q") else "R"
+    with pytest.raises(ValueError):
+        install_source_zip(_zipball({f"src/{other_drive}:evil.py": "x", "src/main.py": "new"}), app)
     assert (app / "src" / "main.py").read_text() == "old"
     assert not (tmp_path.parent / "evil.py").exists()
 

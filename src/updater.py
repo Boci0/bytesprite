@@ -109,7 +109,7 @@ def install_source_zip(data: bytes, app_dir: Path = APP_DIR) -> None:
             if len(parts) < 3 or parts[1] != "src" or info.is_dir():
                 continue
             rel = Path(*parts[2:])
-            if rel.is_absolute() or ".." in rel.parts:
+            if rel.is_absolute() or rel.drive or ".." in rel.parts:  # 'D:x' is drive-relative, not absolute
                 raise ValueError(f"unsafe path in update: {info.filename}")
             dest = new_dir / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
