@@ -111,6 +111,7 @@ class PetContextMenu(QMenu):
         on_select_tool: Callable[[str], object] | None = None,
         on_tool_action: Callable[[str], object] | None = None,
         recent_files: Sequence[tuple[Path, float]] = (),
+        wheel_slices: Sequence[tuple[str, str, bool]] = (),
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -278,6 +279,16 @@ class PetContextMenu(QMenu):
             lambda _checked=False: on_reset_position()
         )
         self.settings_menu.addAction(self.reset_position_action)
+
+        if wheel_slices and on_tool_action is not None:
+            self.wheel_menu = style_menu(QMenu("Wheel Slices", self.settings_menu))
+            for label, cid, shown in wheel_slices:
+                w_act = QAction(label, self.wheel_menu)
+                w_act.setCheckable(True)
+                w_act.setChecked(shown)
+                w_act.triggered.connect(lambda _checked=False, c=cid: on_tool_action(f"wheel:toggle:{c}"))
+                self.wheel_menu.addAction(w_act)
+            self.settings_menu.addMenu(self.wheel_menu)
 
         if on_tool_action is not None:
             update_action = QAction(f"Check for Updates (v{__version__})", self.settings_menu)

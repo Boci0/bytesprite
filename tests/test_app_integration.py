@@ -134,3 +134,49 @@ class TestByteSpriteAppIntegration:
             # uv's console trampoline or a bare pythonw.exe that directly imports python312.dll
             assert b"python.exe\x02PAD" not in raw
             assert b"python312.dll" not in raw
+
+
+def test_wheel_slices_hide_persist_and_keep_one(qapp: QApplication, tmp_path: Path) -> None:
+    storage = StorageManager(tmp_path / "wheel.json")
+    controller = ByteSpriteApp(app=qapp, storage=storage, enable_tray=False)
+    win = controller.window
+    all_ids = [o.callback_id for o in win.all_tool_wheel_options()]
+    win.trigger_tool_action("wheel:toggle:snip:text")
+    assert "snip:text" not in [o.callback_id for o in win.tool_wheel_options()]
+    menu = win.build_context_menu()
+    assert [a.isChecked() for a in menu.wheel_menu.actions()][0] is False
+    menu.deleteLater()
+    for cid in all_ids[1:]:
+        win.trigger_tool_action(f"wheel:toggle:{cid}")
+    assert len(win.tool_wheel_options()) == 1 and win._toast_text == "KEEP ONE"
+    controller.quit()
+
+    saved_hidden = storage.load().tools_data["wheel"]["hidden"]
+    assert set(saved_hidden) == set(all_ids[:-1])
+    again = ByteSpriteApp(app=qapp, storage=storage, enable_tray=False)
+    assert [o.callback_id for o in again.window.tool_wheel_options()] == all_ids[-1:]
+    again.quit()
+
+
+def test_tool_wheel_closes_when_release_never_arrives(qapp: QApplication, monkeypatch: pytest.MonkeyPatch) -> None:
+    import ctypes
+    import sys
+
+    from PyQt6.QtCore import QPoint
+
+    from src.ui.tool_wheel import ToolWheel, ToolWheelOption
+
+    if sys.platform != "win32":
+        pytest.skip("Win32 button watchdog")
+    wheel = ToolWheel(on_selected=lambda _o: None, always_on_top=False)
+    wheel.open_tools([ToolWheelOption("A", "a", "#FFFFFF", "x")], window_top_left=QPoint(0, 0))
+    monkeypatch.setattr(ctypes.windll.user32, "GetAsyncKeyState", lambda _vk: 0x8000)
+    wheel._on_watchdog_tick()
+    wheel._on_watchdog_tick()
+    assert wheel.isVisible()  # button still held
+    monkeypatch.setattr(ctypes.windll.user32, "GetAsyncKeyState", lambda _vk: 0)
+    wheel._on_watchdog_tick()
+    assert wheel.isVisible()  # one tick of grace for the normal release event
+    wheel._on_watchdog_tick()
+    assert not wheel.isVisible()
+    wheel.deleteLater()

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+import ctypes
+import sys
 import urllib.parse
 from dataclasses import dataclass
 
@@ -58,10 +60,10 @@ class ToolWheel(RadialDropWheel):
         super().__init__(
             on_option_dropped=lambda _paths, _opt: None,
             always_on_top=always_on_top,
-            enable_watchdog=False,
             parent=parent,
         )
         self._on_selected = on_selected
+        self._button_up_ticks = 0
         self.setAcceptDrops(False)
         self.setWindowTitle("ByteSprite Tool Wheel")
 
@@ -72,9 +74,24 @@ class ToolWheel(RadialDropWheel):
         window_top_left: QPoint,
         initial_global_cursor: QPoint | None = None,
     ) -> None:
+        self._button_up_ticks = 0
         self.open_for_paths(
             [], options, window_top_left=window_top_left, initial_global_cursor=initial_global_cursor
         )
+
+    def _on_watchdog_tick(self) -> None:
+        """Close if the hold ended without a release reaching the pet (e.g. Win+Shift+S grabbed it)."""
+        if not self.isVisible():
+            self._watchdog_timer.stop()
+            return
+        if sys.platform != "win32":
+            return
+        self.restack_topmost()
+        l_down = bool(ctypes.windll.user32.GetAsyncKeyState(0x01) & 0x8000)
+        self._button_up_ticks = 0 if l_down else self._button_up_ticks + 1
+        # Two ticks (160ms): a normal release reaches the pet first and picks the slice
+        if self._button_up_ticks >= 2:
+            self.dismiss()
 
     def release_at(self, global_pos: QPoint) -> ToolWheelOption | None:
         """End a hold-drag: run the slice under the cursor, or just close."""

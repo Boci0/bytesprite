@@ -325,6 +325,8 @@ class PetWindow(QWidget):
         # Clean PNG from a web drop, deleted once File Forge converts it to the chosen format
         self._web_intermediate: Path | None = None
         self.recent = RecentFiles()
+        # Tool wheel slice callback ids the user hid; persisted as tools.wheel.hidden so new slices still appear
+        self.wheel_hidden: set[str] = set()
         QTimer.singleShot(0, preload_tick_sounds)  # wheels are built lazily; sounds must be ready first
 
         self._configure_window()
@@ -864,6 +866,23 @@ class PetWindow(QWidget):
         return self._tool_wheel
 
     def tool_wheel_options(self) -> list[ToolWheelOption]:
+        """Slices the user kept (Settings > Wheel Slices); all of them if every one is hidden."""
+        options = self.all_tool_wheel_options()
+        return [o for o in options if o.callback_id not in self.wheel_hidden] or options
+
+    def toggle_wheel_slice(self, callback_id: str) -> None:
+        if callback_id in self.wheel_hidden:
+            self.wheel_hidden.discard(callback_id)
+            self._show_toast("SHOWN", QColor("#38B764"))
+            return
+        visible = [o for o in self.tool_wheel_options() if o.callback_id != callback_id]
+        if not visible:
+            self._show_toast("KEEP ONE", QColor("#EF7D57"))
+            return
+        self.wheel_hidden.add(callback_id)
+        self._show_toast("HIDDEN", QColor("#8A9AF2"))
+
+    def all_tool_wheel_options(self) -> list[ToolWheelOption]:
         """Slices clockwise from 12 o'clock: everyday quick tools, then web shortcuts."""
         pomo = self._state_machine.pomodoro_plugin
         focus_sub = "pause" if pomo is not None and pomo.running else f"{pomo.work_minutes if pomo else 25}m"
@@ -1067,6 +1086,9 @@ class PetWindow(QWidget):
             elif key.isdigit():
                 self.reveal_recent(int(key))
             return
+        if callback_id.startswith("wheel:toggle:"):
+            self.toggle_wheel_slice(callback_id.removeprefix("wheel:toggle:"))
+            return
         if callback_id == "update:check":
             self.check_for_updates()
             return
@@ -1183,6 +1205,7 @@ class PetWindow(QWidget):
             self._last_drag_global_pos = global_pos
             self._drag_offset = global_pos - self.frameGeometry().topLeft()
             self._did_drag = False
+            self._wheel_holding = False  # a hold whose release never arrived (wheel watchdog closed it)
             self._walk_steps_remaining = 0
             self._hold_timer.start()
             prewarm_ticks()  # resume audio during the hold delay, not as the tool wheel appears
@@ -1373,6 +1396,8 @@ class PetWindow(QWidget):
             on_toggle_wander=self.set_auto_wander,
             on_quit=self.trigger_quit,
             recent_files=self.recent.entries(),
+            wheel_slices=[(o.label, o.callback_id, o.callback_id not in self.wheel_hidden)
+                          for o in self.all_tool_wheel_options()],
             parent=self,
         )
 
