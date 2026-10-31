@@ -42,6 +42,21 @@ class _Api(BaseHTTPRequestHandler):
             self.wfile.write(b"NOT-HTTP\r\n\r\n")
             self.close_connection = True
             return
+        if self.path.endswith("/messages"):  # Claude's native API: first answer pauses mid-search, then finishes
+            paused = body["messages"][-1]["role"] != "assistant"
+            payload = {"model": "claude-sonnet-5-5", "usage": {"input_tokens": 10, "output_tokens": 5,
+                                                                  "output_tokens_details": {"thinking_tokens": 2}},
+                       "stop_reason": "pause_turn" if paused else "end_turn",
+                       "content": [{"type": "thinking", "thinking": "hm"},
+                                   {"type": "server_tool_use", "id": "s1", "name": "web_search", "input": {}}] if paused else
+                                  [{"type": "text", "text": "Answer.", "citations": [
+                                      {"type": "web_search_result_location", "url": "https://python.org", "title": "Py"}]}]}
+            data = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if _Api.mode == "tool-once" and "tools" in body and body["messages"][-1]["role"] != "tool":
             data = json.dumps({"usage": {"total_tokens": 5}, "choices": [{"message": {"content": None, "tool_calls": [
                 {"id": "c1", "function": {"name": "web_search", "arguments": '{"query": "news"}'}}]}}]}).encode()
@@ -572,10 +587,7 @@ def test_web_search_tool_loop_and_fallback(api: str, monkeypatch: pytest.MonkeyP
 def test_run_tool_rejects_bad_calls_and_anthropic_params() -> None:
     assert ai_assist._run_tool("rm_rf", "{}").startswith("error")
     assert ai_assist._run_tool("web_search", "not json").startswith("error")
-    an = "https://api.anthropic.com/v1"
-    assert thinking_params(an, "low") == {"thinking": {"type": "enabled", "budget_tokens": 2000}}
-    assert thinking_params(an, "off") == {}
-    assert ai_assist.PRESETS["anthropic"][1] == an
+    assert ai_assist.PRESETS["anthropic"][1] == "https://api.anthropic.com/v1"
 
 
 def test_brave_search_used_when_key_saved(api: str, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -631,3 +643,40 @@ def ai_chat_brave() -> str:
     from src.ui.ai_chat import BRAVE_URL
 
     return BRAVE_URL
+
+
+def test_fetch_page_refuses_private_targets_and_extracts_text() -> None:
+    for bad in ("http://example.com/", "https://127.0.0.1/", "https://localhost/admin", "https://[::1]/",
+                "https://169.254.169.254/latest/meta-data", "https://192.168.0.1/", "https://u:p@example.com/",
+                "file:///C:/Windows/win.ini"):
+        with pytest.raises(ValueError):
+            ai_assist.check_public_https(bad)
+    assert ai_assist._run_tool("fetch_page", '{"url": "https://127.0.0.1/"}').startswith("error: fetch_page failed")
+    assert ai_assist._run_tool("fetch_page", "{}").startswith("error")
+    page = "<head><title>t</title></head><style>p{}</style><script>evil()</script><p>Hello&nbsp;<b>world</b></p>\n\n<p>2nd</p>"
+    assert ai_assist.page_text(page) == "Hello world 2nd"
+    assert len(ai_assist.page_text("x " * 20000)) <= ai_assist.MAX_PAGE_CHARS
+
+
+def test_claude_native_request_pause_turn_sources_and_thinking(api: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ai_assist, "is_anthropic", lambda _u: True)
+    url = "data:image/png;base64,AAAA"
+    msgs = chat_messages([{"role": "user", "content": "hi", "images": [url]}])
+    reply = ask(api, KEY, "claude-sonnet-5-5", msgs, thinking="high")
+    first, second = _Api.seen[0], _Api.seen[1]
+    assert first["path"] == "/v1/messages" and first["auth"] is None  # x-api-key, never a Bearer header
+    body = first["body"]
+    assert body["system"].startswith("You are ByteSprite") and body["messages"][0]["content"][1] == {
+        "type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"},
+        "cache_control": {"type": "ephemeral"}}
+    assert [t["name"] for t in body["tools"]] == ["web_search", "web_fetch"]
+    assert body["thinking"] == {"type": "adaptive", "display": "summarized"} and body["output_config"] == {"effort": "high"}
+    assert second["body"]["messages"][-1]["role"] == "assistant"  # the paused turn is sent back to continue
+    assert reply.text == "Answer.\n\nSources:\n- Py: https://python.org"
+    assert (reply.model, reply.reasoning, reply.prompt_tokens, reply.total_tokens, reply.reasoning_tokens) == (
+        "claude-sonnet-5-5", "hm", 20, 30, 4)
+    assert body["messages"][0]["content"][-1]["cache_control"] == {"type": "ephemeral"}  # prompt cache breakpoint
+    ask(api, KEY, "claude-sonnet-5-5", chat_messages([{"role": "user", "content": "plain"}]))
+    assert _Api.seen[2]["body"]["messages"][-1]["content"] == [
+        {"type": "text", "text": "plain", "cache_control": {"type": "ephemeral"}}]
+    assert "thinking" not in _Api.seen[2]["body"] and "output_config" not in _Api.seen[2]["body"]
