@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.wintypes as wintypes
+import http.client
 import json
 import re
 import sys
@@ -175,7 +176,7 @@ def ask(base_url: str, key: str, model: str, messages: list[dict[str, str]], *,
             raw = resp.read(MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as exc:  # its body may echo the request, so it is never shown
         raise ValueError(_HTTP_ERRORS.get(exc.code, f"http {exc.code}")) from None
-    except (urllib.error.URLError, TimeoutError, OSError):
+    except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException):  # e.g. BadStatusLine
         raise ValueError("network") from None
     if len(raw) > MAX_RESPONSE_BYTES:
         raise ValueError("reply too large")

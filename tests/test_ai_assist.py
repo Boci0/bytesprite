@@ -34,6 +34,10 @@ class _Api(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(f'{{"error": "bad key {KEY}"}}'.encode())
             return
+        if _Api.mode == "garbage":  # not an HTTP response at all
+            self.wfile.write(b"NOT-HTTP\r\n\r\n")
+            self.close_connection = True
+            return
         payload = {"choices": [{"message": {"content": "  It is a stack trace.  "}}], "usage": {"total_tokens": 42}}
         if _Api.mode == "huge":
             payload["choices"][0]["message"]["content"] = "x" * (ai_assist.MAX_RESPONSE_BYTES + 10)
@@ -104,6 +108,13 @@ def test_ask_refuses_redirects_and_never_echoes_the_key(api: str) -> None:
         ask(api, KEY, "m", T)
     with pytest.raises(ValueError):
         ask("http://evil.example/v1", KEY, "m", T)  # plain HTTP off localhost
+
+
+def test_ask_maps_broken_http_replies_to_network(api: str) -> None:
+    """AiJob only reports ValueError: anything else killed its thread and left the chat Thinking forever."""
+    _Api.mode = "garbage"
+    with pytest.raises(ValueError, match="network"):
+        ask(api, KEY, "m", T)
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows Credential Manager")
