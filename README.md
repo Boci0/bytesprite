@@ -74,7 +74,7 @@ plays, the paperclip grooves along.
 ## AI chat (opt-in)
 
 Hold the pet and pick **Ask AI**, use **AI Assist > Open AI Chat**, or press `Ctrl+Shift+Alt+A`. The
-first time it opens on Setup: pick a provider (DeepSeek, OpenAI, OpenRouter, Google Gemini, or any
+first time it opens on Setup: pick a provider (DeepSeek, OpenAI, OpenRouter, Google Gemini, Claude, or any
 OpenAI-compatible URL), a model and your API key. The key lives in Windows Credential Manager, never
 in the settings file. Nothing is sent until you press Enter, and nothing runs in the background.
 

@@ -42,6 +42,14 @@ class _Api(BaseHTTPRequestHandler):
             self.wfile.write(b"NOT-HTTP\r\n\r\n")
             self.close_connection = True
             return
+        if _Api.mode == "tool-once" and "tools" in body and body["messages"][-1]["role"] != "tool":
+            data = json.dumps({"usage": {"total_tokens": 5}, "choices": [{"message": {"content": None, "tool_calls": [
+                {"id": "c1", "function": {"name": "web_search", "arguments": '{"query": "news"}'}}]}}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if _Api.mode == "slow":  # still answering after the user pressed Stop
             import time
 
@@ -533,3 +541,93 @@ def test_chat_card_hugs_content_and_keeps_its_side_through_save_and_test(
         assert all(abs(edge - (pet.bottom() + 1 + chat.GAP)) <= 1 for edge in edges), edges
     finally:
         chat.close()
+
+
+def test_web_search_tool_loop_and_fallback(api: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = {"n": 0}
+    orig = _Api.do_POST
+
+    def tool_then_answer(self) -> None:  # noqa: ANN001
+        calls["n"] += 1
+        if calls["n"] > 1 or "tools" not in json.loads(self.rfile.peek(65536)):
+            return orig(self)
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        _Api.seen.append({"path": self.path, "body": body})
+        data = json.dumps({"usage": {"total_tokens": 10}, "choices": [{"message": {"content": None, "tool_calls": [
+            {"id": "c1", "function": {"name": "web_search", "arguments": '{"query": "python 3.14"}'}}]}}]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    monkeypatch.setattr(_Api, "do_POST", tool_then_answer)
+    monkeypatch.setattr(ai_assist, "web_search", lambda q: f"result for {q}")
+    reply = ask(api, KEY, "m-tools", T)
+    assert reply.text == "It is a stack trace." and reply.total_tokens == 52  # both rounds counted
+    follow = _Api.seen[1]["body"]["messages"]
+    assert follow[-1] == {"role": "tool", "tool_call_id": "c1", "content": "result for python 3.14"}
+    assert follow[-2]["tool_calls"][0]["id"] == "c1"
+
+
+def test_run_tool_rejects_bad_calls_and_anthropic_params() -> None:
+    assert ai_assist._run_tool("rm_rf", "{}").startswith("error")
+    assert ai_assist._run_tool("web_search", "not json").startswith("error")
+    an = "https://api.anthropic.com/v1"
+    assert thinking_params(an, "low") == {"thinking": {"type": "enabled", "budget_tokens": 2000}}
+    assert thinking_params(an, "off") == {}
+    assert ai_assist.PRESETS["anthropic"][1] == an
+
+
+def test_brave_search_used_when_key_saved(api: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    class Brave(BaseHTTPRequestHandler):
+        seen: list = []
+
+        def do_GET(self) -> None:  # noqa: N802
+            Brave.seen.append((self.path, self.headers.get("X-Subscription-Token")))
+            data = json.dumps({"web": {"results": [{"title": "<b>Py</b> 3.14", "url": "https://python.org",
+                                                    "description": "Released &amp; out"}, "junk"]}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, *_a) -> None:
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Brave)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    monkeypatch.setattr(ai_assist, "BRAVE_URL", f"http://127.0.0.1:{server.server_port}/search")
+    monkeypatch.setattr(ai_assist, "load_key", lambda _u: "brave-key-123")
+    try:
+        assert ai_assist.web_search("py 3.14") == "Py 3.14\nhttps://python.org\nReleased & out"
+    finally:
+        server.shutdown()
+    assert Brave.seen == [("/search?count=5&q=py+3.14", "brave-key-123")]
+
+
+def test_chat_answers_after_a_web_search_and_setup_saves_the_search_key(
+        monkeypatch: pytest.MonkeyPatch, api: str) -> None:
+    app, plugin, chat = _chat(monkeypatch, api)
+    saved = []
+    monkeypatch.setattr("src.ui.ai_chat.save_key", lambda url, key: saved.append((url, key)) or True)
+    monkeypatch.setattr(ai_assist, "web_search", lambda q: f"result for {q}")
+    try:
+        _Api.mode = "tool-once"
+        chat.insert_text("what is the news?")
+        chat.send()
+        _wait(app, lambda: chat._job is None and len(chat._history) == 2)
+        assert chat._history[-1]["content"] == "It is a stack trace."
+        assert _Api.seen[-1]["body"]["messages"][-1] == {"role": "tool", "tool_call_id": "c1", "content": "result for news"}
+        chat.show_setup()
+        chat._search_key.setText("brave-key-123")
+        chat._save_and_test()
+        assert saved[0] == (ai_chat_brave(), "brave-key-123") and chat._search_key.text() == ""
+        _wait(app, lambda: chat._job is None)  # the Save and test request finishes before the widget is closed
+    finally:
+        chat.close()
+
+
+def ai_chat_brave() -> str:
+    from src.ui.ai_chat import BRAVE_URL
+
+    return BRAVE_URL

@@ -18,8 +18,8 @@ from PyQt6.QtWidgets import (QAbstractButton, QComboBox, QFileDialog, QFormLayou
                              QLabel, QLineEdit, QMenu, QPlainTextEdit, QPushButton, QScrollArea, QStackedWidget,
                              QVBoxLayout, QWidget)
 
-from src.tools.ai_assist import (KEY_PAGES, MAX_INPUT_CHARS, PRESETS, THINKING_LEVELS, AiAssistPlugin, AiJob,
-                                 AiReply, ModelInfo, ask, chat_messages, list_models, load_key, save_key, valid_key,
+from src.tools.ai_assist import (BRAVE_KEY_PAGE, BRAVE_URL, KEY_PAGES, MAX_INPUT_CHARS, PRESETS,
+                                 THINKING_LEVELS, AiAssistPlugin, AiJob, AiReply, ModelInfo, ask, chat_messages, list_models, load_key, save_key, valid_key,
                                  valid_model, validate_base_url)
 from src.ui.context_menu import style_menu
 from src.ui.quick_tools import OcrJob
@@ -483,6 +483,14 @@ class AiChat(QWidget):
         key_row = QHBoxLayout()
         key_row.addWidget(self._key, 1)
         key_row.addWidget(self._get_key)
+        self._search_key = QLineEdit()
+        self._search_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self._search_key.setToolTip("Brave Search API key (free tier). Without it, web search uses DuckDuckGo, which often blocks it.")
+        get_search = QPushButton("Get a key")
+        get_search.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(BRAVE_KEY_PAGE)))
+        search_row = QHBoxLayout()
+        search_row.addWidget(self._search_key, 1)
+        search_row.addWidget(get_search)
         self._thinking = QComboBox()
         for level in THINKING_LEVELS:
             self._thinking.addItem(level.title(), level)
@@ -492,14 +500,15 @@ class AiChat(QWidget):
         self._status.setTextFormat(Qt.TextFormat.PlainText)
         self._save_btn = QPushButton("Save and test")
         self._save_btn.clicked.connect(self._save_and_test)
-        for widget in (self._provider, self._url, self._model, self._key, self._thinking):
+        for widget in (self._provider, self._url, self._model, self._key, self._search_key, self._thinking):
             widget.setStyleSheet(_FIELD_CSS)
-        for widget in (self._get_key, self._save_btn):
+        for widget in (self._get_key, get_search, self._save_btn):
             widget.setStyleSheet(_BUTTON_CSS)
             widget.setCursor(Qt.CursorShape.PointingHandCursor)
         for row_label, field in (("Provider", self._provider), ("Base URL", self._url), ("Model", self._model)):
             form.addRow(self._form_label(row_label), field)
         form.addRow(self._form_label("API key"), key_row)
+        form.addRow(self._form_label("Search key"), search_row)
         form.addRow(self._form_label("Thinking"), self._thinking)
         form.addRow("", self._save_btn)
         form.addRow("", self._status)
@@ -525,6 +534,9 @@ class AiChat(QWidget):
         self._model.setText(p.model)
         self._key.clear()
         self._key_placeholder(p.has_key())
+        self._search_key.clear()
+        self._search_key.setPlaceholderText("Brave Search key (saved)" if load_key(BRAVE_URL)
+                                            else "Optional: Brave Search key for web search")
         self._get_key.setEnabled(p.provider in KEY_PAGES)
         self._thinking.setCurrentIndex(max(0, self._thinking.findData(p.thinking)))
 
@@ -565,6 +577,13 @@ class AiChat(QWidget):
         if not valid_model(model):
             self._set_status("Enter a model name (letters, digits, - _ . : / only).", False)
             return
+        search_key = self._search_key.text().strip()
+        if search_key:
+            if not valid_key(search_key) or not save_key(BRAVE_URL, search_key):
+                self._set_status("That search key could not be saved.", False)
+                return
+            self._search_key.clear()
+            self._search_key.setPlaceholderText("Brave Search key (saved)")
         key = self._key.text().strip()
         if key:
             if not valid_key(key):
