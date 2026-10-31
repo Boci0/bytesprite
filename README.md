@@ -34,12 +34,16 @@ Options: `-DesktopShortcut`, `-StartWithWindows`, `-NoLaunch`. If Python is miss
 | `Pictures\ByteSprite` | Screen snips |
 
 The installer adds a Start Menu shortcut and an entry in **Settings > Apps**, which runs the uninstaller.
+There is no `.exe`: the shortcut runs `pythonw.exe -m src.main` from the private environment. Launch it
+from the Start Menu (search "ByteSprite"), or re-run the installer with `-DesktopShortcut` for a desktop icon.
 
 ### Updating
 
 Right-click the pet, then **Settings > Check for Updates**. It downloads the newest GitHub release,
 swaps in the new code and restarts. An installed copy also checks quietly once per launch and shows a
 toast when a release is out. Re-running `install.ps1` updates too (and refreshes dependencies).
+A copy run straight from a git clone has no install marker, so **Check for Updates** only opens the
+release page there; `git pull` instead.
 
 ### Uninstalling
 
@@ -64,6 +68,7 @@ plays, the paperclip grooves along.
 - **Click** cycles the HUD: CPU / RAM / Disk, Pomodoro, File Forge, Clip Vault, Project (git), Lyrics.
 - **Double-click** snips a screen region to the clipboard.
 - **Hold** opens a tool wheel: OCR, clipboard history, search, focus timer, mute, web shortcuts.
+  Drag onto a slice and release to run it; release over the center or off the ring to close it.
 - **Drag files onto it** to convert or compress: WebP / PNG / JPG / ICO / BMP, CSV / TSV / JSON,
   ZIP / TAR.XZ / TAR.GZ / GZIP, extract, SHA-256. Drag an image out of a browser to save a clean copy.
   The output folder opens behind your current window (unless it is already open).
@@ -85,7 +90,7 @@ python -m venv .venv
 ### Releasing
 
 1. Bump `__version__` in `src/__init__.py` (the single version source).
-2. Commit, then tag and publish: `gh release create v0.9.0 --generate-notes`.
+2. Commit, then tag and publish: `gh release create vX.Y.Z --generate-notes`.
 
 Installed copies pick the release up through **Check for Updates**. The updater replaces `src/` only;
 when `requirements.txt` changes, say in the release notes to re-run `install.ps1`.
