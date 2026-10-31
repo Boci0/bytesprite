@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import bisect
+import http.client
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -166,7 +167,7 @@ def fetch_synced_lyrics(title: str, artist: str, duration_s: float = 0.0) -> lis
         path, params, exact = attempt
         try:
             data = _fetch_json(path, params)
-        except (OSError, ValueError):
+        except (OSError, ValueError, http.client.HTTPException):  # e.g. BadStatusLine, IncompleteRead
             return []
         for item in data if isinstance(data, list) else [data]:
             if not isinstance(item, dict):

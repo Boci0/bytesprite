@@ -186,3 +186,34 @@ def test_browser_and_long_sessions_are_not_songs(monkeypatch) -> None:
     reader.snap = {**_playing(1000), "app": "Spotify.exe", "dur": 240000}
     plugin.tick()
     assert plugin.playing and plugin.title == "Song"
+
+
+def test_broken_lrclib_reply_is_a_miss_not_a_dead_lookup(monkeypatch, tmp_path) -> None:
+    """A non-HTTP reply raised http.client.BadStatusLine out of the lookup thread, so `_lines` stayed
+    None: the card showed loading dots and the track was never retried."""
+    import socket
+    import threading
+
+    from src.tools import lyrics
+
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(8)
+
+    def serve() -> None:
+        while True:
+            try:
+                conn, _addr = server.accept()
+            except OSError:
+                return
+            conn.recv(65536)
+            conn.sendall(b"NOT-HTTP\r\n\r\n")
+            conn.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    monkeypatch.setattr(lyrics, "_LRCLIB", f"http://127.0.0.1:{server.getsockname()[1]}/api/")
+    monkeypatch.setattr(lyrics, "_PEAR_DIR", tmp_path)
+    try:
+        assert lyrics.fetch_synced_lyrics("Song", "Artist", 200.0) == []
+    finally:
+        server.close()
