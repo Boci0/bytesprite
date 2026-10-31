@@ -433,7 +433,7 @@ class ClipVaultPlugin:
                 return (True, "NO TEXT", "#EF7D57")
             try:
                 parsed = json.loads(raw)
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, RecursionError):  # deeply nested arrays raise RecursionError
                 return (True, "NOT JSON", "#EF7D57")
             if "\n" in raw:
                 transformed = json.dumps(parsed, separators=(",", ":"), ensure_ascii=False)
@@ -533,7 +533,7 @@ class ClipVaultPlugin:
                 result, badge = toggle_string_escape(raw)
             else:
                 return (False, "", "")
-        except (ValueError, binascii.Error, OverflowError, OSError):
+        except (ValueError, binascii.Error, OverflowError, OSError, RecursionError):
             return (True, "NO MATCH", "#EF7D57")
         self._set_current_text(result)
         self._transform_count += 1

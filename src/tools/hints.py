@@ -52,16 +52,16 @@ def suggest(app: str, clip: str, dwell_s: float, pomodoro_idle: bool) -> Suggest
             try:
                 decode_jwt(clip)
                 return Suggestion("jwt", "Decode this JWT?", "clipvault:dev:jwt")
-            except ValueError:
+            except (ValueError, RecursionError):  # deeply nested JSON raises RecursionError
                 pass
-        if clip.isdigit() and len(clip) in (10, 13):
+        if clip.isascii() and clip.isdigit() and len(clip) in (10, 13):  # '²'.isdigit() but int() rejects it
             seconds = int(clip) // (1000 if len(clip) == 13 else 1)
             if _EPOCH_MIN <= seconds <= _EPOCH_MAX:
                 return Suggestion("time", "Convert this timestamp?", "clipvault:dev:time")
         if clip[0] in "{[" and "\n" not in clip and len(clip) >= 40:
             try:
                 parsed = json.loads(clip)
-            except ValueError:
+            except (ValueError, RecursionError):
                 parsed = None
             if isinstance(parsed, (dict, list)) and len(parsed) >= 2:
                 return Suggestion("json", "Pretty-print this JSON?", "clipvault:json_toggle")

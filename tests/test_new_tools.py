@@ -614,6 +614,18 @@ def test_dev_transform_actions_write_clipboard() -> None:
     assert any(i.submenu == ClipVaultPlugin.DEV_SUBMENU for i in vault.get_menu_items())
 
 
+def test_deeply_nested_json_clip_is_refused_not_raised() -> None:
+    """Menu actions run in Qt slots, where a RecursionError from json.loads aborts the app."""
+    import base64
+
+    nested = "[" * 3000 + "]" * 3000
+    deep = base64.urlsafe_b64encode(b'{"a":' + nested.encode() + b"}").decode().rstrip("=")
+    for clip, action, badge in ((nested, "clipvault:json_toggle", "NOT JSON"),
+                                (f"eyJhbGciOiJIUzI1NiJ9.{deep}.s", "clipvault:dev:jwt", "NO MATCH")):
+        vault = ClipVaultPlugin(read_text=lambda c=clip: c, write_text=lambda _t: None)
+        assert vault.execute_action(action)[1] == badge
+
+
 def test_parse_git_status() -> None:
     from src.tools.project import parse_git_status
 

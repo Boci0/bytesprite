@@ -1,5 +1,7 @@
 """Offline context hint rules, clipboard change detection, cooldowns and mutes."""
 
+import base64
+
 from src.tools.hints import FOCUS_DWELL_S, HintsPlugin, suggest
 
 JWT = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.sig"
@@ -50,3 +52,11 @@ def test_focus_dwell_mute_and_toggle_persist():
     restored.load_dict(hints.to_dict())
     assert not restored.enabled
     assert restored.poll("chrome.exe", JWT, True, now=0) is None
+
+
+def test_hostile_clipboard_text_never_raises():
+    """The 3s hint poll is a Qt timer slot: an exception there aborts the app."""
+    nested = "[" * 3000 + "]" * 3000
+    deep = base64.urlsafe_b64encode(b'{"a":' + nested.encode() + b"}").decode().rstrip("=")
+    for clip in ("²" * 10, nested, f"eyJhbGciOiJIUzI1NiJ9.{deep}.sig"):
+        assert suggest("code.exe", clip, 0.0, True) is None
