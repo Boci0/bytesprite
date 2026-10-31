@@ -112,6 +112,7 @@ class PetContextMenu(QMenu):
         on_tool_action: Callable[[str], object] | None = None,
         recent_files: Sequence[tuple[Path, float]] = (),
         wheel_slices: Sequence[tuple[str, str, bool]] = (),
+        wheel_custom: Sequence[str] = (),
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -281,13 +282,26 @@ class PetContextMenu(QMenu):
         self.settings_menu.addAction(self.reset_position_action)
 
         if wheel_slices and on_tool_action is not None:
-            self.wheel_menu = style_menu(QMenu("Wheel Slices", self.settings_menu))
+            self.wheel_menu = style_menu(QMenu("Customize Wheel", self.settings_menu))
+
+            def wheel_action(label: str, key: str, menu: QMenu = self.wheel_menu) -> QAction:
+                act = QAction(label, menu)
+                act.triggered.connect(lambda _checked=False, c=f"wheel:{key}": on_tool_action(c))
+                menu.addAction(act)
+                return act
+
             for label, cid, shown in wheel_slices:
-                w_act = QAction(label, self.wheel_menu)
+                w_act = wheel_action(label.replace("&", "&&"), f"toggle:{cid}")
                 w_act.setCheckable(True)
                 w_act.setChecked(shown)
-                w_act.triggered.connect(lambda _checked=False, c=cid: on_tool_action(f"wheel:toggle:{c}"))
-                self.wheel_menu.addAction(w_act)
+            self.wheel_menu.addSeparator()
+            wheel_action("Add Website...", "add_web")
+            wheel_action("Add App or File...", "add_app")
+            if wheel_custom:
+                remove_menu = style_menu(QMenu("Remove Custom", self.wheel_menu))
+                for idx, label in enumerate(wheel_custom):
+                    wheel_action(label.replace("&", "&&"), f"remove:{idx}", remove_menu)
+                self.wheel_menu.addMenu(remove_menu)
             self.settings_menu.addMenu(self.wheel_menu)
 
         if on_tool_action is not None:

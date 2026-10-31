@@ -136,26 +136,57 @@ class TestByteSpriteAppIntegration:
             assert b"python312.dll" not in raw
 
 
-def test_wheel_slices_hide_persist_and_keep_one(qapp: QApplication, tmp_path: Path) -> None:
+def test_customize_wheel_extras_custom_and_persist(qapp: QApplication, tmp_path: Path) -> None:
+    from src.ui.tool_wheel import MAX_SLICES
+
     storage = StorageManager(tmp_path / "wheel.json")
     controller = ByteSpriteApp(app=qapp, storage=storage, enable_tray=False)
     win = controller.window
-    all_ids = [o.callback_id for o in win.all_tool_wheel_options()]
+    base = [o.callback_id for o in win.all_tool_wheel_options()]
+    assert [o.callback_id for o in win.tool_wheel_options()] == base  # extras start off
+
     win.trigger_tool_action("wheel:toggle:snip:text")
-    assert "snip:text" not in [o.callback_id for o in win.tool_wheel_options()]
+    win.trigger_tool_action("wheel:toggle:snip:color")
+    assert win.wheel.add_custom("  My   Docs ", "https://docs.example.com") == "ADDED"
+    assert win.wheel.add_custom("x", "C:/definitely/not/here.exe") == "BAD LINK"
+    assert win.wheel.add_custom("Notes", str(tmp_path)) == "ADDED"  # a folder opens in Explorer
+    ids = [o.callback_id for o in win.tool_wheel_options()]
+    assert "snip:text" not in ids and "snip:color" in ids
+    assert ids[-2:] == ["web:https://docs.example.com", f"open:{tmp_path}"]
+    assert win.tool_wheel_options()[-2].label == "My Docs"
+
     menu = win.build_context_menu()
-    assert [a.isChecked() for a in menu.wheel_menu.actions()][0] is False
+    labels = [a.text() for a in menu.wheel_menu.actions()]
+    assert "Color" in labels and "Add Website..." in labels and "Add App or File..." in labels
     menu.deleteLater()
-    for cid in all_ids[1:]:
-        win.trigger_tool_action(f"wheel:toggle:{cid}")
-    assert len(win.tool_wheel_options()) == 1 and win._toast_text == "KEEP ONE"
+
+    for option, _on in win.wheel.catalog(win.all_tool_wheel_options()):  # flip all: hits FULL and KEEP ONE
+        win.trigger_tool_action(f"wheel:toggle:{option.callback_id}")
+    assert len(win.tool_wheel_options()) <= MAX_SLICES
     controller.quit()
 
-    saved_hidden = storage.load().tools_data["wheel"]["hidden"]
-    assert set(saved_hidden) == set(all_ids[:-1])
     again = ByteSpriteApp(app=qapp, storage=storage, enable_tray=False)
-    assert [o.callback_id for o in again.window.tool_wheel_options()] == all_ids[-1:]
+    assert again.window.wheel.custom == win.wheel.custom
+    assert again.window.tool_wheel_options() == win.tool_wheel_options()
+    assert again.window.wheel.remove_custom(0) and len(again.window.wheel.custom) == 1
     again.quit()
+
+
+def test_wheel_layout_limits_and_first_format() -> None:
+    from src.ui.tool_wheel import MAX_SLICES, EXTRA_SLICES, ToolWheelOption, WheelLayout
+
+    base = [ToolWheelOption(f"T{i}", "", "#FFFFFF", f"t:{i}") for i in range(MAX_SLICES - 1)]
+    layout = WheelLayout()
+    assert layout.toggle(EXTRA_SLICES[0].callback_id, base) == "SHOWN"
+    assert layout.toggle(EXTRA_SLICES[1].callback_id, base) == "WHEEL FULL"
+    for o in base:
+        layout.toggle(o.callback_id, base)
+    assert layout.toggle(EXTRA_SLICES[0].callback_id, base) == "KEEP ONE"
+
+    old = WheelLayout()
+    old.load_dict({"hidden": ["t:0", 5], "custom": [["ok", "https://a.b"], ["bad"], [1, 2]]})
+    assert old.overrides == {"t:0": False} and old.custom == [("ok", "https://a.b")]
+    assert [o.callback_id for o in old.visible(base)][0] == "t:1"
 
 
 def test_tool_wheel_closes_when_release_never_arrives(qapp: QApplication, monkeypatch: pytest.MonkeyPatch) -> None:

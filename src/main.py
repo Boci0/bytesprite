@@ -74,9 +74,7 @@ class ByteSpriteApp:
             on_notification=self._show_tray_message,
         )
         self.window.recent.load_dict(saved.tools_data.get(RECENT_FILES_KEY))
-        hidden = saved.tools_data.get(WHEEL_KEY, {}).get("hidden")
-        if isinstance(hidden, list):
-            self.window.wheel_hidden = {h for h in hidden if isinstance(h, str)}
+        self.window.wheel.load_dict(saved.tools_data.get(WHEEL_KEY))
 
         if saved.position is not None:
             self.window.move_clamped(saved.position[0], saved.position[1])
@@ -165,7 +163,7 @@ class ByteSpriteApp:
         for plugin in self.state_machine.registry.plugins:
             tools_payload[plugin.tool_id] = plugin.to_dict()
         tools_payload[RECENT_FILES_KEY] = self.window.recent.to_dict()
-        tools_payload[WHEEL_KEY] = {"hidden": sorted(self.window.wheel_hidden)}
+        tools_payload[WHEEL_KEY] = self.window.wheel.to_dict()
         return self._storage.save(
             stats=self.state_machine.stats,
             state=self.state_machine.state,
