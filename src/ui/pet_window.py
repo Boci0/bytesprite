@@ -44,6 +44,7 @@ from src.engine.pet_state import PetStateMachine
 from src.graphics.animation_controller import AnimationController
 from src.graphics.sprite_matrix import FrameMatrix, get_sprite_frames
 from src.tools.file_forge import ForgeMode, ForgeWheelOption, get_wheel_options_for_paths
+from src.tools.hints import HintsPlugin, Suggestion, foreground_app
 from src.storage.recent_files import RecentFiles
 from src.tools.web_drop import WebImageJob, html_image_src, is_web_image_source, web_image_stem
 from src.ui.context_menu import PetContextMenu, style_menu
@@ -357,6 +358,15 @@ class PetWindow(QWidget):
         self._overlay_timer.setInterval(90)
         self._overlay_timer.timeout.connect(self._on_overlay_tick)
 
+        # Offline context hints (Hints tool): a clickable card over the sprite, polled every 3s
+        self._hint: Suggestion | None = None
+        self._hint_until: float = 0.0
+        self._hint_rect = QRect(8, 4, self.WINDOW_WIDTH - 16, 40)
+        self._hint_timer = QTimer(self)
+        self._hint_timer.setInterval(3000)
+        self._hint_timer.timeout.connect(self._poll_hint)
+        self._hint_timer.start()
+
     def _configure_window(self) -> None:
         self.setWindowTitle("ByteSprite")
         self.setWindowIcon(build_app_icon(64))
@@ -601,9 +611,55 @@ class PetWindow(QWidget):
         self.update()
 
     def _is_hud_visible(self) -> bool:
-        if self._open_wheels():
-            return False  # the HUD would cover wheel slices
+        if self._open_wheels() or self._hint is not None:
+            return False  # the HUD would cover wheel slices or the hint card being clicked
         return self._hovered or self._hud_pinned_until_ticks > 0
+
+    def _hints_plugin(self) -> HintsPlugin | None:
+        plugin = self._state_machine.registry.get_plugin("hints")
+        return plugin if isinstance(plugin, HintsPlugin) else None
+
+    def _poll_hint(self) -> None:
+        if self._hint is not None:
+            if time.monotonic() >= self._hint_until:
+                self._clear_hint()
+            return
+        hints = self._hints_plugin()
+        if (hints is None or not hints.enabled or self._state_machine.state == PetState.SLEEPING
+                or self._open_wheels() or self._press_global_pos is not None or self._snip_session is not None):
+            return
+        cb = QGuiApplication.clipboard()
+        pomo = self._state_machine.pomodoro_plugin
+        hint = hints.poll(foreground_app(), cb.text() if cb is not None else "",
+                          pomo is not None and not pomo.running)
+        if hint is not None:
+            self._hint, self._hint_until = hint, time.monotonic() + 12.0
+            self._anim.play_oneshot("spin")
+            self._schedule_next_anim_tick()
+            self.update()
+
+    def _clear_hint(self) -> None:
+        self._hint = None
+        self.update()
+
+    def _run_hint(self) -> None:
+        hint, hints = self._hint, self._hints_plugin()
+        self._clear_hint()
+        if hint is None:
+            return
+        if hints is not None:
+            hints.mark_used()
+        if hint.action == "pet:focus":
+            self.trigger_play()
+        else:
+            self.trigger_tool_action(hint.action)
+
+    def _dismiss_hint(self) -> None:
+        hint, hints = self._hint, self._hints_plugin()
+        self._clear_hint()
+        if hint is not None and hints is not None:
+            hints.dismiss(hint.rule)
+        self._show_toast("MUTED", QColor("#8A9AF2"))
 
     # ------------------------------------------------------------------
     # Interactive Multi-Tool Actions
@@ -1159,6 +1215,8 @@ class PetWindow(QWidget):
         """Return True if local_pos hits opaque sprite pixels or an active HUD card."""
         if self._is_hud_visible() and self._hud_rect.contains(local_pos):
             return True
+        if self._hint is not None and self._hint_rect.contains(local_pos):
+            return True
         if not self._sprite_rect.contains(local_pos):
             return False
 
@@ -1197,6 +1255,11 @@ class PetWindow(QWidget):
         local_pos = event.position().toPoint()
         if not self._is_interactive_hit(local_pos):
             event.ignore()
+            return
+        if (self._hint is not None and event.button() == Qt.MouseButton.LeftButton
+                and self._hint_rect.contains(local_pos)):
+            self._run_hint()
+            event.accept()
             return
 
         if event.button() == Qt.MouseButton.LeftButton:
@@ -1294,6 +1357,10 @@ class PetWindow(QWidget):
             return
         if not self._is_interactive_hit(event.pos()):
             event.ignore()
+            return
+        if self._hint is not None and self._hint_rect.contains(event.pos()):
+            self._dismiss_hint()
+            event.accept()
             return
         self._open_context_menu(event.globalPos())
         event.accept()
@@ -1432,7 +1499,9 @@ class PetWindow(QWidget):
         # Crisp nearest-neighbor 4x pixel-art character
         painter.drawImage(self._sprite_rect, self._current_qimage())
 
-        if self._is_hud_visible():
+        if self._hint is not None:
+            self._paint_hint(painter)
+        elif self._is_hud_visible():
             self._paint_hud(painter)
         elif self._lyric_visible or self._lyric_animating():
             self._paint_lyric(painter)
@@ -1674,6 +1743,25 @@ class PetWindow(QWidget):
                 painter.drawEllipse(QRectF(cx - 11 + i * 9, cy - 2 - bounce, 5, 5))
         painter.restore()
 
+    def _paint_hint(self, painter: QPainter) -> None:
+        """Hint card in the HUD style: the suggestion plus a dim how-to line."""
+        r = self._hint_rect
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        painter.setPen(QPen(qcolor(HAIRLINE_RGBA), 1))
+        painter.setBrush(qcolor(GLASS_RGBA))
+        painter.drawRoundedRect(QRectF(r).adjusted(0.5, 0.5, -0.5, -0.5), 10, 10)
+        center = Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter
+        painter.setFont(ui_font(8.5, bold=True))
+        painter.setPen(QColor(TEXT_HEX))
+        painter.drawText(QRect(r.left() + 8, r.top() + 5, r.width() - 16, 16), center, self._hint.text)
+        painter.setFont(ui_font(6.5))
+        painter.setPen(QColor(TEXT_DIM_HEX))
+        painter.drawText(QRect(r.left() + 8, r.top() + 22, r.width() - 16, 12), center,
+                         "Click: do it   Right-click: mute")
+        painter.restore()
+
     def _paint_toast(self, painter: QPainter) -> None:
         progress = 1.0 - (self._toast_steps / max(1, self._toast_max_steps))
         rise_px = int(progress * 8)
@@ -1721,6 +1809,7 @@ class PetWindow(QWidget):
         self._topmost_timer.stop()
         self._overlay_timer.stop()
         self._lyric_timer.stop()
+        self._hint_timer.stop()
         if self._snip_session is not None:
             self._snip_session.close()
             self._snip_session = None

@@ -10,6 +10,7 @@ from src.engine.models import CompanionState, HudData, PetState, PetStats, ToolM
 from src.tools.base import ToolPlugin, ToolRegistry
 from src.tools.clip_vault import ClipVaultPlugin
 from src.tools.file_forge import FileForgePlugin, ForgeMode
+from src.tools.hints import HintsPlugin
 from src.tools.pomodoro import PomodoroPhase, PomodoroPlugin
 from src.tools.lyrics import LyricsPlugin
 from src.tools.project import ProjectPlugin
@@ -44,7 +45,8 @@ class PetStateMachine:
             pomodoro.completed_sessions = self._stats.completed_sessions
             forge = FileForgePlugin()
             clipvault = ClipVaultPlugin()
-            self._registry = ToolRegistry([sysmon, pomodoro, forge, clipvault, ProjectPlugin(), LyricsPlugin()])
+            self._registry = ToolRegistry([sysmon, pomodoro, forge, clipvault, ProjectPlugin(), LyricsPlugin(),
+                                           HintsPlugin()])
 
         self._sync_stats_from_tools()
 
