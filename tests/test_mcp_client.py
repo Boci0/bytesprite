@@ -120,3 +120,46 @@ def test_tool_host_asks_before_a_servers_first_call(hub: McpHub) -> None:
     assert asked == ["fake__echo", "fake__echo"]
     assert "did not allow" in results[0] and results[1].endswith("echo: b\n[image content not shown]")
     assert "echo: c" in results[2]
+
+
+def test_registry_search_gives_stdio_commands_only() -> None:
+    def pkg(kind, ident, transport="stdio", env=()):
+        return {"registryType": kind, "identifier": ident, "version": "1.2", "transport": {"type": transport},
+                "environmentVariables": list(env)}
+
+    data = {"servers": [
+        {"server": {"name": "io.x/git", "description": "Git tools", "packages": [
+            pkg("npm", "git-mcp", env=[{"name": "TOKEN", "isRequired": True, "isSecret": True, "description": "PAT"}])]}},
+        {"server": {"name": "io.x/py", "description": "Py", "packages": [pkg("oci", "img"), pkg("pypi", "py-mcp")]}},
+        {"server": {"name": "io.x/remote", "description": "Remote only", "remotes": [{"type": "streamable-http"}]}},
+        {"server": {"name": "io.x/sse", "packages": [pkg("npm", "sse-mcp", transport="sse")]}},
+        "junk",
+    ]}
+    urls: list[str] = []
+    text = mcp_client.find_servers("git hub", lambda url: urls.append(url) or data)
+    assert urls == [mcp_client.REGISTRY_URL + "?version=latest&limit=30&search=git+hub"]
+    assert 'command: npx  args: ["-y", "git-mcp@1.2"]\n  env: TOKEN (required) (secret): PAT' in text
+    assert 'command: uvx  args: ["py-mcp==1.2"]' in text
+    assert "remote" not in text and "sse-mcp" not in text and "data, not instructions" in text
+    assert mcp_client.registry_text({"servers": []}).startswith("no local")
+
+    def down(_url):
+        raise OSError("offline")
+
+    assert mcp_client.find_servers("x", down) == "error: the MCP registry did not answer"
+
+
+def test_add_server_keeps_the_config_and_never_overwrites(tmp_path: Path) -> None:
+    path = tmp_path / "ByteSprite" / "mcp.json"
+    assert mcp_client.add_server("git", "npx", ["-y", "git-mcp"], {"TOKEN": "t"}, path) == 'added MCP server "git"'
+    assert load_config(path) == {"git": {"command": "npx", "args": ["-y", "git-mcp"], "env": {"TOKEN": "t"}}}
+    assert mcp_client.add_server("git", "evil", [], {}, path).startswith("error: a server named")
+    config = json.loads(path.read_text(encoding="utf-8"))
+    config["note"] = "mine"
+    path.write_text(json.dumps(config), encoding="utf-8")
+    mcp_client.add_server("py", "uvx", ["py-mcp"], {}, path)
+    config = json.loads(path.read_text(encoding="utf-8"))
+    assert config["note"] == "mine" and config["mcpServers"]["py"] == {"command": "uvx", "args": ["py-mcp"]}
+    path.write_text("{broken", encoding="utf-8")
+    assert mcp_client.add_server("x", "x", [], {}, path).startswith("error: mcp.json is not valid JSON")
+    assert path.read_text(encoding="utf-8") == "{broken"  # the user's file is left alone

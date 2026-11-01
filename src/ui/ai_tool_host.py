@@ -4,7 +4,8 @@
 (clipboard, screen grab, Save dialog, pet actions) is queued to the Qt thread and the worker waits for its result.
 Tools of the user's MCP servers (src/tools/mcp_client.py) join the specs; each server's first call in a chat
 waits for the user to allow it in the chat.
-edit_file and run_command also wait for the user's Allow in the chat (once, or for the whole chat).
+edit_file, run_command, add_mcp_server and add_skill also wait for the user's Allow in the chat (once, or for the
+whole chat).
 """
 
 from __future__ import annotations
@@ -20,9 +21,9 @@ from PyQt6.QtGui import QCursor, QGuiApplication, QImage
 from PyQt6.QtWidgets import QFileDialog
 
 from src.tools.ai_tools import (FILE_TOOLS, PET_ACTIONS, TOOL_SPECS, apply_edit, load_skill, plan_edit, run_command,
-                                run_file_tool, save_args, skills_dir)
+                                run_file_tool, save_args, skill_text, skills_dir, write_skill)
 from src.tools.macros import parse_recipe
-from src.tools.mcp_client import McpHub
+from src.tools.mcp_client import SEP, McpHub, add_server, find_servers, safe_name
 from src.ui.quick_tools import ocr_image_file
 
 GUI_TIMEOUT_S = 15.0
@@ -73,14 +74,28 @@ class AiToolHost(QObject):
             command = args.get("command")
             if not isinstance(command, str) or not command.strip():
                 return "error: give a command"
-            if self._project() is None:
-                return run_command(None, command)  # explains that no Project Folder is chosen
-            if not self._allowed("run_command", f"The model wants to run in the Project Folder:\n\n{command.strip()}",
-                                 "commands"):
+            cwd = self._project() or Path.home()
+            where = "the Project Folder" if self._project() else f"your home folder ({cwd})"
+            if not self._allowed("run_command", f"The model wants to run in {where}:\n\n{command.strip()}", "commands"):
                 return "error: the user declined this command"
-            return run_command(self._project(), command)
+            return run_command(cwd, command)
         if name == "load_skill":
             return load_skill(skills_dir(), args.get("name"))
+        if name == "find_mcp_servers":
+            query = args.get("query")
+            return find_servers(query.strip()) if isinstance(query, str) and query.strip() else "error: give a query"
+        if name == "add_mcp_server":
+            return self._add_mcp_server(args)
+        if name == "add_skill":
+            fields = [args.get(k) for k in ("name", "description", "instructions")]
+            if not all(isinstance(f, str) and f.strip() for f in fields):
+                return "error: give a name, a description and instructions"
+            skill, description, instructions = (f.strip() for f in fields)
+            text = skill_text(description, instructions)
+            if not self._allowed("add_skill", f'The model wants to save a skill "{skill}" that later chats will '
+                                 f"follow as your own instructions:\n\n{text}", "saving skills"):
+                return "error: the user declined this skill"
+            return write_skill(skills_dir(), skill, text)
         if name == "read_screen":
             image = self._on_gui(self._grab_screen)
             return self._ocr(image) if isinstance(image, QImage) and not image.isNull() else "error: no screen grab"
@@ -93,6 +108,28 @@ class AiToolHost(QObject):
             return out if isinstance(out, str) else "error: the user did not answer the Save dialog in time"
         out = self._on_gui(lambda done: done(self._pet_tool(name, args)))
         return out if isinstance(out, str) else "error: the pet did not answer in time"
+
+    def _add_mcp_server(self, args: dict[str, Any]) -> str:
+        server, command = args.get("name"), args.get("command")
+        cmd_args, env = args.get("args") or [], args.get("env") or {}
+        if (not isinstance(server, str) or not server or safe_name(server) != server or SEP in server
+                or not isinstance(command, str) or not command.strip()
+                or not isinstance(cmd_args, list) or not all(isinstance(a, str) for a in cmd_args)
+                or not isinstance(env, dict) or not all(isinstance(v, str) for v in env.values())):
+            return "error: give a name (letters, digits, single _ and -), a command, string args and string env values"
+        line = " ".join([command.strip(), *cmd_args])
+        env_note = f"\nwith env: {', '.join(env)}" if env else ""  # names only, values may be secrets
+        if not self._allowed("add_mcp_server", f'The model wants to install MCP server "{server}". It will run this '
+                             f"on your PC with your permissions whenever the AI chat starts:\n\n{line}{env_note}",
+                             "MCP installs"):
+            return "error: the user declined this MCP server"
+        out = add_server(server, command.strip(), cmd_args, {str(k): v for k, v in env.items()}, self.mcp.path)
+        if out.startswith("error"):
+            return out
+        tools = [s["function"]["name"] for s in self.mcp.specs() if self.mcp.server_of(s["function"]["name"]) == server]
+        if not tools:
+            return out + ", but it did not start (wrong command, missing npx / uvx, or a missing env value)"
+        return out + f"; it started with these tools: {', '.join(tools)}"
 
     def _project(self) -> Path | None:
         return getattr(self._win._state_machine.registry.get_plugin("project"), "repo", None)

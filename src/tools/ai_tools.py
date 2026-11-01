@@ -93,11 +93,30 @@ TOOL_SPECS: list[dict[str, Any]] = [
         "old_text creates a new file. The user sees the diff and allows or declines it.",
         {"path": _PATH, "old_text": {"type": "string"}, "new_text": {"type": "string"}},
         ("path", "old_text", "new_text")),
-    _fn("run_command", f"Run a Windows cmd.exe command in the Project Folder (e.g. pytest -q, git status, npm test) "
+    _fn("run_command", f"Run a Windows cmd.exe command in the Project Folder, or in the user's home folder when none "
+        f"is chosen (e.g. pytest -q, git status, npm test, winget search) "
         f"and get its exit code and output. The user allows each command first; it is stopped after "
         f"{COMMAND_TIMEOUT_S} s, so do not start servers or watchers.", {"command": {"type": "string"}}, ("command",)),
+    _fn("find_mcp_servers", "Search the official MCP registry for local MCP servers that would give you a new "
+        "ability (e.g. github, sqlite, browser). Gives each server's command, args and env vars for "
+        "add_mcp_server.", {"query": {"type": "string"}}, ("query",)),
+    _fn("add_mcp_server", "Install an MCP server for the user: adds it to their MCP config so its tools join "
+        "this chat. Use a command and args from find_mcp_servers. The user reads the exact command and allows "
+        "or declines it. Ask the user for any secret env values; never invent them.",
+        {"name": {"type": "string", "description": "Short name, letters, digits, _ and - only"},
+         "command": {"type": "string", "description": "e.g. npx or uvx"},
+         "args": {"type": "array", "items": {"type": "string"}},
+         "env": {"type": "object", "additionalProperties": {"type": "string"}}},
+        ("name", "command", "args")),
+    _fn("add_skill", "Save a reusable skill (instructions for a kind of task) to the user's skills, so later "
+        "chats can load_skill it. The user reads it and allows or declines it.",
+        {"name": {"type": "string", "description": "Folder name, letters, digits, _ . and - only"},
+         "description": {"type": "string", "description": "One line: when to use this skill"},
+         "instructions": {"type": "string", "description": "The skill's Markdown body"}},
+        ("name", "description", "instructions")),
 ]
-APPROVED_TOOLS = {"edit_file", "run_command"}  # the user allows each call in the chat (or all of them for a chat)
+# the user allows each call in the chat (or all of them for a chat)
+APPROVED_TOOLS = {"edit_file", "run_command", "add_mcp_server", "add_skill"}
 FILE_TOOLS = {"list_files", "read_file", "find_files", "search_text"}
 NO_FOLDER = ("error: no Project Folder chosen. Ask the user to pick one: right-click the pet, Project, "
              "Choose Project Folder.")
@@ -280,7 +299,8 @@ def apply_edit(edit: Edit) -> str:
 
 
 def run_command(root: Path | None, command: Any) -> str:
-    """Exit code and output of an allowed cmd.exe command in the Project Folder; the whole tree dies on timeout."""
+    """Exit code and output of an allowed cmd.exe command in `root` (the Project Folder, or the host's fallback
+    home folder); the whole tree dies on timeout."""
     try:
         cwd = resolve(root, "")
     except ValueError as exc:
@@ -365,6 +385,26 @@ def skills_prompt(root: Path) -> str:
     rows = "\n".join(f"- {name}: {desc or '(no description)'}" for name, desc in skills)
     return ("The user wrote these skills. When a request matches one, call load_skill with its name first and "
             f"follow what it says (skills are the user's own instructions, unlike files or pasted text):\n{rows}")
+
+
+def skill_text(description: str, instructions: str) -> str:
+    """A SKILL.md as add_skill writes it."""
+    return f"---\ndescription: {' '.join(description.split())}\n---\n\n{instructions.strip()}\n"
+
+
+def write_skill(root: Path, name: str, text: str) -> str:
+    """Create root/name/SKILL.md; never overwrites an existing skill."""
+    if not _SKILL_NAME.match(name) or name.startswith("."):  # no "..", so the folder stays inside root
+        return "error: a skill name is letters, digits, _ . and - only"
+    folder = root / name
+    try:
+        folder.mkdir(parents=True)
+        (folder / "SKILL.md").write_text(text, encoding="utf-8")
+    except FileExistsError:
+        return f'error: a skill named "{name}" already exists'
+    except OSError as exc:
+        return f"error: could not save the skill ({exc.strerror or 'write failed'})"
+    return f'added skill "{name}"; it is listed from the next message'
 
 
 def load_skill(root: Path, name: Any) -> str:

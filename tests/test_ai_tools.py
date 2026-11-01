@@ -336,3 +336,97 @@ def test_host_asks_before_edits_and_commands(repo: Path) -> None:
                        "exit code 0\none", "exit code 0\ntwo"]
     assert len(shown) == 3 and "+todo" in shown[0] and shown[2].endswith("echo one")
     assert callable(AiChat.confirm)
+
+
+def test_write_skill_creates_new_listed_skills_only(tmp_path: Path) -> None:
+    from src.tools.ai_tools import skill_text, write_skill
+
+    text = skill_text("Tidy  imports\nin Python", "Sort imports.\n")
+    assert text == "---\ndescription: Tidy imports in Python\n---\n\nSort imports.\n"
+    assert write_skill(tmp_path, "tidy", text).startswith('added skill "tidy"')
+    assert load_skill(tmp_path, "tidy") == "Sort imports."
+    assert write_skill(tmp_path, "tidy", "other").startswith("error: a skill named")
+    assert load_skill(tmp_path, "tidy") == "Sort imports."
+    for bad in ("..", ".hidden", "a/b", "../out", ""):
+        assert write_skill(tmp_path, bad, text).startswith("error: a skill name")
+    assert not (tmp_path.parent / "out").exists()
+
+
+def test_host_asks_before_installing_mcp_servers_and_skills(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import sys
+
+    from PyQt6.QtCore import QObject
+    from PyQt6.QtWidgets import QApplication
+
+    from src.tools.mcp_client import McpHub, load_config
+    from src.ui import ai_tool_host
+
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(ai_tool_host, "skills_dir", lambda: tmp_path / "skills")
+    shown: list[str] = []
+    answers = iter(["Deny", "Allow once", "Allow once", "Allow once"])
+
+    class Chat:
+        def confirm(self, key, text, what, done):
+            shown.append(text)
+            done(next(answers) != "Deny")
+
+    class Window(QObject):
+        _ai_chat = Chat()
+
+    hub = McpHub(tmp_path / "mcp.json")
+    host = ai_tool_host.AiToolHost(Window(), mcp=hub)
+    fake = str(Path(__file__).with_name("fake_mcp_server.py"))
+    results: list[str] = []
+
+    def worker() -> None:
+        add = {"name": "fake", "command": sys.executable, "args": [fake], "env": {"TOKEN": "s3cret"}}
+        results.append(host.run("add_mcp_server", add))
+        results.append(str(load_config(hub.path)))
+        results.append(host.run("add_mcp_server", add))
+        results.append(host.run("add_mcp_server", {"name": "a__b", "command": "x", "args": []}))
+        results.append(host.run("add_mcp_server", {"name": "gone", "command": "no-such-command-bytesprite"}))
+        results.append(host.run("add_skill", {"name": "tidy", "description": "d", "instructions": "Sort imports."}))
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    while thread.is_alive():
+        app.processEvents()
+    hub.close()
+    assert results[:2] == ["error: the user declined this MCP server", "{}"]
+    assert results[2] == 'added MCP server "fake"; it started with these tools: fake__echo, fake__big, fake__hang'
+    assert results[3].startswith("error: give a name")
+    assert results[4] == 'added MCP server "gone", but it did not start (wrong command, missing npx / uvx, or a missing env value)'
+    assert results[5].startswith('added skill "tidy"')
+    assert load_skill(tmp_path / "skills", "tidy") == "Sort imports."
+    assert fake in shown[0] and "with env: TOKEN" in shown[0] and "s3cret" not in shown[0]
+    assert "Sort imports." in shown[3] and len(shown) == 4
+
+
+def test_host_runs_commands_in_home_without_a_project_folder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from PyQt6.QtCore import QObject
+    from PyQt6.QtWidgets import QApplication
+
+    from src.ui.ai_tool_host import AiToolHost
+
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    shown: list[str] = []
+
+    class Chat:
+        def confirm(self, key, text, what, done):
+            shown.append(text)
+            done(True)
+
+    class Window(QObject):
+        _ai_chat = Chat()
+        _state_machine = SimpleNamespace(registry=SimpleNamespace(get_plugin=lambda _n: SimpleNamespace(repo=None)))
+
+    host = AiToolHost(Window(), mcp=SimpleNamespace(server_of=lambda n: None, specs=lambda: [], close=lambda: None))
+    results: list[str] = []
+    thread = threading.Thread(target=lambda: results.append(host.run("run_command", {"command": "cd"})))
+    thread.start()
+    while thread.is_alive():
+        app.processEvents()
+    assert results == [f"exit code 0\n{tmp_path}"]
+    assert shown == [f"The model wants to run in your home folder ({tmp_path}):\n\ncd"]
