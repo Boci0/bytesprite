@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.tools import ai_assist
+from src.tools import ai_assist, ai_tools
 from src.tools.ai_assist import chat_messages
 from src.tools.ai_tools import (MAX_SKILL_CHARS, MAX_SKILL_DESC, MAX_SKILLS, TOOL_SPECS, list_skills, load_skill,
                                 parse_skill, run_file_tool, skills_dir, skills_prompt)
@@ -44,7 +44,7 @@ def test_file_tools_read_inside_the_folder_only(repo: Path) -> None:
 def test_read_file_pages_long_files(repo: Path) -> None:
     (repo / "big.txt").write_text("\n".join("x" * 100 for _ in range(500)), encoding="utf-8")
     first = run_file_tool(repo, "read_file", {"path": "big.txt"})
-    assert first.splitlines()[-1].startswith("... more from line ") and len(first) < 12500
+    assert first.splitlines()[-1].startswith("... more from line ") and len(first) < ai_tools.MAX_FILE_CHARS + 500
 
 
 class _Host:

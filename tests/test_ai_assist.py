@@ -310,7 +310,7 @@ def test_model_switcher_and_reasoning_toggle_work(monkeypatch: pytest.MonkeyPatc
         assert body["model"] == "deepseek-flash" and body["reasoning_effort"] == "high"
         row = chat._thread_layout.itemAt(chat._thread_layout.count() - 1).widget()
         toggle = row.findChildren(ai_chat._ClickLabel)[0]
-        reasoning = [w for w in row.findChildren(ai_chat.QLabel) if w.text() == "17*20=340, +51=391."][0]
+        reasoning = [w for w in row.findChildren(ai_chat.ChatText) if w.toPlainText() == "17*20=340, +51=391."][0]
         assert reasoning.isHidden() and toggle.text() == "Show reasoning (18 tokens)"
         toggle.clicked.emit()  # works while the card is hidden too (isVisible() would read False)
         assert not reasoning.isHidden() and toggle.text() == "Hide reasoning"
@@ -320,9 +320,8 @@ def test_model_switcher_and_reasoning_toggle_work(monkeypatch: pytest.MonkeyPatc
         chat.close()
 
 
-def test_chat_sends_only_on_enter_and_renders_plain_text(monkeypatch: pytest.MonkeyPatch, api: str) -> None:
-    from PyQt6.QtCore import Qt
-    from PyQt6.QtWidgets import QLabel
+def test_chat_sends_only_on_enter_and_renders_reply(monkeypatch: pytest.MonkeyPatch, api: str) -> None:
+    from src.ui.ai_chat import ChatText
 
     app, plugin, chat = _chat(monkeypatch, api)
     try:
@@ -332,8 +331,7 @@ def test_chat_sends_only_on_enter_and_renders_plain_text(monkeypatch: pytest.Mon
         _wait(app, lambda: chat._job is None and len(chat._history) == 2)
         assert _Api.seen[0]["body"]["messages"][-1]["content"] == "why does this fail"
         assert chat._history[-1]["content"] == "It is a stack trace." and plugin.asks == 1
-        labels = [lbl for lbl in chat.findChildren(QLabel) if lbl.text() == "It is a stack trace."]
-        assert labels and all(lbl.textFormat() == Qt.TextFormat.PlainText for lbl in labels)
+        assert [t for t in chat.findChildren(ChatText) if t.toPlainText() == "It is a stack trace."]
         _Api.mode = "401"
         chat.insert_text("again")
         chat.send()
@@ -589,7 +587,7 @@ def test_web_search_tool_loop_and_fallback(api: str, monkeypatch: pytest.MonkeyP
 
 
 def test_history_keeps_newest_tool_output_and_previews_older() -> None:
-    big = "x" * 9000
+    big = "x" * (ai_assist.RECENT_TOOL_CHARS + 1000)  # over the newest-answer budget too
     history = [{"role": "user", "content": "list it"},
                {"role": "assistant", "content": "old answer", "tools": [("read_file(a.txt)", big)]},
                {"role": "user", "content": "search"},
@@ -599,7 +597,7 @@ def test_history_keeps_newest_tool_output_and_previews_older() -> None:
     old, new = msgs[2]["content"], msgs[4]["content"]
     assert old.startswith(ai_assist.TOOLS_MARK) and old.endswith("]\nold answer")
     assert f"- read_file(a.txt): {'x' * ai_assist.OLD_TOOL_CHARS} [cut]]\nold answer" in old
-    assert f"- web_search(q): {'x' * 4000} [cut]\n- list_files(): a.txt]\nnew answer" in new
+    assert f"- web_search(q): {'x' * (ai_assist.RECENT_TOOL_CHARS // 2)} [cut]\n- list_files(): a.txt]\nnew answer" in new
     # an earlier file read keeps fetch_page on links already in the chat; a web-only answer does not
     assert ai_assist.read_local_data(msgs[2]) and ai_assist.read_local_data(msgs[4])
     assert not ai_assist.read_local_data({"role": "assistant", "content": ai_assist.tools_block([("web_search(q)", "r")], 9)})
@@ -627,7 +625,7 @@ def test_deepseek_search_used_first_when_its_key_saved(monkeypatch: pytest.Monke
     monkeypatch.setattr(ai_assist, "_request", lambda *a: seen.append(a) or {"results": [
         {"title": "Py 3.14", "url": "https://python.org", "summary": "Released", "snippet": "short"}, "junk"]})
     assert ai_assist.web_search("py 3.14") == "Py 3.14\nhttps://python.org\nReleased"
-    assert seen[0][1:4] == ("ds-key", "/tools/search", {"query": "py 3.14", "count": 5})
+    assert seen[0][1:4] == ("ds-key", "/tools/search", {"query": "py 3.14", "count": ai_assist.MAX_SEARCH_RESULTS})
 
 
 def test_brave_search_used_when_key_saved(api: str, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -654,7 +652,7 @@ def test_brave_search_used_when_key_saved(api: str, monkeypatch: pytest.MonkeyPa
         assert ai_assist.web_search("py 3.14") == "Py 3.14\nhttps://python.org\nReleased & out"
     finally:
         server.shutdown()
-    assert Brave.seen == [("/search?count=5&q=py+3.14", "brave-key-123")]
+    assert Brave.seen == [(f"/search?count={ai_assist.MAX_SEARCH_RESULTS}&q=py+3.14", "brave-key-123")]
 
 
 def test_chat_answers_after_a_web_search_and_setup_saves_the_search_key(
@@ -791,5 +789,95 @@ def test_chat_confirm_offers_once_or_for_this_chat(monkeypatch: pytest.MonkeyPat
         assert got == [True, True, True, False, False]
         chat.new_chat()
         assert not chat._allowed
+    finally:
+        chat.close()
+
+
+def test_chat_text_formats_safely_and_never_widens_the_thread() -> None:
+    from PyQt6.QtCore import QUrl
+    from PyQt6.QtWidgets import QApplication
+
+    from src.ui.ai_chat import ChatText
+
+    _app = QApplication.instance() or QApplication([])
+    reply = ChatText("## Head\n\n- **bold** item\n\n<b>raw</b> ![x](file:///C:/secret.png)", markdown=True)
+    doc = reply.document()
+    assert "Head" in doc.toPlainText() and "bold item" in doc.toPlainText()
+    assert "<b>raw</b>" in doc.toPlainText()  # raw HTML stays text, never markup
+    assert reply.loadResource(2, QUrl("file:///C:/secret.png")) is None  # images and files are never loaded
+    command = ChatText("Ran: " + "a" * 400)  # one unbreakable token
+    assert command.minimumSizeHint().width() == 0  # cannot force the thread wider than the card
+    assert command.heightForWidth(300) > command.heightForWidth(3000)  # it wraps instead
+    plain = ChatText("*not* markdown `x`")
+    assert plain.toPlainText() == "*not* markdown `x`"  # commands and approvals stay exact
+
+    # A code block's non-breakable lines widened the document and Qt scrolled every line's left edge out of view
+    code = ChatText("Poem:\n\n```\n" + "long code line " * 20 + "\n```\n\nend", markdown=True)
+    code.resize(300, 100)
+    _app.processEvents()
+    assert code.document().idealWidth() <= 300 and code.horizontalScrollBar().value() == 0
+    short = code.height()
+    code.set_text("Allowed: commands for this chat.\n\n" * 6)  # new text must not keep the old, shorter height
+    assert code.height() == code.heightForWidth(300) and code.height() != short
+
+
+def test_chat_scrolls_to_new_reply_top_until_user_scrolls(monkeypatch: pytest.MonkeyPatch, api: str) -> None:
+    app, _plugin, chat = _chat(monkeypatch, api)
+    try:
+        chat.show()
+        for _ in range(4):
+            chat._add_bubble("user", "question " * 30)
+        row, _text = chat._add_row("assistant", "answer line\n\n" * 40, markdown=True)
+        chat._scroll_target = row
+        for _ in range(30):
+            app.processEvents()
+        bar = chat._scroll.verticalScrollBar()
+        assert 0 < bar.value() < bar.maximum() and abs(bar.value() - (row.y() - 4)) <= 2  # reply's first line on top
+        bar.triggerAction(bar.SliderAction.SliderToMinimum)  # the user scrolls away: stop following
+        chat._apply_scroll()  # a later relayout must not drag the view back
+        assert not chat._follow and bar.value() == bar.minimum()
+    finally:
+        chat.close()
+
+
+def test_compact_history_summarizes_old_turns_and_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    turns = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"turn {i}"} for i in range(12)]
+    assert ai_assist.compact_split(turns) == 6 and ai_assist.compact_split(turns[:6]) == 0
+    sent: list[list[dict]] = []
+
+    def fake_ask(_url, _key, _model, messages, **_kw):
+        sent.append(messages)
+        return ai_assist.AiReply(text="user wants a poem; path C:/x")
+
+    monkeypatch.setattr(ai_assist, "ask", fake_ask)
+    out, n, summary = ai_assist.compact_history("u", "k", "m", turns)
+    assert n == 6 and summary == "user wants a poem; path C:/x"
+    assert out[0]["content"].startswith(ai_assist.COMPACT_MARK) and out[2:] == turns[6:]  # newest turns verbatim
+    assert sent[0][-1]["content"] == ai_assist.COMPACT_PROMPT and "turn 6" not in str(sent[0])
+
+    def broken(*_a, **_kw):
+        raise ValueError("network")
+
+    monkeypatch.setattr(ai_assist, "ask", broken)
+    assert ai_assist.compact_history("u", "k", "m", turns) == (turns, 0, "")  # a failed summary loses nothing
+
+
+def test_chat_auto_compacts_long_history(monkeypatch: pytest.MonkeyPatch, api: str) -> None:
+    from src.ui import ai_chat
+    from src.ui.ai_chat import ChatText
+
+    monkeypatch.setattr(ai_chat, "COMPACT_AT", 100)
+    app, _plugin, chat = _chat(monkeypatch, api)
+    try:
+        chat._history = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"old {i} " * 10}
+                         for i in range(10)]
+        chat.insert_text("next question")
+        chat.send()
+        _wait(app, lambda: chat._job is None and chat._history[-1]["role"] == "assistant")
+        assert len(_Api.seen) == 2  # one summary request, then the real one
+        assert chat._history[0]["content"].startswith(ai_assist.COMPACT_MARK)
+        # 11 turns: the split backs up from 5 to the user turn at 4, so 4 are summarized and 7 kept word for word
+        assert chat._history[-2]["content"] == "next question" and len(chat._history) == 2 + 7 + 1
+        assert [t for t in chat.findChildren(ChatText) if t.toPlainText().startswith("Compacted 4 earlier")]
     finally:
         chat.close()

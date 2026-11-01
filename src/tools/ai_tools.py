@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-MAX_FILE_CHARS = 12000  # one read_file call; the model pages on with start_line
+MAX_FILE_CHARS = 30000  # one read_file call; the model pages on with start_line
 MAX_FILE_BYTES = 2 * 1024 * 1024
 MAX_LISTED = 200
 MAX_FOUND = 100
@@ -37,7 +37,7 @@ MAX_SCANNED = 20000  # entries one find or search walks before giving up
 MAX_DIFF_CHARS = 4000  # diff shown in the chat for the user to approve
 MAX_NOTE_CHARS = 300  # one memory note
 COMMAND_TIMEOUT_S = 120
-MAX_COMMAND_CHARS = 12000  # command output returned to the model (head and tail kept)
+MAX_COMMAND_CHARS = 30000  # command output returned to the model (head and tail kept)
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".mypy_cache", ".pytest_cache", "dist", "build"}
 _SECRET = re.compile(r"^\.env|\.(pem|key|pfx|p12|kdbx|ppk)$|^id_(rsa|dsa|ecdsa|ed25519)|credential|secret",
                      re.I)
@@ -348,7 +348,7 @@ def run_command(root: Path | None, command: Any) -> str:
 # Only names and descriptions go in the system prompt; load_skill returns a body on demand.
 MAX_SKILLS = 30
 MAX_SKILL_DESC = 200
-MAX_SKILL_CHARS = 12000
+MAX_SKILL_CHARS = 24000
 _SKILL_NAME = re.compile(r"^[\w.-]{1,64}$")
 
 
@@ -448,7 +448,7 @@ def plan_skill_update(root: Path, name: Any, description: Any, instructions: Any
     return path, text, diff
 
 
-MAX_MEMORY_CHARS = 4000  # all notes together; they ride along in every chat's system prompt
+MAX_MEMORY_CHARS = 8000  # all notes together; they ride along in every chat's system prompt
 MEMORY_HEADER = "# ByteSprite memory\n\nOne note per line starting with \"- \". The AI chat reads these in every chat.\n\n"
 
 

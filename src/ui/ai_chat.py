@@ -2,7 +2,8 @@
 
 One window for everything: chatting, attachments (chips in the bar: images are sent as images plus their offline
 Windows OCR text, text files by content) and the Setup page behind the gear. Nothing is sent until the
-user presses Enter or the send button. Replies are plain text, never rendered or acted on.
+user presses Enter or the send button. Replies render as Markdown with raw HTML off, no images loaded and only
+http(s) links opened on click; commands, approvals and errors stay exact plain text. Nothing in a reply is acted on.
 """
 
 from __future__ import annotations
@@ -12,14 +13,17 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from PyQt6.QtCore import QBuffer, QByteArray, QIODevice, QMimeData, QPoint, QPointF, QRect, QRectF, Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtCore import (QBuffer, QByteArray, QIODevice, QMimeData, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer,
+                          QUrl, pyqtSignal)
 from PyQt6.QtGui import (QColor, QDesktopServices, QDragEnterEvent, QDropEvent, QGuiApplication, QImage,
-                         QKeyEvent, QPainter, QPainterPath, QPen, QPixmap)
+                         QKeyEvent, QPainter, QPainterPath, QPalette, QPen, QPixmap, QTextBlockFormat, QTextCharFormat,
+                         QTextCursor, QTextDocument, QTextFormat, QTextOption)
 from PyQt6.QtWidgets import (QAbstractButton, QComboBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
-                             QLabel, QLineEdit, QMenu, QPlainTextEdit, QPushButton, QScrollArea, QStackedWidget,
-                             QVBoxLayout, QWidget)
+                             QLabel, QLineEdit, QMenu, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy,
+                             QStackedWidget, QTextBrowser, QVBoxLayout, QWidget)
 
-from src.tools.ai_assist import (BRAVE_KEY_PAGE, BRAVE_URL, KEY_PAGES, MAX_INPUT_CHARS, PRESETS,
+from src.tools.ai_assist import (BRAVE_KEY_PAGE, BRAVE_URL, COMPACT_AT, KEY_PAGES, MAX_INPUT_CHARS, PRESETS,
+                                 compact_history, history_chars, summary_turns,
                                  THINKING_LEVELS, AiAssistPlugin, AiJob, AiReply, ModelInfo, ToolHost, ask, chat_messages, delete_key, list_models, load_key, save_key, valid_key,
                                  valid_model, validate_base_url)
 from src.ui.context_menu import style_menu
@@ -27,6 +31,8 @@ from src.ui.quick_tools import OcrJob
 from src.ui.sfx import play_cue
 from src.ui.theme import (ACCENT_HEX, DANGER_HEX, FONT_FAMILY, GLASS_RAISED_RGBA, GLASS_RGBA, HAIRLINE_RGBA, HOVER_RGBA,
                           OUTLINE_RGBA, TEXT_DIM_HEX, TEXT_HEX, paint_pixel_panel, qcolor, rgba_css, ui_font)
+
+BUBBLE_RGBA: tuple[int, int, int, int] = (56, 59, 68, 255)  # your messages: a step lighter than the card
 
 MAX_FILE_BYTES = 512 * 1024
 MAX_ATTACHMENTS = 4
@@ -324,6 +330,132 @@ class _Draft(QPlainTextEdit):
                                         else Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
 
+_THINK_GLYPHS = "·✢✳✶✻✽✻✶✳✢"  # a twinkle, like Claude Code's spinner
+
+
+class ChatText(QTextBrowser):
+    """Read-only chat text sized to its content. Wraps long tokens anywhere, so a command or URL never widens the
+    thread past the card (a QLabel only breaks at spaces). Markdown is for model replies only."""
+
+    _MD = QTextDocument.MarkdownFeature(QTextDocument.MarkdownFeature.MarkdownDialectGitHub.value
+                                        | QTextDocument.MarkdownFeature.MarkdownNoHTML.value)
+
+    def __init__(self, text: str = "", *, markdown: bool = False, color: str = TEXT_HEX, pt: float = 10.0) -> None:
+        super().__init__()
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        self.setOpenLinks(False)  # anchorClicked opens http(s) only; file: or app links in a reply are ignored
+        self.anchorClicked.connect(lambda url: QDesktopServices.openUrl(url) if url.scheme() in ("http", "https") else None)
+        self.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse
+                                     | Qt.TextInteractionFlag.LinksAccessibleByMouse)
+        self.setFont(ui_font(pt))
+        self.setStyleSheet(f"QTextBrowser {{ background: transparent; color: {color}; }}")
+        palette = self.palette()
+        palette.setColor(QPalette.ColorRole.Link, QColor(ACCENT_HEX))
+        self.setPalette(palette)
+        self.document().setDocumentMargin(2)
+        self.document().setIndentWidth(16)  # Qt's 40px list indent ate a ninth of the card
+        policy = QSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        policy.setHeightForWidth(True)
+        self.setSizePolicy(policy)
+        self.set_text(text, markdown=markdown)
+
+    def set_text(self, text: str, *, markdown: bool = False) -> None:
+        if markdown:
+            self.document().setMarkdown(text, self._MD)
+        else:
+            self.setPlainText(text)
+        # Airier lines and paragraph gaps; headings a step above body (Qt's are poster-sized); pet-palette links and code
+        spans: list[tuple[int, int, QTextCharFormat]] = []
+        block = self.document().begin()
+        while block.isValid():
+            cursor = QTextCursor(block)
+            fmt = block.blockFormat()
+            fmt.setLineHeight(125, QTextBlockFormat.LineHeightTypes.ProportionalHeight.value)
+            fmt.setNonBreakableLines(False)  # code blocks wrap too: a wider document scrolled every line sideways
+            # Qt tags code block lines on the block, not the characters
+            code_block = markdown and any(fmt.hasProperty(prop) for prop in (
+                QTextFormat.Property.BlockCodeFence, QTextFormat.Property.BlockCodeLanguage))
+            if markdown:
+                fmt.setBottomMargin(0 if code_block else 6)
+            if code_block:  # one full-width panel, not a highlight per run
+                fmt.setBackground(qcolor(GLASS_RAISED_RGBA))
+            cursor.setBlockFormat(fmt)
+            it = block.begin()
+            while not it.atEnd():
+                frag = it.fragment()
+                char, style = frag.charFormat(), QTextCharFormat()
+                if fmt.headingLevel():
+                    style.setProperty(QTextCharFormat.Property.FontSizeAdjustment, 0)
+                    style.setFontPointSize(self.font().pointSizeF() + (2 if fmt.headingLevel() == 1 else 1))
+                    style.setFontWeight(700)
+                if char.isAnchor():
+                    style.setForeground(QColor(ACCENT_HEX))
+                if code_block or char.fontFixedPitch():
+                    style.setFontFamilies(["Cascadia Mono", "Consolas"])
+                    style.setFontPointSize(self.font().pointSizeF() - 1)
+                    style.setBackground(qcolor(GLASS_RAISED_RGBA))
+                if style.properties():
+                    spans.append((frag.position(), frag.position() + frag.length(), style))
+                it += 1
+            block = block.next()
+        cursor = QTextCursor(self.document())
+        for start, end, style in spans:  # applied after the walk: merging mid-walk splits the fragments being read
+            cursor.setPosition(start)
+            cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+            cursor.mergeCharFormat(style)
+        self.moveCursor(QTextCursor.MoveOperation.Start)
+        self.horizontalScrollBar().setValue(0)
+        if self.width() > 1:  # new text keeps no stale height (an approval's Allowed line was cut off)
+            self.setFixedHeight(self.heightForWidth(self.width()))
+        self.updateGeometry()
+
+    def loadResource(self, _type: int, _name: QUrl) -> object:  # type: ignore[override]
+        return None  # never load images or files a reply points at
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        doc = self.document().clone()
+        doc.setTextWidth(max(1, width))
+        return int(doc.size().height()) + 2
+
+    def sizeHint(self) -> QSize:
+        return QSize(200, self.heightForWidth(self.width() if self.width() > 1 else 340))
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(0, 0)
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self.setFixedHeight(self.heightForWidth(self.width()))
+        self.horizontalScrollBar().setValue(0)
+
+    def wheelEvent(self, event) -> None:  # type: ignore[override]
+        event.ignore()  # let the thread scroll; this view never scrolls itself
+
+
+class _Bubble(QFrame):
+    """Your message in a soft rounded bubble, as in Claude Code; the text inside stays a plain ChatText."""
+
+    def __init__(self, text: ChatText) -> None:
+        super().__init__()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 6, 10, 6)
+        layout.addWidget(text)
+
+    def paintEvent(self, _event) -> None:  # type: ignore[override]
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(qcolor(BUBBLE_RGBA))
+        painter.drawRoundedRect(QRectF(self.rect()), 12, 12)
+        painter.end()
+
+
 class _ClickLabel(QLabel):
     clicked = pyqtSignal()
 
@@ -369,10 +501,10 @@ class AiChat(QWidget):
         self._above: bool | None = None  # which side of the sprite the card sits on, until the next open_near
         self._dots = 0
         self._dots_timer = QTimer(self)
-        self._dots_timer.setInterval(350)
+        self._dots_timer.setInterval(120)
         self._dots_timer.timeout.connect(self._tick_dots)
         self._thinking_row: QWidget | None = None
-        self._thinking_label: QLabel | None = None
+        self._thinking_label: ChatText | None = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -419,13 +551,17 @@ class AiChat(QWidget):
         self._stack = QStackedWidget()
         self._thread = QWidget()
         self._thread_layout = QVBoxLayout(self._thread)
-        self._thread_layout.setContentsMargins(6, 2, 6, 2)
-        self._thread_layout.setSpacing(8)
+        self._thread_layout.setContentsMargins(8, 4, 8, 4)
+        self._thread_layout.setSpacing(14)
         self._scroll = QScrollArea()
         self._scroll.setWidget(self._thread)
         self._scroll.setWidgetResizable(True)
         self._scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._follow, self._scroll_target = True, None  # _apply_scroll state: newest reply row, or None for bottom
+        bar = self._scroll.verticalScrollBar()
+        bar.rangeChanged.connect(self._apply_scroll)
+        bar.actionTriggered.connect(lambda _a: setattr(self, "_follow", False))  # wheel, drag or click by the user
         self._scroll.setStyleSheet(
             "QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; }"
             " QScrollBar:vertical { background: transparent; width: 6px; margin: 0; }"
@@ -780,11 +916,11 @@ class AiChat(QWidget):
         self._history.append({"role": "user", "content": content, "images": [a.image_url for a in usable if a.image_url]})
         self._add_bubble("user", text, attachments=usable)
         self._clear_attachments()
-        self._thinking_row, self._thinking_label = self._add_row("assistant", "")
+        self._thinking_row, self._thinking_label = self._add_row("thinking", f"{_THINK_GLYPHS[0]}  Thinking")
         self._dots_timer.start()
         self._tick_dots()
         play_cue("send")
-        self._start_job(chat_messages(self._history))
+        self._start_job(history=list(self._history))
 
     def _send_or_stop(self) -> None:
         if self._job is not None and not self._testing:
@@ -803,14 +939,26 @@ class AiChat(QWidget):
         job.finished.connect(job.deleteLater)  # its thread still emits: deleting it now races that emit
         self._on_done(None, "stopped")
 
-    def _start_job(self, messages: list[dict]) -> None:
+    def _start_job(self, messages: list[dict] | None = None, history: list[dict] | None = None) -> None:
+        """Ask with fixed `messages`, or with a chat `history`, summarizing its older turns first once it passes
+        COMPACT_AT (auto-compact; `_on_done` swaps the summary into the chat's own history)."""
         p = self._plugin
         url, key, model, thinking = p.base_url, load_key(p.base_url), p.model, p.thinking
         self._asked = (model, thinking)
         job = self._job = AiJob(self)
         job.finished.connect(self._on_done)
         host = None if self._testing else self._tool_host
-        job.start(lambda: ask(url, key, model, messages, thinking=thinking, host=host))
+
+        def run() -> AiReply:
+            if history is None:
+                return ask(url, key, model, messages or [], thinking=thinking, host=host)
+            sent, n, summary = (compact_history(url, key, model, history) if history_chars(history) > COMPACT_AT
+                                else (history, 0, ""))
+            reply = ask(url, key, model, chat_messages(sent), thinking=thinking, host=host)
+            reply.compacted, reply.summary = n, summary
+            return reply
+
+        job.start(run)
         self._set_busy(True)
 
     def _on_done(self, reply: AiReply | None, error: str) -> None:
@@ -846,10 +994,15 @@ class AiChat(QWidget):
             if failed and not self._draft.toPlainText():
                 self._draft.setPlainText(failed["content"])  # nothing lost: edit and press Enter again
             return
+        if reply.compacted:
+            self._history[:reply.compacted] = summary_turns(reply.summary)
+            self._add_row("note", f"Compacted {reply.compacted} earlier messages into a summary to keep the chat "
+                                  "within its context budget.")
         self._history.append({"role": "assistant", "content": reply.text, "tools": reply.tools})
         self._plugin.record(reply.total_tokens)
-        row, _label = self._add_row("assistant", reply.text)
+        row, _label = self._add_row("assistant", reply.text, markdown=True)
         self._add_details(row, reply)
+        self._scroll_target = row
         play_cue("reply")
         self._refresh_title()
         self._try_auto_send()
@@ -879,12 +1032,9 @@ class AiChat(QWidget):
         toggle.setFont(ui_font(7.5))
         toggle.setStyleSheet(f"color: {TEXT_HEX}; padding: 0 2px; text-decoration: underline;")
         toggle.setCursor(Qt.CursorShape.PointingHandCursor)
-        body = QLabel(reply.reasoning)
-        body.setTextFormat(Qt.TextFormat.PlainText)
-        body.setWordWrap(True)
-        body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        body.setFont(ui_font(8))
-        body.setStyleSheet(f"color: {TEXT_DIM_HEX}; padding: 4px 6px; border-left: 2px solid {rgba_css(OUTLINE_RGBA)};")
+        body = ChatText(reply.reasoning, color=TEXT_DIM_HEX, pt=8.5)
+        body.setStyleSheet(f"QTextBrowser {{ color: {TEXT_DIM_HEX}; background: transparent; padding: 2px 6px;"
+                           f" border: none; border-left: 2px solid {rgba_css(OUTLINE_RGBA)}; }}")
         body.hide()
         shown_text, hidden_text = "Hide reasoning", toggle.text()
 
@@ -999,11 +1149,12 @@ class AiChat(QWidget):
             self._draft.setFocus()
 
     def _tick_dots(self) -> None:
-        self._dots = self._dots % 3 + 1
+        self._dots = (self._dots + 1) % len(_THINK_GLYPHS)
         if self._thinking_label is not None:
-            self._thinking_label.setText("." * self._dots)
+            self._thinking_label.set_text(f"{_THINK_GLYPHS[self._dots]}  Thinking")
 
-    def _add_row(self, role: str, text: str, attachments: list[Attachment] | None = None) -> tuple[QWidget, QLabel]:
+    def _add_row(self, role: str, text: str, attachments: list[Attachment] | None = None,
+                 markdown: bool = False) -> tuple[QWidget, ChatText]:
         row = QWidget()
         layout = QVBoxLayout(row)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -1016,33 +1167,36 @@ class AiChat(QWidget):
             for item in attachments:
                 chips.addWidget(Chip(item))
             layout.addLayout(chips)
-        label = QLabel(text)
-        label.setTextFormat(Qt.TextFormat.PlainText)
-        label.setWordWrap(True)
-        label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        label.setFont(ui_font(8.5 if role == "error" else 9.5))
+        label = ChatText(text, markdown=markdown, pt=9 if role in ("error", "note") else 10,
+                         color={"error": DANGER_HEX, "thinking": ACCENT_HEX, "note": TEXT_DIM_HEX}.get(role, TEXT_HEX))
         if role == "user":
-            label.setStyleSheet(f"color: {TEXT_HEX}; background: {rgba_css(HOVER_RGBA)};"
-                                f" border: 1px solid {rgba_css(OUTLINE_RGBA)}; border-radius: 0; padding: 6px 10px;")
-            # Wrapped labels under an alignment get a guessed width; pin it so the bubble hugs its text
+            bubble = _Bubble(label)
+            # Bubbles hug their text: pin the width so the right alignment has something to align
             longest = max((label.fontMetrics().horizontalAdvance(line) for line in text.splitlines()), default=0)
-            label.setFixedWidth(min(int(self.WIDTH * 0.72), longest + 26))
-            label.setVisible(bool(text))
-            layout.addWidget(label, 0, align)
+            bubble.setFixedWidth(min(int(self.WIDTH * 0.78), longest + 30))
+            bubble.setVisible(bool(text))
+            layout.addWidget(bubble, 0, align)
         else:
-            label.setStyleSheet(f"color: {DANGER_HEX if role == 'error' else TEXT_HEX}; padding: 2px 2px;")
             layout.addWidget(label)
         self._thread_layout.addWidget(row)
         self._stack.setCurrentIndex(0)
         self._panel.show()
+        self._follow, self._scroll_target = True, None
         self._relayout()
         QTimer.singleShot(0, self._relayout_and_scroll)  # wrapped heights settle after the first layout pass
         return row, label
 
     def _relayout_and_scroll(self) -> None:
         self._relayout()
+        self._apply_scroll()
+
+    def _apply_scroll(self, *_range: int) -> None:
+        """Keep the newest content in view as heights settle: a reply's top, else the bottom. Stops once you scroll."""
+        if not self._follow:
+            return
         bar = self._scroll.verticalScrollBar()
-        bar.setValue(bar.maximum())
+        target = self._scroll_target
+        bar.setValue(min(bar.maximum(), max(0, target.y() - 4)) if target is not None else bar.maximum())
 
     def _add_bubble(self, role: str, text: str, attachments: list[Attachment] | None = None) -> QLabel:
         return self._add_row(role, text, attachments)[1]
@@ -1073,7 +1227,7 @@ class AiChat(QWidget):
             self._pending = None
             if choice == "chat":
                 self._allowed.add(key)
-            label.setText(f"{text}\n\n{'Denied' if choice is None else 'Allowed'}: {what}"
+            label.set_text(f"{text}\n\n{'Denied' if choice is None else 'Allowed'}: {what}"
                           + (" for this chat." if choice == "chat" else "."))
             for btn in btns:
                 btn.hide()
@@ -1122,7 +1276,7 @@ class AiChat(QWidget):
         if self._job is not None:
             state, color = "Thinking", ACCENT_HEX
         elif self._ready():
-            state, color = "Ready", ACCENT_HEX
+            state, color = "Ready", TEXT_DIM_HEX
         else:
             state, color = "Setup needed", DANGER_HEX
         self._name.setText(

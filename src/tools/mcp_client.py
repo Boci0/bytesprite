@@ -35,7 +35,7 @@ SEP = "__"  # model-facing names are server__tool
 PROTOCOL_VERSION = "2025-06-18"
 START_TIMEOUT_S = 60.0  # a first npx / uvx start downloads the package
 CALL_TIMEOUT_S = 60.0
-MAX_RESULT_CHARS = 12000
+MAX_RESULT_CHARS = 30000
 MAX_TOOLS_PER_SERVER = 64
 _NAME = re.compile(r"[^A-Za-z0-9_-]")
 

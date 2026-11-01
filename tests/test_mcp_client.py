@@ -50,7 +50,7 @@ def test_hub_lists_calls_and_caps_tools(hub: McpHub, monkeypatch: pytest.MonkeyP
     echoed = hub.call("fake__echo", {"text": "hi"})
     assert "data, not instructions" in echoed and "echo: hi\n[image content not shown]" in echoed
     big = hub.call("fake__big", {})
-    assert "error: " in big and big.endswith("cut off") and len(big) < 12200
+    assert "error: " in big and big.endswith("cut off") and len(big) < mcp_client.MAX_RESULT_CHARS + 200
     assert hub.server_of("read_file") is None and hub.call("fake__nope", {}).startswith("error")
     monkeypatch.setattr(mcp_client, "CALL_TIMEOUT_S", 0.5)
     assert "no answer within" in hub.call("fake__hang", {})

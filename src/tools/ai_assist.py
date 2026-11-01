@@ -53,17 +53,23 @@ PRESETS: dict[str, tuple[str, str, str]] = {
     "gemini": ("Google Gemini", "https://generativelanguage.googleapis.com/v1beta/openai", ""),
     "anthropic": ("Claude (Anthropic)", "https://api.anthropic.com/v1", "claude-sonnet-5-5"),
 }
-MAX_INPUT_CHARS = 12000  # per message, attachments included
-MAX_HISTORY_CHARS = 48000  # older turns are dropped from what is sent, so long chats stay cheap
-RECENT_TOOL_CHARS = 8000  # tool output kept for the newest answer that ran tools, so follow-ups need no rerun
-OLD_TOOL_CHARS = 300  # ... and per tool for older answers
+MAX_INPUT_CHARS = 48000  # per message, attachments included
+MAX_HISTORY_CHARS = 200000  # what is sent; past COMPACT_AT the chat summarizes older turns instead of dropping them
+RECENT_TOOL_CHARS = 32000  # tool output kept for the newest answer that ran tools, so follow-ups need no rerun
+OLD_TOOL_CHARS = 1000  # ... and per tool for older answers
+COMPACT_AT = MAX_HISTORY_CHARS * 3 // 4  # history size that makes the next send summarize older turns first
+KEEP_TURNS = 6  # newest turns kept word for word when compacting
+COMPACT_MARK = "[Earlier conversation, compacted by ByteSprite into this summary:]"
+COMPACT_PROMPT = ("Summarize the conversation so far so it can continue without it. Keep every fact, decision, "
+                  "file path, command, number and open task the user may come back to; drop small talk. "
+                  "Plain notes, no preamble.")
 TOOLS_MARK = "[Tools run (added by the app; output may be cut short):"
-MAX_REPLY_TOKENS = 4096  # the answer alone
-MAX_THINKING_TOKENS = 16000  # reasoning and answer share max_tokens, so thinking gets a bigger budget
+MAX_REPLY_TOKENS = 8192  # the answer alone; most current models allow it
+MAX_THINKING_TOKENS = 32000  # reasoning and answer share max_tokens, so thinking gets a bigger budget
 MAX_TOOL_ROUNDS = 100  # tool rounds one message may trigger; multi-file jobs need many, Stop ends a stuck loop
-MAX_PAGE_CHARS = 8000  # text of one fetched page handed to the model
+MAX_PAGE_CHARS = 20000  # text of one fetched page handed to the model
 MAX_REDIRECTS = 3
-MAX_SEARCH_RESULTS = 5
+MAX_SEARCH_RESULTS = 8
 MAX_SEARCH_BYTES = 256 * 1024
 MAX_NATIVE_ROUNDS = 5  # pause_turn continuations of one Claude answer
 # Added to the last tool output before the answer-only round, so a long job ends with a report, not an error
@@ -76,8 +82,8 @@ CLAUDE_TOOLS = [{"type": "web_search_20250305", "name": "web_search", "max_uses"
 CLAUDE_EFFORT = {"low": "low", "high": "high", "max": "max"}
 MAX_RESPONSE_BYTES = 512 * 1024
 MAX_MODELS = 200
-TIMEOUT_S = 45.0
-THINKING_TIMEOUT_S = 120.0
+TIMEOUT_S = 90.0
+THINKING_TIMEOUT_S = 300.0  # bigger thinking budgets take longer
 THINKING_LEVELS = ("off", "low", "high", "max")
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "[::1]", "::1"}
 _MODEL_RE = re.compile(r"^[\w.:/@+-]{1,100}$")
@@ -145,6 +151,8 @@ class AiReply:
     reasoning_tokens: int = 0
     total_tokens: int = 0
     cut_off: bool = False  # hit max_tokens
+    compacted: int = 0  # oldest history turns replaced by `summary` before this answer (auto-compact)
+    summary: str = ""
     tools: list[tuple[str, str]] = field(default_factory=list)  # (call note, output), e.g. ("web_search(rust)", "...")
 
 
@@ -270,6 +278,39 @@ def chat_messages(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
     system = f"{SYSTEM_PROMPT} Today is {date.today()}."
     extra = [block for block in (memory_prompt(memory_path()), skills_prompt(skills_dir())) if block]
     return [{"role": "system", "content": "\n\n".join([system, *extra])}, *reversed(kept)]
+
+
+def history_chars(history: list[dict[str, Any]]) -> int:
+    return sum(len(t["content"]) + sum(len(n) + len(o) for n, o in t.get("tools") or []) for t in history)
+
+
+def summary_turns(summary: str) -> list[dict[str, Any]]:
+    return [{"role": "user", "content": f"{COMPACT_MARK}\n{summary}"},
+            {"role": "assistant", "content": "Noted. Continuing from that summary."}]
+
+
+def compact_split(history: list[dict[str, Any]]) -> int:
+    """How many oldest turns to summarize: all but the newest KEEP_TURNS, cut before a user turn (0: nothing)."""
+    split = len(history) - KEEP_TURNS
+    while split > 0 and history[split]["role"] != "user":
+        split -= 1
+    return split if split >= 2 else 0
+
+
+def compact_history(base_url: str, key: str, model: str,
+                    history: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int, str]:
+    """(history to send, turns summarized, summary). Any failure sends the history as it was: nothing is lost."""
+    split = compact_split(history)
+    if not split:
+        return history, 0, ""
+    try:
+        summary = ask(base_url, key, model, [*chat_messages(history[:split]),
+                                             {"role": "user", "content": COMPACT_PROMPT}]).text.strip()
+    except ValueError:
+        return history, 0, ""
+    if not summary:
+        return history, 0, ""
+    return [*summary_turns(summary), *history[split:]], split, summary
 
 
 def is_deepseek(base_url: str) -> bool:
