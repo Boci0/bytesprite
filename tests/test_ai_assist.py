@@ -764,3 +764,32 @@ def test_saved_files_get_a_row_and_programs_are_not_opened(monkeypatch: pytest.M
     layout = chat._thread_layout
     rows = [[w.text() for w in layout.itemAt(i).widget().findChildren(_ClickLabel)] for i in range(layout.count())]
     assert rows == [["Open", "Show in folder"], ["Show in folder"]]
+
+
+def test_chat_confirm_offers_once_or_for_this_chat(monkeypatch: pytest.MonkeyPatch, api: str) -> None:
+    from PyQt6.QtWidgets import QPushButton
+
+    app, _plugin, chat = _chat(monkeypatch, api)
+    got: list[bool] = []
+
+    def click(title: str) -> None:
+        btn = [b for b in chat.findChildren(QPushButton) if b.text() == title and not b.isHidden()][-1]
+        btn.click()
+        app.processEvents()
+
+    try:
+        chat.confirm("run_command", "run: pytest", "commands", got.append)
+        click("Allow once")
+        chat.confirm("run_command", "run: pytest", "commands", got.append)  # once is not remembered
+        click("Allow for this chat")
+        chat.confirm("run_command", "run: git status", "commands", got.append)  # remembered: no new row
+        chat.confirm("edit_file", "edit a.py", "file edits", got.append)
+        click("Deny")
+        chat.confirm_mcp("notes", "notes__get", got.append)
+        assert not [b for b in chat.findChildren(QPushButton) if b.text() == "Allow once" and not b.isHidden()]
+        chat._pending(None)  # what Stop does while the worker waits
+        assert got == [True, True, True, False, False]
+        chat.new_chat()
+        assert not chat._allowed
+    finally:
+        chat.close()

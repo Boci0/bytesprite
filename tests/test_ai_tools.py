@@ -245,3 +245,94 @@ def test_host_runs_load_skill(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -
     host = SimpleNamespace(_win=None, mcp=SimpleNamespace(server_of=lambda name: None))
     assert ai_tool_host.AiToolHost.run(host, "load_skill", {"name": "tidy"}) == "Sort imports."
     assert ai_assist._run_tool("load_skill", '{"name": "tidy"}', _Host()) == "ok"  # routed to the host
+
+
+def test_plan_and_apply_edit_keep_line_endings_and_refuse_bad_targets(repo: Path) -> None:
+    from src.tools.ai_tools import apply_edit, plan_edit
+
+    crlf = repo / "src" / "win.py"
+    crlf.write_bytes(b"a = 1\r\nb = 2\r\nc = 3\r\n")
+    edit = plan_edit(repo, {"path": "src/win.py", "old_text": "b = 2\n", "new_text": "b = 20\nb2 = 21\n"})
+    assert "-b = 2\n+b = 20\n+b2 = 21" in edit.diff and not crlf.read_bytes().endswith(b"20\r\n")  # nothing written yet
+    assert apply_edit(edit) == "edited src/win.py (+2 -1 lines)"
+    assert crlf.read_bytes() == b"a = 1\r\nb = 20\r\nb2 = 21\r\nc = 3\r\n"
+    assert apply_edit(edit).startswith("error: the file changed")  # stale plan never overwrites
+
+    new = plan_edit(repo, {"path": "pkg/new.txt", "old_text": "", "new_text": "hi\n"})
+    assert new.before is None and apply_edit(new) == "created pkg/new.txt (+1 -0 lines)"
+    assert (repo / "pkg" / "new.txt").read_text() == "hi\n"
+    (repo / ".env").write_text("K=1")
+    (repo / ".git").mkdir(exist_ok=True)
+    (repo / "dup.txt").write_text("x\nx\n")
+    for args, why in (({"path": "../out.txt", "old_text": "", "new_text": "x"}, "outside"),
+                      ({"path": ".env", "old_text": "K=1", "new_text": "K=2"}, "secrets"),
+                      ({"path": ".git/config", "old_text": "", "new_text": "x"}, "secrets"),
+                      ({"path": "dup.txt", "old_text": "x", "new_text": "y"}, "2 times"),
+                      ({"path": "src/win.py", "old_text": "zzz", "new_text": "y"}, "not found"),
+                      ({"path": "pkg/new.txt", "old_text": "", "new_text": "y"}, "exists")):
+        with pytest.raises(ValueError, match=why):
+            plan_edit(repo, args)
+    with pytest.raises(ValueError, match="Project Folder"):
+        plan_edit(None, {"path": "a", "old_text": "", "new_text": ""})
+
+
+def test_run_command_reports_exit_code_and_kills_on_timeout(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import time
+
+    from src.tools import ai_tools
+
+    assert ai_tools.run_command(repo, "echo hello && exit /b 3") == "exit code 3\nhello"
+    assert ai_tools.run_command(repo, "cd") == f"exit code 0\n{repo.resolve()}"  # runs in the Project Folder
+    assert ai_tools.run_command(None, "dir").startswith("error: no Project Folder")
+    monkeypatch.setattr(ai_tools, "COMMAND_TIMEOUT_S", 1)
+    started = time.monotonic()
+    assert ai_tools.run_command(repo, "ping -n 30 127.0.0.1 >nul").startswith("stopped after 1 s")
+    assert time.monotonic() - started < 10  # the child ping was killed with the shell
+
+
+def test_host_asks_before_edits_and_commands(repo: Path) -> None:
+    from PyQt6.QtCore import QObject
+    from PyQt6.QtWidgets import QApplication
+
+    from src.ui.ai_chat import AiChat
+    from src.ui.ai_tool_host import AiToolHost
+
+    app = QApplication.instance() or QApplication([])
+    shown: list[str] = []
+    answers = iter(["Deny", "Allow once", "Allow for this chat"])
+
+    class Chat:  # drives the real AiChat.confirm logic without building the widget
+        _allowed: set[str] = set()
+        _pending = None
+
+        def confirm(self, key, text, what, done):
+            if key in self._allowed:
+                return done(True)
+            shown.append(text)
+            pick = next(answers)
+            if pick == "Allow for this chat":
+                self._allowed.add(key)
+            done(pick != "Deny")
+
+    class Window(QObject):
+        _ai_chat = Chat()
+        _state_machine = SimpleNamespace(registry=SimpleNamespace(get_plugin=lambda _n: SimpleNamespace(repo=repo)))
+
+    host = AiToolHost(Window(), mcp=SimpleNamespace(server_of=lambda n: None, specs=lambda: [], close=lambda: None))
+    results: list[str] = []
+
+    def worker() -> None:
+        edit = {"path": "notes.md", "old_text": "", "new_text": "todo\n"}
+        results.append(host.run("edit_file", edit))
+        results.append(host.run("edit_file", edit))
+        results.append(host.run("run_command", {"command": "echo one"}))
+        results.append(host.run("run_command", {"command": "echo two"}))  # allowed for the chat: no new prompt
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    while thread.is_alive():
+        app.processEvents()
+    assert results == ["error: the user declined this edit", "created notes.md (+1 -0 lines)",
+                       "exit code 0\none", "exit code 0\ntwo"]
+    assert len(shown) == 3 and "+todo" in shown[0] and shown[2].endswith("echo one")
+    assert callable(AiChat.confirm)

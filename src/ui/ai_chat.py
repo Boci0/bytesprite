@@ -364,8 +364,8 @@ class AiChat(QWidget):
         self._ocr_jobs: list[OcrJob] = []
         self._job: AiJob | None = None
         self._auto_send = False  # a macro's `ask` step: send once images are read and no reply is pending
-        self._mcp_allowed: set[str] = set()  # MCP servers the user allowed in this chat
-        self._mcp_pending: Callable[[bool], None] | None = None  # the open Allow/Deny prompt
+        self._allowed: set[str] = set()  # what the user allowed for this chat: "mcp:<server>", "edit_file", ...
+        self._pending: Callable[[str | None], None] | None = None  # the open Allow/Deny prompt
         self._models_job: AiJob | None = None
         self._models: dict[str, list[ModelInfo]] = {}  # base URL -> its /models list, fetched on first open
         self._testing = False
@@ -801,8 +801,8 @@ class AiChat(QWidget):
         """Drop the pending reply (the request may still finish, but its answer is ignored)."""
         if self._job is None or self._testing:
             return
-        if self._mcp_pending is not None:  # the worker is waiting on it
-            self._mcp_pending(False)
+        if self._pending is not None:  # the worker is waiting on it
+            self._pending(None)
         job, self._job = self._job, None
         job.finished.disconnect(self._on_done)
         job.finished.connect(job.deleteLater)  # its thread still emits: deleting it now races that emit
@@ -1054,32 +1054,45 @@ class AiChat(QWidget):
 
     def confirm_mcp(self, server: str, tool: str, done: Callable[[bool], None]) -> None:
         """Ask before an MCP server's first tool call in this chat; the worker thread waits for done(allowed)."""
-        if server in self._mcp_allowed:
+        self.confirm(f"mcp:{server}", f'The model wants to use your MCP server "{server}" ({tool}). '
+                     "Allow it for this chat?", f'MCP server "{server}"', done, once=False)
+
+    def confirm(self, key: str, text: str, what: str, done: Callable[[bool], None], once: bool = True) -> None:
+        """Allow/Deny row in the chat; the worker thread waits for done(allowed).
+
+        `key` already allowed for this chat answers at once. With `once`, the row offers Allow once, Allow for
+        this chat and Deny; without, Allow (for this chat) and Deny.
+        """
+        if key in self._allowed:
             done(True)
             return
-        row, label = self._add_row("assistant", f'The model wants to use your MCP server "{server}" ({tool}). '
-                                                "Allow it for this chat?")
+        row, label = self._add_row("assistant", text)
         buttons = QHBoxLayout()
-        allow, deny = QPushButton("Allow"), QPushButton("Deny")
+        choices = ([("Allow once", "once"), ("Allow for this chat", "chat")] if once else [("Allow", "chat")]) + [
+            ("Deny", None)]
+        btns: list[QPushButton] = []
 
-        def answer(ok: bool) -> None:
-            if self._mcp_pending is not answer:
+        def answer(choice: str | None) -> None:
+            if self._pending is not answer:
                 return
-            self._mcp_pending = None
-            if ok:
-                self._mcp_allowed.add(server)
-            label.setText(f'{"Allowed" if ok else "Denied"} MCP server "{server}" for this chat.')
-            allow.hide()
-            deny.hide()
-            done(ok)
+            self._pending = None
+            if choice == "chat":
+                self._allowed.add(key)
+            label.setText(f"{text}\n\n{'Denied' if choice is None else 'Allowed'}: {what}"
+                          + (" for this chat." if choice == "chat" else "."))
+            for btn in btns:
+                btn.hide()
+            done(choice is not None)
 
-        for btn, ok in ((allow, True), (deny, False)):
+        for title, choice in choices:
+            btn = QPushButton(title)
             btn.setStyleSheet(_BUTTON_CSS)
-            btn.clicked.connect(lambda _c=False, ok=ok: answer(ok))
+            btn.clicked.connect(lambda _c=False, choice=choice: answer(choice))
             buttons.addWidget(btn)
+            btns.append(btn)
         buttons.addStretch(1)
         row.layout().addLayout(buttons)
-        self._mcp_pending = answer
+        self._pending = answer
         self.show()
         self._relayout()
 
@@ -1087,7 +1100,7 @@ class AiChat(QWidget):
         """Fresh start: drops a pending reply, the thread, the draft and any attachments."""
         self.stop()
         self._history.clear()
-        self._mcp_allowed.clear()
+        self._allowed.clear()
         self._draft.clear()
         self._clear_attachments()
         while self._thread_layout.count():

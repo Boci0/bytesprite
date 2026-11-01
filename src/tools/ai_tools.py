@@ -1,21 +1,27 @@
-"""PC tools the AI chat model may call: read-only file access inside the Project Folder plus a few pet actions.
+"""PC tools the AI chat model may call: file access inside the Project Folder plus a few pet actions.
 
 File tools are plain Python and run on the chat's worker thread. Pet tools need the Qt thread and are run
-by src/ui/ai_tool_host.py. Nothing here deletes files or runs commands; save_file only writes where the user
-picks in a Save dialog.
+by src/ui/ai_tool_host.py. Nothing here deletes files; save_file only writes where the user picks in a Save
+dialog, and edit_file and run_command only act after the user allows them in the chat.
 
 Security:
 - Paths resolve inside the Project Folder only (`..`, absolute paths and links out of it are refused).
-- Likely secret files (.env, keys, certificates, credential stores) are never read.
+- Likely secret files (.env, keys, certificates, credential stores) are never read or edited, nor is .git.
 - save_file takes a bare file name (no folders) and at most MAX_SAVE_CHARS of text.
+- edit_file shows its diff first and refuses to write if the file changed while the user was deciding.
+- run_command runs in the Project Folder after the user allows the exact command; it is killed (with its
+  child processes) after COMMAND_TIMEOUT_S.
 - Pet actions are a fixed allowlist: nothing that deletes keys, installs updates, edits macros or opens dialogs.
 """
 
 from __future__ import annotations
 
+import difflib
 import fnmatch
 import os
 import re
+import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +32,9 @@ MAX_FOUND = 100
 MAX_MATCHES = 60
 MAX_SAVE_CHARS = MAX_FILE_BYTES  # one save_file call
 MAX_SCANNED = 20000  # entries one find or search walks before giving up
+MAX_DIFF_CHARS = 4000  # diff shown in the chat for the user to approve
+COMMAND_TIMEOUT_S = 120
+MAX_COMMAND_CHARS = 12000  # command output returned to the model (head and tail kept)
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".mypy_cache", ".pytest_cache", "dist", "build"}
 _SECRET = re.compile(r"^\.env|\.(pem|key|pfx|p12|kdbx|ppk)$|^id_(rsa|dsa|ecdsa|ed25519)|credential|secret",
                      re.I)
@@ -45,7 +54,8 @@ PET_ACTIONS: dict[str, str] = {
     "sysmon:refresh": "refresh CPU and RAM readings",
 }
 # Tools whose output is the user's own data; after one runs, fetch_page may only open links already in the chat
-LOCAL_DATA_TOOLS = {"list_files", "read_file", "find_files", "search_text", "read_clipboard", "read_screen", "pet_status"}
+LOCAL_DATA_TOOLS = {"list_files", "read_file", "find_files", "search_text", "read_clipboard", "read_screen", "pet_status",
+                    "run_command"}
 
 
 def _fn(name: str, description: str, props: dict[str, Any] | None = None, required: tuple[str, ...] = ()) -> dict:
@@ -78,7 +88,16 @@ TOOL_SPECS: list[dict[str, Any]] = [
     _fn("open_link", "Open an https link in the user's browser.", {"url": {"type": "string"}}, ("url",)),
     _fn("load_skill", "Load one of the user's skills (listed in the system prompt) and follow its instructions.",
         {"name": {"type": "string"}}, ("name",)),
+    _fn("edit_file", "Change a text file in the Project Folder by replacing old_text, which must appear exactly once "
+        "(copy it from read_file without the line numbers, with enough lines around it to be unique). An empty "
+        "old_text creates a new file. The user sees the diff and allows or declines it.",
+        {"path": _PATH, "old_text": {"type": "string"}, "new_text": {"type": "string"}},
+        ("path", "old_text", "new_text")),
+    _fn("run_command", f"Run a Windows cmd.exe command in the Project Folder (e.g. pytest -q, git status, npm test) "
+        f"and get its exit code and output. The user allows each command first; it is stopped after "
+        f"{COMMAND_TIMEOUT_S} s, so do not start servers or watchers.", {"command": {"type": "string"}}, ("command",)),
 ]
+APPROVED_TOOLS = {"edit_file", "run_command"}  # the user allows each call in the chat (or all of them for a chat)
 FILE_TOOLS = {"list_files", "read_file", "find_files", "search_text"}
 NO_FOLDER = ("error: no Project Folder chosen. Ask the user to pick one: right-click the pet, Project, "
              "Choose Project Folder.")
@@ -190,6 +209,103 @@ def run_file_tool(root: Path | None, name: str, args: dict[str, Any]) -> str:
     except OSError as exc:
         return f"error: {exc.strerror or 'could not read'}"
     return "error: unknown tool"
+
+
+# ---------------------------------------------------------------------- edits and commands
+@dataclass
+class Edit:
+    path: Path
+    rel: str
+    before: str | None  # None: a new file
+    after: str
+    crlf: bool
+    diff: str
+
+
+def plan_edit(root: Path | None, args: dict[str, Any]) -> Edit:
+    """The edit edit_file asks for, with its diff, or ValueError. Nothing is written here."""
+    rel_arg, old, new = args.get("path"), args.get("old_text"), args.get("new_text")
+    if not isinstance(rel_arg, str) or not rel_arg.strip() or not isinstance(old, str) or not isinstance(new, str):
+        raise ValueError("give path, old_text and new_text")
+    path = resolve(root, rel_arg)
+    base = resolve(root, "")
+    rel = _rel(base, path)
+    if _SECRET.search(path.name) or ".git" in path.relative_to(base).parts:
+        raise ValueError("that file is not edited (secrets or .git)")
+    if len(new) > MAX_SAVE_CHARS:
+        raise ValueError(f"new_text is longer than {MAX_SAVE_CHARS} characters")
+    if not old:
+        if path.exists():
+            raise ValueError("that file exists; give old_text to change it")
+        before, after, crlf = None, new, False
+    else:
+        if not path.is_file():
+            raise ValueError("not a file; use an empty old_text to create it")
+        if path.stat().st_size > MAX_FILE_BYTES:
+            raise ValueError("larger than 2 MB")
+        try:
+            before = path.read_bytes().decode("utf-8")
+        except UnicodeDecodeError:
+            raise ValueError("not a UTF-8 text file") from None
+        crlf = "\r\n" in before
+        text = before.replace("\r\n", "\n") if crlf else before
+        old = old.replace("\r\n", "\n")
+        count = text.count(old)
+        if count != 1:
+            raise ValueError("old_text was not found; read the file again" if not count else
+                             f"old_text appears {count} times; include more surrounding lines")
+        after = text.replace(old, new.replace("\r\n", "\n"), 1)
+    diff = "".join(difflib.unified_diff(
+        (before or "").replace("\r\n", "\n").splitlines(keepends=True), after.splitlines(keepends=True),
+        f"a/{rel}", f"b/{rel}", n=2))
+    if len(diff) > MAX_DIFF_CHARS:
+        diff = diff[:MAX_DIFF_CHARS] + f"\n... diff cut, {len(diff) - MAX_DIFF_CHARS} more characters"
+    return Edit(path, rel, before, after, crlf, diff or "(no change)")
+
+
+def apply_edit(edit: Edit) -> str:
+    """Write an allowed edit, unless the file changed since it was planned."""
+    try:
+        now = edit.path.read_bytes().decode("utf-8") if edit.path.exists() else None
+        if now != edit.before:
+            return "error: the file changed while the user was deciding; read it again"
+        edit.path.parent.mkdir(parents=True, exist_ok=True)
+        edit.path.write_text(edit.after, encoding="utf-8", newline="\r\n" if edit.crlf else "\n")
+    except (OSError, UnicodeDecodeError) as exc:
+        return f"error: could not write ({getattr(exc, 'strerror', None) or 'write failed'})"
+    lines = edit.diff.splitlines()
+    added = sum(1 for x in lines if x.startswith("+") and not x.startswith("+++"))
+    removed = sum(1 for x in lines if x.startswith("-") and not x.startswith("---"))
+    return f"{'created' if edit.before is None else 'edited'} {edit.rel} (+{added} -{removed} lines)"
+
+
+def run_command(root: Path | None, command: Any) -> str:
+    """Exit code and output of an allowed cmd.exe command in the Project Folder; the whole tree dies on timeout."""
+    try:
+        cwd = resolve(root, "")
+    except ValueError as exc:
+        return f"error: {exc}"
+    if not isinstance(command, str) or not command.strip():
+        return "error: give a command"
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    try:
+        proc = subprocess.Popen(command, shell=True, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, creationflags=flags)
+    except OSError as exc:
+        return f"error: could not start ({exc.strerror or 'failed'})"
+    try:
+        raw, _ = proc.communicate(timeout=COMMAND_TIMEOUT_S)
+        head = f"exit code {proc.returncode}"
+    except subprocess.TimeoutExpired:
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        raw, _ = proc.communicate()
+        head = f"stopped after {COMMAND_TIMEOUT_S} s"
+    out = (raw or b"").decode("utf-8", "replace").replace("\r\n", "\n").strip()
+    if len(out) > MAX_COMMAND_CHARS:  # the end usually holds the verdict (test summary, error)
+        half = MAX_COMMAND_CHARS // 2
+        out = f"{out[:half]}\n... {len(out) - MAX_COMMAND_CHARS} characters cut ...\n{out[-half:]}"
+    return f"{head}\n{out or '(no output)'}"
 
 
 # ---------------------------------------------------------------------- skills

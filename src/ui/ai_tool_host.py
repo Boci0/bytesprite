@@ -4,6 +4,7 @@
 (clipboard, screen grab, Save dialog, pet actions) is queued to the Qt thread and the worker waits for its result.
 Tools of the user's MCP servers (src/tools/mcp_client.py) join the specs; each server's first call in a chat
 waits for the user to allow it in the chat.
+edit_file and run_command also wait for the user's Allow in the chat (once, or for the whole chat).
 """
 
 from __future__ import annotations
@@ -18,14 +19,15 @@ from PyQt6.QtCore import QCoreApplication, QObject, QStandardPaths, QTimer, pyqt
 from PyQt6.QtGui import QCursor, QGuiApplication, QImage
 from PyQt6.QtWidgets import QFileDialog
 
-from src.tools.ai_tools import FILE_TOOLS, PET_ACTIONS, TOOL_SPECS, load_skill, run_file_tool, save_args, skills_dir
+from src.tools.ai_tools import (FILE_TOOLS, PET_ACTIONS, TOOL_SPECS, apply_edit, load_skill, plan_edit, run_command,
+                                run_file_tool, save_args, skills_dir)
 from src.tools.macros import parse_recipe
 from src.tools.mcp_client import McpHub
 from src.ui.quick_tools import ocr_image_file
 
 GUI_TIMEOUT_S = 15.0
 SAVE_TIMEOUT_S = 600.0  # the Save dialog waits on the user
-APPROVE_TIMEOUT_S = 120.0  # the user reads the MCP confirm in the chat
+APPROVE_TIMEOUT_S = 300.0  # the user reads the MCP confirm, a diff or a command in the chat
 MAX_CLIP_CHARS = 12000
 MAX_SCREEN_CHARS = 8000
 
@@ -57,8 +59,26 @@ class AiToolHost(QObject):
             allowed = self._on_gui(lambda done: chat.confirm_mcp(server, name, done), APPROVE_TIMEOUT_S)
             return self.mcp.call(name, args) if allowed is True else "error: the user did not allow this MCP server"
         if name in FILE_TOOLS:
-            project = self._win._state_machine.registry.get_plugin("project")
-            return run_file_tool(getattr(project, "repo", None), name, args)
+            return run_file_tool(self._project(), name, args)
+        if name == "edit_file":
+            try:
+                edit = plan_edit(self._project(), args)
+            except ValueError as exc:
+                return f"error: {exc}"
+            verb = "create" if edit.before is None else "edit"
+            if not self._allowed("edit_file", f"The model wants to {verb} {edit.rel}:\n\n{edit.diff}", "file edits"):
+                return "error: the user declined this edit"
+            return apply_edit(edit)
+        if name == "run_command":
+            command = args.get("command")
+            if not isinstance(command, str) or not command.strip():
+                return "error: give a command"
+            if self._project() is None:
+                return run_command(None, command)  # explains that no Project Folder is chosen
+            if not self._allowed("run_command", f"The model wants to run in the Project Folder:\n\n{command.strip()}",
+                                 "commands"):
+                return "error: the user declined this command"
+            return run_command(self._project(), command)
         if name == "load_skill":
             return load_skill(skills_dir(), args.get("name"))
         if name == "read_screen":
@@ -73,6 +93,14 @@ class AiToolHost(QObject):
             return out if isinstance(out, str) else "error: the user did not answer the Save dialog in time"
         out = self._on_gui(lambda done: done(self._pet_tool(name, args)))
         return out if isinstance(out, str) else "error: the pet did not answer in time"
+
+    def _project(self) -> Path | None:
+        return getattr(self._win._state_machine.registry.get_plugin("project"), "repo", None)
+
+    def _allowed(self, key: str, text: str, what: str) -> bool:
+        """The user's answer in the chat; no answer within APPROVE_TIMEOUT_S counts as declined."""
+        chat = self._win._ai_chat
+        return self._on_gui(lambda done: chat.confirm(key, text, what, done), APPROVE_TIMEOUT_S) is True
 
     def take_saved(self) -> list[Path]:
         """Files saved since the last call (the chat shows a row for each)."""
