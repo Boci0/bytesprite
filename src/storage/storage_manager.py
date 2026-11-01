@@ -23,12 +23,14 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def autostart_command() -> str:
-    """Console-free launch command; a Run key has no working dir, so put the root on sys.path."""
+    """Console-free launch command; a Run key has no working dir, so run the root-level launcher file.
+
+    Run values are capped at 260 characters, so no inline -c code here.
+    """
     exe = Path(sys.executable)
     gui_exe = exe.with_name("pythonw.exe")
     launcher = gui_exe if gui_exe.exists() else exe
-    code = f"import sys;sys.path.insert(0,r'{_PROJECT_ROOT}');from src.main import main;raise SystemExit(main())"
-    return f'"{launcher}" -c "{code}"'
+    return f'"{launcher}" "{_PROJECT_ROOT / "bytesprite.pyw"}"'
 
 
 def autostart_enabled() -> bool:

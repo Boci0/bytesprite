@@ -56,7 +56,7 @@ New-Item -ItemType Directory -Force -Path $App | Out-Null
 robocopy (Join-Path $Source "src") (Join-Path $App "src") /MIR /XD __pycache__ /NFL /NDL /NJH /NJS /NP | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "Copying src failed (robocopy $LASTEXITCODE)" }
 robocopy (Join-Path $Source "assets") (Join-Path $App "assets") /MIR /NFL /NDL /NJH /NJS /NP | Out-Null
-foreach ($f in "requirements.txt", "uninstall.ps1", "README.md") {
+foreach ($f in "requirements.txt", "uninstall.ps1", "README.md", "bytesprite.pyw") {
     Copy-Item (Join-Path $Source $f) $App -Force
 }
 Set-Content (Join-Path $App ".installed") "installed by install.ps1" -Encoding ascii
@@ -101,8 +101,7 @@ Set-ItemProperty -Path $key -Name NoRepair -Value 1 -Type DWord
 
 # 6. Optional Start with Windows (same Run value the in-app toggle writes)
 if ($StartWithWindows) {
-    $code = "import sys;sys.path.insert(0,r'$App');from src.main import main;raise SystemExit(main())"
-    Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name ByteSprite -Value "`"$Pythonw`" -c `"$code`""
+    Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name ByteSprite -Value "`"$Pythonw`" `"$App\bytesprite.pyw`""
 }
 
 if ($Temp) { Remove-Item $Temp -Recurse -Force -ErrorAction SilentlyContinue }
