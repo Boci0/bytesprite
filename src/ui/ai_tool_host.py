@@ -4,8 +4,8 @@
 (clipboard, screen grab, Save dialog, pet actions) is queued to the Qt thread and the worker waits for its result.
 Tools of the user's MCP servers (src/tools/mcp_client.py) join the specs; each server's first call in a chat
 waits for the user to allow it in the chat.
-edit_file, run_command, add_mcp_server and add_skill also wait for the user's Allow in the chat (once, or for the
-whole chat).
+edit_file, run_command, add_mcp_server, add_skill, update_skill, remember and forget also wait for the user's Allow
+in the chat (once, or for the whole chat).
 """
 
 from __future__ import annotations
@@ -20,8 +20,9 @@ from PyQt6.QtCore import QCoreApplication, QObject, QStandardPaths, QTimer, pyqt
 from PyQt6.QtGui import QCursor, QGuiApplication, QImage
 from PyQt6.QtWidgets import QFileDialog
 
-from src.tools.ai_tools import (FILE_TOOLS, PET_ACTIONS, TOOL_SPECS, apply_edit, load_skill, plan_edit, run_command,
-                                run_file_tool, save_args, skill_text, skills_dir, write_skill)
+from src.tools.ai_tools import (FILE_TOOLS, PET_ACTIONS, TOOL_SPECS, apply_edit, load_skill, memory_path, plan_edit,
+                                plan_memory, plan_skill_update, run_command, run_file_tool, save_args, skill_text,
+                                skills_dir, write_memory, write_skill)
 from src.tools.macros import parse_recipe
 from src.tools.mcp_client import SEP, McpHub, add_server, find_servers, safe_name
 from src.ui.quick_tools import ocr_image_file
@@ -96,6 +97,37 @@ class AiToolHost(QObject):
                                  f"follow as your own instructions:\n\n{text}", "saving skills"):
                 return "error: the user declined this skill"
             return write_skill(skills_dir(), skill, text)
+        if name == "update_skill":
+            plan = lambda: plan_skill_update(skills_dir(), args.get("name"), args.get("description"),  # noqa: E731
+                                             args.get("instructions"))
+            try:
+                path, text, diff = plan()
+                if not self._allowed("update_skill", f'The model wants to change your skill "{path.parent.name}", '
+                                     f"which later chats follow as your own instructions:\n\n{diff}", "skill updates"):
+                    return "error: the user declined this skill change"
+                if plan()[2] != diff:
+                    return "error: the skill changed while the user was deciding; load_skill it again"
+                path.write_text(text, encoding="utf-8")
+            except ValueError as exc:
+                return f"error: {exc}"
+            except OSError as exc:
+                return f"error: could not save the skill ({exc.strerror or 'write failed'})"
+            return f'updated skill "{path.parent.name}"'
+        if name in ("remember", "forget"):
+            try:
+                _text, note = plan_memory(memory_path(), name, args.get("note"))
+            except ValueError as exc:
+                return f"error: {exc}"
+            verb = "remember this in every later chat" if name == "remember" else "forget this note"
+            if not self._allowed("memory", f"The model wants to {verb}:\n\n{note}", "memory changes"):
+                return "error: the user declined this memory change"
+            try:
+                text, again = plan_memory(memory_path(), name, args.get("note"))  # the file may have changed meanwhile
+            except ValueError as exc:
+                return f"error: {exc}"
+            if again != note:
+                return "error: memory changed while the user was deciding; try again"
+            return write_memory(memory_path(), text)
         if name == "read_screen":
             image = self._on_gui(self._grab_screen)
             return self._ocr(image) if isinstance(image, QImage) and not image.isNull() else "error: no screen grab"

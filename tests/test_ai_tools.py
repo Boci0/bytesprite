@@ -470,3 +470,104 @@ def test_both_loops_end_with_an_answer_when_the_tool_budget_runs_out(monkeypatch
     assert reply.text == "Done so far: 3 files." and len(host.calls) == 3 and "tools" not in sent[3]
     assert sent[3]["messages"][-1]["content"] == "ok" + ai_assist.BUDGET_NOTE
     assert sent[2]["messages"][-1]["content"] == "ok"
+
+
+def test_memory_notes_add_remove_and_keep_the_users_own_lines(tmp_path: Path) -> None:
+    from src.tools.ai_tools import MAX_MEMORY_CHARS, memory_prompt, plan_memory, read_memory, write_memory
+
+    path = tmp_path / "memory.md"
+    assert memory_prompt(path) == "" and read_memory(path) == []
+    text, note = plan_memory(path, "remember", "  Tests run with\n pytest -q ")
+    assert note == "Tests run with pytest -q" and not path.exists()  # nothing written by the plan
+    write_memory(path, text)
+    path.write_text(path.read_text("utf-8") + "My own line, not a note.\n", encoding="utf-8")
+    write_memory(path, plan_memory(path, "remember", "User prefers PowerShell")[0])
+    assert read_memory(path) == ["Tests run with pytest -q", "User prefers PowerShell"]
+    assert "Your memory" in memory_prompt(path) and "- User prefers PowerShell" in memory_prompt(path)
+    for args, why in ((("remember", "tests RUN with pytest -q"), "already"), (("remember", "x" * 301), "under 300"),
+                      (("forget", "nothing like this"), "no note"), (("forget", "e"), "2 notes"),
+                      (("remember", ""), "give the note")):
+        with pytest.raises(ValueError, match=why):
+            plan_memory(path, *args)
+    text, gone = plan_memory(path, "forget", "powershell")
+    write_memory(path, text)
+    assert gone == "User prefers PowerShell" and read_memory(path) == ["Tests run with pytest -q"]
+    assert "My own line, not a note." in path.read_text("utf-8")
+    path.write_text("".join(f"- note {i} {'y' * 280}\n" for i in range(MAX_MEMORY_CHARS // 290 + 1)), encoding="utf-8")
+    with pytest.raises(ValueError, match="memory is full"):
+        plan_memory(path, "remember", "one more")
+
+
+def test_plan_skill_update_diffs_a_listed_skill_only(tmp_path: Path) -> None:
+    from src.tools.ai_tools import plan_skill_update
+
+    _skill(tmp_path, "tidy", "---\ndescription: Sort imports\n---\nSort imports.\n")
+    path, text, diff = plan_skill_update(tmp_path, "tidy", None, "Sort imports, then run ruff.")
+    assert text == "---\ndescription: Sort imports\n---\n\nSort imports, then run ruff.\n"  # description kept
+    assert "-Sort imports.\n" in diff and "+Sort imports, then run ruff.\n" in diff and path.name == "SKILL.md"
+    assert "description: Tidy" in plan_skill_update(tmp_path, "tidy", "Tidy", "x")[1]
+    for name, body, why in (("../tidy", "x", "no such skill"), ("nope", "x", "no such skill"), ("tidy", " ", "full new")):
+        with pytest.raises(ValueError, match=why):
+            plan_skill_update(tmp_path, name, None, body)
+    path.write_text(text, encoding="utf-8")
+    with pytest.raises(ValueError, match="already says"):
+        plan_skill_update(tmp_path, "tidy", None, "Sort imports, then run ruff.")
+
+
+def test_host_asks_before_memory_and_skill_changes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from PyQt6.QtCore import QObject
+    from PyQt6.QtWidgets import QApplication
+
+    from src.tools.ai_tools import memory_path, read_memory
+    from src.ui import ai_tool_host
+
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(ai_tool_host, "skills_dir", lambda: tmp_path / "skills")
+    _skill(tmp_path / "skills", "tidy", "---\ndescription: d\n---\nSort imports.\n")
+    shown: list[str] = []
+    answers = iter(["Deny", "Allow once", "Allow once", "Deny", "Allow once"])
+
+    class Chat:
+        def confirm(self, key, text, what, done):
+            shown.append(f"{key}|{text}")
+            done(next(answers) != "Deny")
+
+    class Window(QObject):
+        _ai_chat = Chat()
+
+    host = ai_tool_host.AiToolHost(Window(), mcp=SimpleNamespace(server_of=lambda n: None, specs=lambda: [],
+                                                                 close=lambda: None))
+    results: list[str] = []
+
+    def worker() -> None:
+        results.append(host.run("remember", {"note": "Use PowerShell"}))
+        results.append(host.run("remember", {"note": "Use PowerShell"}))
+        results.append(host.run("forget", {"note": "powershell"}))
+        results.append(host.run("update_skill", {"name": "tidy", "instructions": "Sort imports, then ruff."}))
+        results.append(host.run("update_skill", {"name": "tidy", "instructions": "Sort imports, then ruff."}))
+        results.append(host.run("update_skill", {"name": "nope", "instructions": "x"}))
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    while thread.is_alive():
+        app.processEvents()
+    assert results[0] == "error: the user declined this memory change"
+    assert results[1].startswith("memory saved (1 notes)") and results[2].startswith("memory saved (0 notes)")
+    assert read_memory(memory_path()) == []
+    assert results[3] == "error: the user declined this skill change" and results[4] == 'updated skill "tidy"'
+    assert results[5].startswith("error: no such skill")
+    assert load_skill(tmp_path / "skills", "tidy") == "Sort imports, then ruff."
+    assert shown[0] == "memory|The model wants to remember this in every later chat:\n\nUse PowerShell"
+    assert shown[2] == "memory|The model wants to forget this note:\n\nUse PowerShell"
+    assert shown[3].startswith('update_skill|The model wants to change your skill "tidy"') and "+Sort imports, then ruff." in shown[3]
+    assert len(shown) == 5
+
+
+def test_memory_lands_in_the_system_prompt_before_skills(tmp_path: Path) -> None:
+    from src.tools.ai_tools import memory_path, plan_memory, skills_dir, write_memory
+
+    write_memory(memory_path(), plan_memory(memory_path(), "remember", "User's tests live in tests/")[0])
+    _skill(skills_dir(), "tidy", "---\ndescription: d\n---\nx")
+    system = ai_assist.chat_messages([{"role": "user", "content": "hi"}])[0]["content"]
+    assert system.index("Your memory") < system.index("The user wrote these skills")
+    assert "- User's tests live in tests/" in system and "Improve yourself" in system

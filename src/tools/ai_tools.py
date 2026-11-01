@@ -12,6 +12,8 @@ Security:
 - run_command runs in the Project Folder after the user allows the exact command; it is killed (with its
   child processes) after COMMAND_TIMEOUT_S.
 - Pet actions are a fixed allowlist: nothing that deletes keys, installs updates, edits macros or opens dialogs.
+- Memory notes and skills become instructions for later chats, so remember, forget, add_skill and
+  update_skill show the exact text (or diff) and write only after the user allows it.
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ MAX_MATCHES = 60
 MAX_SAVE_CHARS = MAX_FILE_BYTES  # one save_file call
 MAX_SCANNED = 20000  # entries one find or search walks before giving up
 MAX_DIFF_CHARS = 4000  # diff shown in the chat for the user to approve
+MAX_NOTE_CHARS = 300  # one memory note
 COMMAND_TIMEOUT_S = 120
 MAX_COMMAND_CHARS = 12000  # command output returned to the model (head and tail kept)
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".mypy_cache", ".pytest_cache", "dist", "build"}
@@ -114,9 +117,21 @@ TOOL_SPECS: list[dict[str, Any]] = [
          "description": {"type": "string", "description": "One line: when to use this skill"},
          "instructions": {"type": "string", "description": "The skill's Markdown body"}},
         ("name", "description", "instructions")),
+    _fn("update_skill", "Improve one of the user's skills after it proved wrong, unclear or missing a step. Give "
+        "the full new instructions (load_skill it first). The user sees the diff and allows or declines it.",
+        {"name": {"type": "string"}, "instructions": {"type": "string", "description": "The whole new body"},
+         "description": {"type": "string", "description": "Optional new one-line description"}},
+        ("name", "instructions")),
+    _fn("remember", "Save one short lasting note to your memory, which every later chat sees: a correction, a "
+        "preference, or a fact about the user's setup (e.g. 'Tests run with .venv\\Scripts\\python -m pytest'). "
+        "Not for one-off details. The user allows or declines it.",
+        {"note": {"type": "string", "description": f"One sentence, under {MAX_NOTE_CHARS} characters"}},
+        ("note",)),
+    _fn("forget", "Remove a note from your memory that is wrong or stale. The user allows or declines it.",
+        {"note": {"type": "string", "description": "Text from the note to remove"}}, ("note",)),
 ]
 # the user allows each call in the chat (or all of them for a chat)
-APPROVED_TOOLS = {"edit_file", "run_command", "add_mcp_server", "add_skill"}
+APPROVED_TOOLS = {"edit_file", "run_command", "add_mcp_server", "add_skill", "update_skill", "remember", "forget"}
 FILE_TOOLS = {"list_files", "read_file", "find_files", "search_text"}
 NO_FOLDER = ("error: no Project Folder chosen. Ask the user to pick one: right-click the pet, Project, "
              "Choose Project Folder.")
@@ -405,6 +420,97 @@ def write_skill(root: Path, name: str, text: str) -> str:
     except OSError as exc:
         return f"error: could not save the skill ({exc.strerror or 'write failed'})"
     return f'added skill "{name}"; it is listed from the next message'
+
+
+def plan_skill_update(root: Path, name: Any, description: Any, instructions: Any) -> tuple[Path, str, str]:
+    """(SKILL.md path, new text, diff) for update_skill, or ValueError. Nothing is written here.
+
+    The file is rebuilt as skill_text, so frontmatter fields other than description are dropped.
+    """
+    listed = dict(list_skills(root))
+    if not isinstance(name, str) or name.strip() not in listed:
+        raise ValueError("no such skill. Skills: " + (", ".join(sorted(listed)) or "none"))
+    if not isinstance(instructions, str) or not instructions.strip():
+        raise ValueError("give the skill's full new instructions")
+    path = root / name.strip() / "SKILL.md"
+    try:
+        before = path.read_text("utf-8", "replace")
+    except OSError as exc:
+        raise ValueError(exc.strerror or "could not read the skill") from None
+    keep = parse_skill(before)[0].get("description", "")
+    text = skill_text(description if isinstance(description, str) and description.strip() else keep, instructions)
+    diff = "".join(difflib.unified_diff(before.replace("\r\n", "\n").splitlines(keepends=True),
+                                        text.splitlines(keepends=True), "a/SKILL.md", "b/SKILL.md", n=2))
+    if not diff:
+        raise ValueError("that is what the skill already says")
+    if len(diff) > MAX_DIFF_CHARS:
+        diff = diff[:MAX_DIFF_CHARS] + f"\n... diff cut, {len(diff) - MAX_DIFF_CHARS} more characters"
+    return path, text, diff
+
+
+MAX_MEMORY_CHARS = 4000  # all notes together; they ride along in every chat's system prompt
+MEMORY_HEADER = "# ByteSprite memory\n\nOne note per line starting with \"- \". The AI chat reads these in every chat.\n\n"
+
+
+def memory_path() -> Path:
+    return skills_dir().parent / "memory.md"
+
+
+def read_memory(path: Path) -> list[str]:
+    """The notes: lines starting with "- "; anything else in the file (the user's own text) is ignored."""
+    try:
+        lines = path.read_text("utf-8", "replace").splitlines()
+    except OSError:
+        return []
+    return [line[2:].strip() for line in lines if line.startswith("- ") and line[2:].strip()]
+
+
+def memory_prompt(path: Path) -> str:
+    """The system prompt's memory block, or "" when there are no notes."""
+    notes = read_memory(path)
+    if not notes:
+        return ""
+    rows = "\n".join(f"- {n}" for n in notes)[:MAX_MEMORY_CHARS]
+    return ("Your memory: notes you saved in earlier chats with remember, each allowed by the user. Follow them "
+            f"unless the user says otherwise now, and forget a note that turns out wrong or stale:\n{rows}")
+
+
+def plan_memory(path: Path, name: str, text: Any) -> tuple[str, str]:
+    """(the file's new text after remember or forget, the note added or removed), or ValueError.
+
+    Only that one line changes; anything else the user wrote in the file stays.
+    """
+    notes = read_memory(path)
+    note = " ".join(text.split()) if isinstance(text, str) else ""
+    if not note:
+        raise ValueError("give the note's text")
+    try:
+        lines = path.read_text("utf-8", "replace").splitlines()
+    except OSError:
+        lines = MEMORY_HEADER.splitlines()
+    if name == "remember":
+        if len(note) > MAX_NOTE_CHARS:
+            raise ValueError(f"keep a note under {MAX_NOTE_CHARS} characters")
+        if any(note.lower() == n.lower() for n in notes):
+            raise ValueError("that is already in memory")
+        if sum(len(n) + 3 for n in notes) + len(note) > MAX_MEMORY_CHARS:
+            raise ValueError("memory is full; forget an old or stale note first")
+        return "\n".join([*lines, f"- {note}"]) + "\n", note
+    hits = [n for n in notes if note.lower() in n.lower()]
+    if len(hits) != 1:
+        raise ValueError("no note contains that text" if not hits else
+                         f"{len(hits)} notes contain that text; quote more of the one to forget")
+    gone = next(i for i, line in enumerate(lines) if line.startswith("- ") and line[2:].strip() == hits[0])
+    return "\n".join(lines[:gone] + lines[gone + 1:]) + "\n", hits[0]
+
+
+def write_memory(path: Path, text: str) -> str:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    except OSError as exc:
+        return f"error: could not save memory ({exc.strerror or 'write failed'})"
+    return f"memory saved ({len(read_memory(path))} notes); later chats will see it"
 
 
 def load_skill(root: Path, name: Any) -> str:
