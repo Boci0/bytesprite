@@ -45,6 +45,7 @@ from src.graphics.animation_controller import AnimationController
 from src.graphics.sprite_matrix import FrameMatrix, get_sprite_frames
 from src.tools.file_forge import ForgeMode, ForgeWheelOption, get_wheel_options_for_paths
 from src.tools.ai_assist import AiAssistPlugin
+from src.tools.ai_tools import skills_dir
 from src.tools.macros import MacroBook
 from src.tools.hints import HintsPlugin, Suggestion, foreground_app
 from src.ui.ai_chat import AiChat
@@ -1247,6 +1248,9 @@ class PetWindow(QWidget):
             return
         if callback_id == "ai:chat":
             self.open_ai_chat()
+            return
+        if callback_id == "ai:skills":
+            self.open_output_folder(skills_dir())
             return
         if callback_id.startswith(("macro:", "macrokey:")):  # by name (wheel, menu) or number (hotkey)
             key = callback_id.partition(":")[2]
