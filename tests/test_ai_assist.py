@@ -585,6 +585,9 @@ def test_web_search_tool_loop_and_fallback(api: str, monkeypatch: pytest.MonkeyP
     follow = _Api.seen[1]["body"]["messages"]
     assert follow[-1] == {"role": "tool", "tool_call_id": "c1", "content": "result for python 3.14"}
     assert follow[-2]["tool_calls"][0]["id"] == "c1"
+    assert reply.tools == ["web_search(python 3.14)"]
+    assert ai_assist.history_text(reply) == "[Tools run: web_search(python 3.14)]\nIt is a stack trace."
+    assert ai_assist.history_text(ai_assist.AiReply(text="plain")) == "plain"
 
 
 def test_run_tool_rejects_bad_calls_and_anthropic_params() -> None:
@@ -648,7 +651,7 @@ def test_chat_answers_after_a_web_search_and_setup_saves_the_search_key(
         chat.insert_text("what is the news?")
         chat.send()
         _wait(app, lambda: chat._job is None and len(chat._history) == 2)
-        assert chat._history[-1]["content"] == "It is a stack trace."
+        assert chat._history[-1]["content"] == "[Tools run: web_search(news)]\nIt is a stack trace."
         assert _Api.seen[-1]["body"]["messages"][-1] == {"role": "tool", "tool_call_id": "c1", "content": "result for news"}
         chat.show_setup()
         chat._search_key.setText("brave-key-123")
