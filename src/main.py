@@ -22,6 +22,7 @@ from src.updater import is_installed
 # Stored beside plugin state in state.json "tools"; not a ToolPlugin, so it never joins the HUD cycle
 RECENT_FILES_KEY = "recent"
 WHEEL_KEY = "wheel"
+MACROS_KEY = "macros"
 
 SIMULATION_TICK_INTERVAL_MS: int = 2_000
 AUTO_SAVE_INTERVAL_MS: int = 60_000
@@ -75,6 +76,7 @@ class ByteSpriteApp:
         )
         self.window.recent.load_dict(saved.tools_data.get(RECENT_FILES_KEY))
         self.window.wheel.load_dict(saved.tools_data.get(WHEEL_KEY))
+        self.window.macros.load_dict(saved.tools_data.get(MACROS_KEY))
 
         if saved.position is not None:
             self.window.move_clamped(saved.position[0], saved.position[1])
@@ -111,7 +113,8 @@ class ByteSpriteApp:
         self.hotkeys: GlobalHotkeys | None = None
         if enable_tray:
             self.hotkeys = GlobalHotkeys()
-            self.hotkeys.triggered.connect(self.window.trigger_snip)
+            self.hotkeys.triggered.connect(
+                lambda m: self.window.trigger_tool_action(m if m.startswith("macrokey:") else f"snip:{m}"))
             self.hotkeys.start()
             if is_installed():
                 # One quiet check per launch; installing waits for Settings > Check for Updates
@@ -164,6 +167,7 @@ class ByteSpriteApp:
             tools_payload[plugin.tool_id] = plugin.to_dict()
         tools_payload[RECENT_FILES_KEY] = self.window.recent.to_dict()
         tools_payload[WHEEL_KEY] = self.window.wheel.to_dict()
+        tools_payload[MACROS_KEY] = self.window.macros.to_dict()
         return self._storage.save(
             stats=self.state_machine.stats,
             state=self.state_machine.state,

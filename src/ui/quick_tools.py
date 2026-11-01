@@ -321,10 +321,13 @@ _MOD_ALT, _MOD_CONTROL, _MOD_SHIFT, _MOD_NOREPEAT = 0x1, 0x2, 0x4, 0x4000
 _WM_HOTKEY, _WM_QUIT = 0x0312, 0x0012
 HOTKEY_LABEL = "Ctrl+Shift+Alt"
 HOTKEY_MODES: dict[int, tuple[str, str]] = {1: ("S", "image"), 2: ("T", "text"), 3: ("C", "color"), 4: ("A", "ai")}
+# shortcut: 1..9 are held even with fewer macros, register per macro if a user reports a clash
+HOTKEY_MODES.update({10 + n: (str(n), f"macrokey:{n}") for n in range(1, 10)})
 
 
 class GlobalHotkeys(QObject):
-    """Ctrl+Shift+Alt+S/T/C/A system-wide hotkeys; `triggered` delivers the snip mode ("ai" for A) on the Qt thread.
+    """Ctrl+Shift+Alt+S/T/C/A/1-9 system-wide hotkeys; `triggered` delivers the snip mode ("ai" for A,
+    "macrokey:N" for digits) on the Qt thread.
 
     Thread-level hotkeys (hWnd NULL) post WM_HOTKEY to the registering thread's queue, so a
     plain GetMessageW loop on a worker thread receives them without touching nativeEvent.

@@ -416,8 +416,8 @@ def test_tool_wheel_slices_and_web_search_dispatch(qapp: QApplication, monkeypat
     try:
         labels = [o.label for o in win.tool_wheel_options()]
         assert labels[:4] == ["OCR", "Clips", "Search", "Focus"]
-        assert labels[-3:] == ["YouTube", "Gemini", "GitHub"]
-        assert len(labels) <= 9 and "Ask AI" in labels
+        assert labels[-4:] == ["YouTube", "Gemini", "GitHub", "Snap Ask"]  # macros fill free room last
+        assert len(labels) <= 10 and "Ask AI" in labels
 
         win.trigger_tool_action("web:https://www.youtube.com")
         QGuiApplication.clipboard().setText("TypeError: x is not a function")

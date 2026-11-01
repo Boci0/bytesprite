@@ -355,6 +355,7 @@ class AiChat(QWidget):
         self._chips: list[Chip] = []
         self._ocr_jobs: list[OcrJob] = []
         self._job: AiJob | None = None
+        self._auto_send = False  # a macro's `ask` step: send once images are read and no reply is pending
         self._models_job: AiJob | None = None
         self._models: dict[str, list[ModelInfo]] = {}  # base URL -> its /models list, fetched on first open
         self._testing = False
@@ -682,6 +683,7 @@ class AiChat(QWidget):
         for chip in self._chips:
             if chip.item is item:
                 chip.refresh()
+        self._try_auto_send()
 
     def _add_attachment(self, item: Attachment) -> bool:
         if len(self._attachments) >= MAX_ATTACHMENTS:
@@ -818,6 +820,16 @@ class AiChat(QWidget):
         self._add_details(row, reply)
         play_cue("reply")
         self._refresh_title()
+        self._try_auto_send()
+
+    def send_when_ready(self) -> None:
+        self._auto_send = True
+        self._try_auto_send()
+
+    def _try_auto_send(self) -> None:
+        if self._auto_send and self._job is None and not any(a.pending for a in self._attachments):
+            self._auto_send = False
+            self.send()
 
     def _add_details(self, row: QWidget, reply: AiReply) -> None:
         """Dim line under a reply, plus a Show reasoning toggle when the model returned its thinking."""

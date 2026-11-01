@@ -45,6 +45,7 @@ from src.graphics.animation_controller import AnimationController
 from src.graphics.sprite_matrix import FrameMatrix, get_sprite_frames
 from src.tools.file_forge import ForgeMode, ForgeWheelOption, get_wheel_options_for_paths
 from src.tools.ai_assist import AiAssistPlugin
+from src.tools.macros import MacroBook
 from src.tools.hints import HintsPlugin, Suggestion, foreground_app
 from src.ui.ai_chat import AiChat
 from src.ui.screen_glow import ScreenGlow, play_screen_glow
@@ -52,6 +53,8 @@ from src.storage.recent_files import RecentFiles
 from src.tools.web_drop import WebImageJob, html_image_src, is_web_image_source, web_image_stem
 from src.ui.context_menu import PetContextMenu, style_menu
 from src.ui.drop_wheel import RadialDropWheel
+from src.ui.macro_editor import MacroEditor
+from src.ui.macro_runner import MacroRunner
 from src.ui.quick_tools import OcrJob, SnipSession, open_folder_in_background
 from src.ui.sfx import play_cue, preload_tick_sounds, prewarm as prewarm_ticks
 from src.ui.tool_wheel import WEB_SHORTCUTS, ToolWheel, ToolWheelOption, WheelLayout, google_search_url
@@ -333,6 +336,8 @@ class PetWindow(QWidget):
         self._web_intermediate: Path | None = None
         self.recent = RecentFiles()
         self.wheel = WheelLayout()  # Settings > Customize Wheel, persisted as tools.wheel
+        self.macros = MacroBook()  # right-click > Macros, persisted as tools.macros
+        self._macro_runner = MacroRunner(self)
         QTimer.singleShot(0, preload_tick_sounds)  # wheels are built lazily; sounds must be ready first
 
         self._configure_window()
@@ -961,6 +966,7 @@ class PetWindow(QWidget):
 
     def all_tool_wheel_options(self) -> list[ToolWheelOption]:
         """Slices clockwise from 12 o'clock: everyday quick tools, then web shortcuts."""
+        self.wheel.macros = [m.name for m in self.macros.macros]  # every wheel lookup passes through here
         pomo = self._state_machine.pomodoro_plugin
         focus_sub = "pause" if pomo is not None and pomo.running else f"{pomo.work_minutes if pomo else 25}m"
         options = [
@@ -1078,6 +1084,9 @@ class PetWindow(QWidget):
     def _begin_snip(self, mode: str) -> None:
         if self._is_shutting_down:
             return
+        if self._snip_session is not None:  # a macro's region snip opened during the 180ms hide delay
+            self.show()
+            return
         self._snip_session = SnipSession(mode, self._on_snip_result)
 
     def _on_snip_result(self, mode: str, result: object | None) -> None:
@@ -1147,7 +1156,7 @@ class PetWindow(QWidget):
         self._show_toast("TEXT OK", QColor("#38B764"))
 
     # ------------------------------------------------------------------
-    # AI Assist (manual only: nothing is sent until the user presses Send in the chat bar)
+    # AI Assist (manual only: nothing is sent until the user presses Send, or runs a macro they built with an `ask` step)
     # ------------------------------------------------------------------
 
     def open_ai_chat(self) -> None:
@@ -1170,6 +1179,31 @@ class PetWindow(QWidget):
         self._anim.play_oneshot("spin")
         self._schedule_next_anim_tick()
         self._ai_chat.open_near(sprite)
+
+    def ensure_ai_chat(self) -> AiChat | None:
+        """Open the chat if it is closed (never toggles it shut, unlike open_ai_chat)."""
+        if self._ai_chat is None or not self._ai_chat.isVisible():
+            self.open_ai_chat()
+        return self._ai_chat
+
+    def _edit_macro(self, old_name: str = "") -> None:
+        old = self.macros.find(old_name) if old_name else None
+        number = self.macros.macros.index(old) + 1 if old else len(self.macros.macros) + 1
+        editor = MacroEditor(old.name if old else "", old.recipe if old else "",
+                             bool(old) and self.macros.double_click == old.name, number if number <= 9 else 0)
+        if not editor.exec():
+            return
+        try:
+            toast = self.macros.save(editor.name.text(), editor.recipe.text(), old.name if old else "")
+        except ValueError:
+            toast = "BAD STEP"
+        name = " ".join(editor.name.text().split())
+        if toast in ("ADDED", "SAVED"):
+            if editor.double_click.isChecked():
+                self.macros.double_click = name
+            elif self.macros.double_click == name:
+                self.macros.double_click = ""
+        self._show_toast(toast, QColor("#38B764" if toast in ("ADDED", "SAVED") else "#EF7D57"))
 
     def _sprite_global_rect(self) -> QRect:
         return QRect(self.mapToGlobal(self._sprite_rect.topLeft()), self._sprite_rect.size())
@@ -1211,6 +1245,26 @@ class PetWindow(QWidget):
             return
         if callback_id == "ai:chat":
             self.open_ai_chat()
+            return
+        if callback_id.startswith(("macro:", "macrokey:")):  # by name (wheel, menu) or number (hotkey)
+            key = callback_id.partition(":")[2]
+            macro = self.macros.find(key) if callback_id.startswith("macro:") else self.macros.numbered(key)
+            if macro is None:
+                self._show_toast("NO MACRO", QColor("#8A9AF2"))
+            else:
+                self._macro_runner.run(macro)
+            return
+        if callback_id.startswith("macros:"):
+            action, _sep, name = callback_id.removeprefix("macros:").partition(":")
+            if action == "new":
+                self._edit_macro()
+            elif action == "edit":
+                self._edit_macro(name)
+            elif action == "remove" and self.macros.remove(name):
+                self._show_toast("REMOVED", QColor("#8A9AF2"))
+            elif action == "dbl":
+                self.macros.double_click = name if self.macros.find(name) else ""
+                self._show_toast("DOUBLE-CLICK", QColor("#38B764"))
             return
         if callback_id.startswith("wheel:"):
             self._customize_wheel(callback_id.removeprefix("wheel:"))
@@ -1424,7 +1478,11 @@ class PetWindow(QWidget):
             event.position().toPoint()
         ):
             self._click_timer.stop()
-            self.trigger_snip("image")
+            macro = self.macros.find(self.macros.double_click) if self.macros.double_click else None
+            if macro is not None:
+                self._macro_runner.run(macro)
+            else:
+                self.trigger_snip("image")
             event.accept()
             return
         super().mouseDoubleClickEvent(event)
@@ -1542,6 +1600,8 @@ class PetWindow(QWidget):
             recent_files=self.recent.entries(),
             wheel_slices=[(o.label, o.callback_id, on) for o, on in self.wheel.catalog(self.all_tool_wheel_options())],
             wheel_custom=[label for label, _target in self.wheel.custom],
+            macros=[m.name for m in self.macros.macros],
+            double_click_macro=self.macros.double_click,
             parent=self,
         )
 

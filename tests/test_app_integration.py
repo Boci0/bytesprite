@@ -143,7 +143,7 @@ def test_customize_wheel_extras_custom_and_persist(qapp: QApplication, tmp_path:
     controller = ByteSpriteApp(app=qapp, storage=storage, enable_tray=False)
     win = controller.window
     base = [o.callback_id for o in win.all_tool_wheel_options()]
-    assert [o.callback_id for o in win.tool_wheel_options()] == base  # extras start off
+    assert [o.callback_id for o in win.tool_wheel_options()] == base + ["macro:Snap Ask"]  # extras start off
 
     win.trigger_tool_action("wheel:toggle:snip:text")
     win.trigger_tool_action("wheel:toggle:snip:color")

@@ -72,10 +72,12 @@ class WheelLayout:
     def __init__(self) -> None:
         self.overrides: dict[str, bool] = {}
         self.custom: list[tuple[str, str]] = []
+        self.macros: list[str] = []  # macro names, kept in sync by PetWindow; slices go last so they only fill free room
 
     def catalog(self, base: list[ToolWheelOption]) -> list[tuple[ToolWheelOption, bool]]:
-        """Every choosable slice with whether it is on: built-ins, opt-in extras, then custom."""
+        """Every choosable slice with whether it is on: built-ins, opt-in extras, custom, then macros."""
         custom = [ToolWheelOption(label, "open", "#C9D1D9", custom_callback(t)) for label, t in self.custom]
+        custom += [ToolWheelOption(name, "macro", "#F2A6E0", f"macro:{name}") for name in self.macros]
         pairs = [(o, True) for o in base] + [(o, False) for o in EXTRA_SLICES] + [(o, True) for o in custom]
         return [(o, self.overrides.get(o.callback_id, default)) for o, default in pairs]
 

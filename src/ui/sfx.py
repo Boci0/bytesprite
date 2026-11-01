@@ -217,6 +217,7 @@ _CUE_NOTES: dict[str, tuple[tuple[float, float], ...]] = {
     "send": ((7, 0.05), (12, 0.09)),
     "reply": ((9, 0.07), (16, 0.16)),
     "error": ((-5, 0.08), (-8, 0.16)),
+    "macro": ((0, 0.04), (4, 0.04), (7, 0.04), (12, 0.12)),
 }
 _cues: dict[str, bytes] = {}
 _WAKE_PAD = bytes(int(SAMPLE_RATE * 0.1) * 2)  # a suspended output swallows its first ~100ms

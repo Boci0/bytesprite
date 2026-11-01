@@ -113,6 +113,8 @@ class PetContextMenu(QMenu):
         recent_files: Sequence[tuple[Path, float]] = (),
         wheel_slices: Sequence[tuple[str, str, bool]] = (),
         wheel_custom: Sequence[str] = (),
+        macros: Sequence[str] = (),
+        double_click_macro: str = "",
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -157,6 +159,36 @@ class PetContextMenu(QMenu):
             self.quick_menu.addAction(q_act)
             self.plugin_actions[cid] = q_act
         self.addMenu(self.quick_menu)
+
+        # Macros: run one, or build chains of quick tools (hotkey Ctrl+Shift+Alt+1..9 in list order)
+        self.macro_menu = style_menu(QMenu("Macros", self))
+
+        def macro_action(label: str, cid: str, menu: QMenu = self.macro_menu) -> QAction:
+            act = QAction(label.replace("&", "&&"), menu)
+            if on_tool_action is not None:
+                act.triggered.connect(lambda _checked=False, c=cid: on_tool_action(c))
+            menu.addAction(act)
+            self.plugin_actions[cid] = act
+            return act
+
+        for idx, name in enumerate(macros, start=1):
+            macro_action(f"{name}	{HOTKEY_LABEL}+{idx}", f"macro:{name}")
+        self.macro_menu.addSeparator()
+        macro_action("New Macro...", "macros:new")
+        if macros:
+            edit_menu = style_menu(QMenu("Edit", self.macro_menu))
+            dbl_menu = style_menu(QMenu("Double-Click Runs", self.macro_menu))
+            remove_menu = style_menu(QMenu("Remove", self.macro_menu))
+            for name in macros:
+                macro_action(name, f"macros:edit:{name}", edit_menu)
+                macro_action(name, f"macros:remove:{name}", remove_menu)
+            for label, name in (("Snip (default)", ""), *((n, n) for n in macros)):
+                d_act = macro_action(label, f"macros:dbl:{name}", dbl_menu)
+                d_act.setCheckable(True)
+                d_act.setChecked(name == double_click_macro)
+            for sub in (edit_menu, dbl_menu, remove_menu):
+                self.macro_menu.addMenu(sub)
+        self.addMenu(self.macro_menu)
 
         # Recent outputs: click reveals the file selected in Explorer
         self.recent_menu = style_menu(QMenu("Recent Files", self))
