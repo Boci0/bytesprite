@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (QAbstractButton, QComboBox, QFileDialog, QFormLayou
                              QVBoxLayout, QWidget)
 
 from src.tools.ai_assist import (BRAVE_KEY_PAGE, BRAVE_URL, KEY_PAGES, MAX_INPUT_CHARS, PRESETS,
-                                 THINKING_LEVELS, AiAssistPlugin, AiJob, AiReply, ModelInfo, ask, chat_messages, delete_key, list_models, load_key, save_key, valid_key,
+                                 THINKING_LEVELS, AiAssistPlugin, AiJob, AiReply, ModelInfo, ToolHost, ask, chat_messages, delete_key, list_models, load_key, save_key, valid_key,
                                  valid_model, validate_base_url)
 from src.ui.context_menu import style_menu
 from src.ui.quick_tools import OcrJob
@@ -63,10 +63,12 @@ def image_data_url(image: QImage) -> str:
     return "data:image/png;base64," + bytes(data.toBase64().data()).decode("ascii")
 
 
-def reply_details(reply: AiReply, asked_model: str, thinking: str) -> str:
-    """One dim line under a reply: the model that answered (and the alias it came through), thinking, tokens."""
+def reply_details(reply: AiReply, asked_model: str, thinking: str, name: str = "") -> str:
+    """One dim line under a reply: the model that answered (and the alias it came through) with its listed
+    name, e.g. the version behind an alias like deepseek-flash, then thinking and tokens."""
     served = reply.model or asked_model
-    parts = [served if served == asked_model else f"{asked_model} > {served}"]
+    parts = [(served if served == asked_model else f"{asked_model} > {served}")
+             + (f" ({name})" if name and name != served else "")]
     if thinking != "off":
         parts.append(f"thinking {thinking}")
     if reply.total_tokens:
@@ -341,7 +343,8 @@ class AiChat(QWidget):
     GAP = 6  # between the pet's sprite and the card
     MAX_H = 560  # tallest card: header, a full thread or Setup, chips and a 5-line draft (picks its side)
 
-    def __init__(self, plugin: AiAssistPlugin, on_attach_screen: Callable[[], None] | None = None) -> None:
+    def __init__(self, plugin: AiAssistPlugin, on_attach_screen: Callable[[], None] | None = None,
+                 tool_host: ToolHost | None = None) -> None:
         super().__init__(None, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
                          | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.NoDropShadowWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
@@ -350,6 +353,7 @@ class AiChat(QWidget):
         self.setFixedWidth(self.WIDTH)
         self._plugin = plugin
         self._on_attach_screen = on_attach_screen
+        self._tool_host = tool_host  # PC tools the model may call (None: web tools only)
         self._history: list[dict[str, str]] = []
         self._attachments: list[Attachment] = []
         self._chips: list[Chip] = []
@@ -802,7 +806,8 @@ class AiChat(QWidget):
         self._asked = (model, thinking)
         job = self._job = AiJob(self)
         job.finished.connect(self._on_done)
-        job.start(lambda: ask(url, key, model, messages, thinking=thinking))
+        host = None if self._testing else self._tool_host
+        job.start(lambda: ask(url, key, model, messages, thinking=thinking, host=host))
         self._set_busy(True)
 
     def _on_done(self, reply: AiReply | None, error: str) -> None:
@@ -817,6 +822,8 @@ class AiChat(QWidget):
             else:
                 served = reply.model if reply is not None and reply.model else self._asked[0]
                 self._set_status(f"Connected: {served} answered. You can chat now.", True)
+                if self._plugin.base_url not in self._models:
+                    self._fetch_models(show=False)
                 self._refresh_title()
                 QTimer.singleShot(900, self._leave_setup_if_ok)
             return
@@ -854,7 +861,7 @@ class AiChat(QWidget):
     def _add_details(self, row: QWidget, reply: AiReply) -> None:
         """Dim line under a reply, plus a Show reasoning toggle when the model returned its thinking."""
         layout = row.layout()
-        info = QLabel(reply_details(reply, *self._asked))
+        info = QLabel(reply_details(reply, *self._asked, name=self._model_name(reply.model or self._asked[0])))
         info.setTextFormat(Qt.TextFormat.PlainText)
         info.setWordWrap(True)
         info.setFont(ui_font(7.5))
@@ -893,22 +900,33 @@ class AiChat(QWidget):
         if p.base_url in self._models or not p.has_key():
             self._show_model_menu(self._models.get(p.base_url, []), "" if p.has_key() else "no key")
             return
-        if self._models_job is not None:
+        self._fetch_models(show=True)
+
+    def _fetch_models(self, show: bool) -> None:
+        """GET /models in the background (free, no tokens); `show` opens the menu when it lands. Without the
+        menu it only fills in display names, since replies name just the alias (deepseek-flash, not its version)."""
+        p = self._plugin
+        if self._models_job is not None or not p.has_key():
             return
         url, key = p.base_url, load_key(p.base_url)
         job = self._models_job = AiJob(self)
-        job.finished.connect(lambda models, error, u=url: self._on_models(u, models, error))
+        job.finished.connect(lambda models, error, u=url: self._on_models(u, models, error, show))
         job.start(lambda: list_models(url, key))
-        self._title.setText("Loading models...")
+        if show:
+            self._title.setText("Loading models...")
 
-    def _on_models(self, url: str, models: list[ModelInfo] | None, error: str) -> None:
+    def _model_name(self, model_id: str) -> str:
+        """The provider's display name for a model id ("" until the list has loaded or when it gives none)."""
+        return next((m.name for m in self._models.get(self._plugin.base_url, []) if m.id == model_id), "")
+
+    def _on_models(self, url: str, models: list[ModelInfo] | None, error: str, show: bool = True) -> None:
         if self._models_job is not None:
             self._models_job.deleteLater()
         self._models_job = None
         if models:
             self._models[url] = models
         self._refresh_title()
-        if url == self._plugin.base_url and self.isVisible():
+        if show and url == self._plugin.base_url and self.isVisible():
             self._show_model_menu(models or [], error or ("" if models else "empty list"))
 
     def _show_model_menu(self, models: list[ModelInfo], error: str = "") -> None:
@@ -1037,7 +1055,11 @@ class AiChat(QWidget):
             f'ByteSprite AI</span>&nbsp;&nbsp;<span style="font-family:\'{FONT_FAMILY}\'; font-size:9pt;'
             f' color:{color};">&#9679; {state}</span>')
         thinking = "" if p.thinking == "off" else f", thinking {p.thinking}"
-        self._title.setText(f"{p.model or 'No model'}{thinking} @ {p.host}  \u25BE")
+        name = self._model_name(p.model)
+        host = f" @ {p.host}" if p.provider == "custom" else ""  # a preset's host is in the tooltip; it cut the line
+        self._title.setText(f"{name or p.model or 'No model'}{thinking}{host}  \u25BE")
+        self._title.setToolTip((f"{name}, requested as {p.model}" if name and name != p.model else p.model)
+                               + f" @ {p.host}. Switch model or thinking level")
 
     def show_setup(self, message: str = "") -> None:
         self._load_setup()
@@ -1063,6 +1085,8 @@ class AiChat(QWidget):
         self._above = None
         if not self._ready():
             self.show_setup("Pick a provider, paste your API key and press Save and test.")
+        if self._ready() and self._plugin.base_url not in self._models:
+            self._fetch_models(show=False)
         self._refresh_title()
         self.show()
         self._relayout()

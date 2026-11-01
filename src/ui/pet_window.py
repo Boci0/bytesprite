@@ -48,6 +48,7 @@ from src.tools.ai_assist import AiAssistPlugin
 from src.tools.macros import MacroBook
 from src.tools.hints import HintsPlugin, Suggestion, foreground_app
 from src.ui.ai_chat import AiChat
+from src.ui.ai_tool_host import AiToolHost
 from src.ui.screen_glow import ScreenGlow, play_screen_glow
 from src.storage.recent_files import RecentFiles
 from src.tools.web_drop import WebImageJob, html_image_src, is_web_image_source, web_image_stem
@@ -1165,7 +1166,8 @@ class PetWindow(QWidget):
         if not isinstance(plugin, AiAssistPlugin):
             return
         if self._ai_chat is None:
-            self._ai_chat = AiChat(plugin, on_attach_screen=lambda: self.trigger_snip("ask"))
+            self._ai_chat = AiChat(plugin, on_attach_screen=lambda: self.trigger_snip("ask"),
+                                   tool_host=AiToolHost(self))
             self._ai_chat.thinking_changed.connect(self._on_ai_thinking)
         elif self._ai_chat.isVisible():
             self._ai_chat.hide()

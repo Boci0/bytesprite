@@ -79,7 +79,13 @@ OpenAI-compatible URL), a model and your API key. The key lives in Windows Crede
 in the settings file. Nothing is sent until you press Enter, and nothing runs in the background.
 
 Attach with `+`, drag-and-drop or paste: text files up to 512 KB go as text, images are read with
-local OCR and only that text is sent, never the pixels. Replies are plain text and are never acted on.
+local OCR and only that text is sent, never the pixels.
+
+While answering, the model can search the web (through DeepSeek's own search when you have a DeepSeek key,
+else an optional Brave Search key) and use a few PC tools: read files in your **Project Folder** (read-only,
+never `.env` or key files), read your clipboard or the text on screen, check the pet's readouts, and run
+safe pet actions, your macros or https links. It cannot write files or run commands. The header shows
+the real model behind an alias, e.g. `DeepSeek-V4.1-Flash` for `deepseek-flash`.
 
 <p align="center">
   <img src="docs/images/moods.png" width="720" alt="Idle, music, focus, spin, sleep and cheer poses">

@@ -714,3 +714,16 @@ def test_setup_remove_buttons_delete_only_their_key(monkeypatch: pytest.MonkeyPa
     assert chat._search_key.placeholderText() == "Optional"
     chat._remove_key.click()
     assert saved == {} and chat._key.placeholderText() == "Paste API key"
+
+
+def test_header_and_reply_line_name_the_version_behind_an_alias(monkeypatch: pytest.MonkeyPatch, api: str) -> None:
+    from src.ui.ai_chat import reply_details
+
+    _app, plugin, chat = _chat(monkeypatch, api)
+    plugin.model = "deepseek-flash"
+    chat._models[plugin.base_url] = [ai_assist.ModelInfo("deepseek-flash", "DeepSeek-V4.1-Flash")]
+    chat._refresh_title()
+    assert chat._title.text().startswith("DeepSeek-V4.1-Flash  ") and "requested as deepseek-flash" in chat._title.toolTip()
+    reply = ai_assist.AiReply(text="hi", model="deepseek-flash", total_tokens=3, prompt_tokens=1, completion_tokens=2)
+    line = reply_details(reply, "deepseek-flash", "off", name=chat._model_name("deepseek-flash"))
+    assert line.startswith("deepseek-flash (DeepSeek-V4.1-Flash)  -  3 tokens")
