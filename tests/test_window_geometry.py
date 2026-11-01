@@ -432,3 +432,36 @@ def test_tool_wheel_slices_and_web_search_dispatch(qapp: QApplication, monkeypat
     finally:
         win.shutdown()
         win.close()
+
+
+def test_topmost_yields_to_held_buttons_and_foreign_topmost_windows() -> None:
+    from src.ui.pet_window import yield_topmost
+
+    class User32:
+        def __init__(self, buttons=(), fg=10, under=20, topmost=()):
+            self.buttons, self.fg, self.under, self.topmost = set(buttons), fg, under, set(topmost)
+
+        def GetAsyncKeyState(self, vk):
+            return 0x8000 if vk in self.buttons else 0
+
+        def GetCursorPos(self, _pt):
+            return 1
+
+        def WindowFromPoint(self, _pt):
+            return self.under + 1  # a child; GetAncestor gives its top-level window
+
+        def GetAncestor(self, hwnd, _flag):
+            return hwnd - 1
+
+        def GetForegroundWindow(self):
+            return self.fg
+
+        def GetWindowLongW(self, hwnd, _index):
+            return 0x8 if hwnd in self.topmost else 0
+
+    assert not yield_topmost({99}, User32())  # a normal app in front: keep the pet on top
+    assert yield_topmost({99}, User32(buttons={0x01}))  # dragging a window toward a snap zone
+    assert yield_topmost({99}, User32(buttons={0x04}))
+    assert yield_topmost({99}, User32(topmost={10}))  # Snap Assist / Alt+Tab / Start has focus
+    assert yield_topmost({99}, User32(topmost={20}))  # a topmost flyout under the cursor
+    assert not yield_topmost({10, 20}, User32(topmost={10, 20}))  # our own chat or wheel never blocks it

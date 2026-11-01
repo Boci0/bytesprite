@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import math
+from ctypes import wintypes
 import os
 import random
 import struct
@@ -97,6 +98,28 @@ class ScreenRect:
         elif py > self.bottom:
             dy = py - self.bottom
         return dx * dx + dy * dy
+
+
+def yield_topmost(own: set[int], u32: object | None = None) -> bool:
+    """True while re-raising the pet would cover something the user is working with.
+
+    That is: a mouse button is held (dragging a window into a snap zone), or the foreground window or the
+    top-level window under the cursor is someone else's topmost window (Snap Assist, Alt+Tab, Task View,
+    Start, the snap layouts flyout, other apps' always-on-top windows).
+    """
+    if u32 is None:
+        u32 = ctypes.windll.user32
+        u32.WindowFromPoint.argtypes = [wintypes.POINT]
+        for fn in (u32.WindowFromPoint, u32.GetForegroundWindow, u32.GetAncestor):
+            fn.restype = ctypes.c_void_p
+        u32.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+        u32.GetWindowLongW.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    if any(u32.GetAsyncKeyState(vk) & 0x8000 for vk in (0x01, 0x02, 0x04)):  # left, right, middle button
+        return True
+    pt = wintypes.POINT()
+    under = u32.GetAncestor(u32.WindowFromPoint(pt), 2) if u32.GetCursorPos(ctypes.byref(pt)) else None  # GA_ROOT
+    return any(hwnd and hwnd not in own and u32.GetWindowLongW(hwnd, -20) & 0x8  # GWL_EXSTYLE, WS_EX_TOPMOST
+               for hwnd in (u32.GetForegroundWindow(), under))
 
 
 def clamp_position_to_screens(
@@ -423,11 +446,14 @@ class PetWindow(QWidget):
             return
         if QApplication.activePopupWidget() is not None or QToolTip.isVisible():  # raising would cover it
             return
+        wheels = self._open_wheels()
+        own = {int(w.winId()) for w in (self, *wheels, self._ai_chat) if w is not None and w.isVisible()}
+        if yield_topmost(own):  # the next tick tries again
+            return
         # HWND_TOPMOST, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE: re-raise without stealing focus
         set_pos = ctypes.windll.user32.SetWindowPos
         set_pos.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
                             ctypes.c_int, ctypes.c_int, ctypes.c_uint]
-        wheels = self._open_wheels()
         if not wheels:
             set_pos(int(self.winId()), -1, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)
         for wheel in wheels:
