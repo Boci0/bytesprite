@@ -7,3 +7,8 @@ __pycache__/
 dist/
 build/
 *.egg-info/
+
+# Internal agent docs (never public)
+AGENTS.md
+CONTEXT.md
+CLAUDE.md

@@ -113,8 +113,6 @@ python -m venv .venv
 .\.venv\Scripts\pytest.exe
 ```
 
-`CONTEXT.md` is the architecture and invariants record; read it before changing code.
-
 ### Releasing
 
 1. Bump `__version__` in `src/__init__.py` (the single version source) and commit.
