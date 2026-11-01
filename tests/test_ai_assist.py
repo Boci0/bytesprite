@@ -246,7 +246,10 @@ def test_plugin_settings_persist_without_the_key(monkeypatch: pytest.MonkeyPatch
     old.load_dict({"provider": "deepseek", "model": "deepseek-chat", "low_effort": True})  # saved before levels
     assert (old.model, old.thinking) == ("deepseek-chat", "low")
     labels = [i.label for i in plugin.get_menu_items()]
-    assert labels[0].startswith("Open AI Chat") and "Remove API Key" in labels
+    assert labels[0].startswith("Open AI Chat") and "Remove API Key" in labels and "Remove Search Key" in labels
+    gone = []
+    monkeypatch.setattr(ai_assist, "delete_key", lambda url: gone.append(url) or True)
+    assert plugin.execute_action("ai:forget_search")[1] == "KEY GONE" and gone == [ai_assist.BRAVE_URL]
 
 
 def _chat(monkeypatch: pytest.MonkeyPatch, api: str):
@@ -590,6 +593,23 @@ def test_run_tool_rejects_bad_calls_and_anthropic_params() -> None:
     assert ai_assist.PRESETS["anthropic"][1] == "https://api.anthropic.com/v1"
 
 
+def test_duckduckgo_bot_check_is_an_error_not_no_results(monkeypatch: pytest.MonkeyPatch) -> None:
+    import io
+
+    monkeypatch.setattr(ai_assist, "load_key", lambda _u: "")
+    monkeypatch.setattr(ai_assist._OPENER, "open", lambda *_a, **_k: io.BytesIO(b'<form id="challenge-form">anomaly</form>'))
+    assert "Brave Search key" in ai_assist._run_tool("web_search", '{"query": "x"}')
+
+
+def test_deepseek_search_used_first_when_its_key_saved(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = []
+    monkeypatch.setattr(ai_assist, "load_key", lambda u: "ds-key" if u == ai_assist.PRESETS["deepseek"][1] else "brave")
+    monkeypatch.setattr(ai_assist, "_request", lambda *a: seen.append(a) or {"results": [
+        {"title": "Py 3.14", "url": "https://python.org", "summary": "Released", "snippet": "short"}, "junk"]})
+    assert ai_assist.web_search("py 3.14") == "Py 3.14\nhttps://python.org\nReleased"
+    assert seen[0][1:4] == ("ds-key", "/tools/search", {"query": "py 3.14", "count": 5})
+
+
 def test_brave_search_used_when_key_saved(api: str, monkeypatch: pytest.MonkeyPatch) -> None:
     class Brave(BaseHTTPRequestHandler):
         seen: list = []
@@ -609,7 +629,7 @@ def test_brave_search_used_when_key_saved(api: str, monkeypatch: pytest.MonkeyPa
     server = HTTPServer(("127.0.0.1", 0), Brave)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     monkeypatch.setattr(ai_assist, "BRAVE_URL", f"http://127.0.0.1:{server.server_port}/search")
-    monkeypatch.setattr(ai_assist, "load_key", lambda _u: "brave-key-123")
+    monkeypatch.setattr(ai_assist, "load_key", lambda u: "brave-key-123" if u == ai_assist.BRAVE_URL else "")
     try:
         assert ai_assist.web_search("py 3.14") == "Py 3.14\nhttps://python.org\nReleased & out"
     finally:
@@ -680,3 +700,17 @@ def test_claude_native_request_pause_turn_sources_and_thinking(api: str, monkeyp
     assert _Api.seen[2]["body"]["messages"][-1]["content"] == [
         {"type": "text", "text": "plain", "cache_control": {"type": "ephemeral"}}]
     assert "thinking" not in _Api.seen[2]["body"] and "output_config" not in _Api.seen[2]["body"]
+
+
+def test_setup_remove_buttons_delete_only_their_key(monkeypatch: pytest.MonkeyPatch, api: str) -> None:
+    _app, plugin, chat = _chat(monkeypatch, api)
+    saved = {api: KEY, ai_assist.BRAVE_URL: KEY}
+    monkeypatch.setattr("src.ui.ai_chat.load_key", lambda url: saved.get(url, ""))
+    monkeypatch.setattr("src.ui.ai_chat.delete_key", lambda url: saved.pop(url, None) is not None)
+    chat._load_setup()
+    assert chat._remove_key.isEnabled() and chat._remove_search.isEnabled()
+    chat._remove_search.click()
+    assert list(saved) == [api] and not chat._remove_search.isEnabled() and chat._remove_key.isEnabled()
+    assert chat._search_key.placeholderText() == "Optional"
+    chat._remove_key.click()
+    assert saved == {} and chat._key.placeholderText() == "Paste API key"

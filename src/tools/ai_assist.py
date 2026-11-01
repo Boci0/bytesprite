@@ -519,8 +519,9 @@ def _brave_search(key: str, query: str) -> str:
     try:
         with _OPENER.open(req, timeout=TIMEOUT_S) as resp:
             data = json.loads(resp.read(MAX_SEARCH_BYTES))
-    except urllib.error.HTTPError as exc:
-        raise ValueError(_HTTP_ERRORS.get(exc.code, f"http {exc.code}")) from None
+    except urllib.error.HTTPError as exc:  # Brave answers a bad key with 422, not 401
+        raise ValueError("Brave Search key invalid, save a new one" if exc.code in (401, 403, 422)
+                         else _HTTP_ERRORS.get(exc.code, f"http {exc.code}")) from None
     except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException):
         raise ValueError("network") from None
     except ValueError:
@@ -531,9 +532,21 @@ def _brave_search(key: str, query: str) -> str:
                       for r in (results or [])[:MAX_SEARCH_RESULTS] if isinstance(r, dict)) or "no results"
 
 
+def _deepseek_search(key: str, query: str) -> str:
+    """DeepSeek's own Search API ($0.75 per 1,000 searches on the DeepSeek balance); summary is its model-sized text."""
+    data = _request(PRESETS["deepseek"][1], key, "/tools/search", {"query": query[:128], "count": MAX_SEARCH_RESULTS},
+                    TIMEOUT_S)
+    results = data.get("results") if isinstance(data, dict) else None
+    return "\n\n".join(f"{r.get('title', '')}\n{r.get('url', '')}\n{r.get('summary') or r.get('snippet', '')}"
+                       for r in (results or [])[:MAX_SEARCH_RESULTS] if isinstance(r, dict)) or "no results"
+
+
 def web_search(query: str) -> str:
-    """Brave Search when the user saved a key for it, else DuckDuckGo's HTML page (no key, often CAPTCHA'd). Result links are unwrapped from its redirector and
+    """DeepSeek's Search API when a DeepSeek key is saved, else Brave Search when the user saved a key for it, else
+    DuckDuckGo's HTML page (no key, often CAPTCHA'd). Result links are unwrapped from its redirector and
     shown only as text; nothing is fetched from them. shortcut: HTML scraping breaks if DDG changes markup."""
+    if deepseek := load_key(PRESETS["deepseek"][1]):
+        return _deepseek_search(deepseek, query)
     if brave := load_key(BRAVE_URL):
         return _brave_search(brave, query)
     req = urllib.request.Request("https://html.duckduckgo.com/html/?q=" + quote_plus(query),
@@ -543,6 +556,8 @@ def web_search(query: str) -> str:
             page = resp.read(MAX_SEARCH_BYTES).decode("utf-8", "replace")
     except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException):
         raise ValueError("network") from None
+    if "anomaly" in page.lower() and "result__a" not in page:  # DDG's bot-check page, not an empty result
+        raise ValueError("DuckDuckGo blocked the search; add a free Brave Search key in AI Chat Setup")
     rows = []
     for href, title, snippet in _RESULT_RE.findall(page)[:MAX_SEARCH_RESULTS]:
         url = parse_qs(urlsplit(html.unescape(href)).query).get("uddg", [""])[0]
@@ -663,11 +678,14 @@ class AiAssistPlugin:
         return [
             ToolMenuItem(label=f"Open AI Chat\t{HOTKEY_LABEL}+A", callback_id="ai:chat", submenu=sub),
             ToolMenuItem(label="Remove API Key", callback_id="ai:forget", enabled=self.has_key(), submenu=sub),
+            ToolMenuItem(label="Remove Search Key", callback_id="ai:forget_search",
+                         enabled=bool(load_key(BRAVE_URL)), submenu=sub),
         ]
 
     def execute_action(self, callback_id: str) -> tuple[bool, str, str]:
-        if callback_id == "ai:forget":
-            return (True, "KEY GONE" if delete_key(self.base_url) else "NO KEY", "#8A9AF2")
+        if callback_id in ("ai:forget", "ai:forget_search"):
+            url = self.base_url if callback_id == "ai:forget" else BRAVE_URL
+            return (True, "KEY GONE" if delete_key(url) else "NO KEY", "#8A9AF2")
         return (False, "", "")
 
     def to_dict(self) -> dict[str, Any]:

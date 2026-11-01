@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (QAbstractButton, QComboBox, QFileDialog, QFormLayou
                              QVBoxLayout, QWidget)
 
 from src.tools.ai_assist import (BRAVE_KEY_PAGE, BRAVE_URL, KEY_PAGES, MAX_INPUT_CHARS, PRESETS,
-                                 THINKING_LEVELS, AiAssistPlugin, AiJob, AiReply, ModelInfo, ask, chat_messages, list_models, load_key, save_key, valid_key,
+                                 THINKING_LEVELS, AiAssistPlugin, AiJob, AiReply, ModelInfo, ask, chat_messages, delete_key, list_models, load_key, save_key, valid_key,
                                  valid_model, validate_base_url)
 from src.ui.context_menu import style_menu
 from src.ui.quick_tools import OcrJob
@@ -479,19 +479,26 @@ class AiChat(QWidget):
         self._model.setPlaceholderText("model name, e.g. deepseek-flash")
         self._key = QLineEdit()
         self._key.setEchoMode(QLineEdit.EchoMode.Password)
+        self._key.setToolTip("Stored in Windows Credential Manager, never in state.json")
         self._get_key = QPushButton("Get a key")
         self._get_key.clicked.connect(self._open_key_page)
+        self._remove_key = QPushButton("Remove")
+        self._remove_key.clicked.connect(lambda: self._forget_key(False))
         key_row = QHBoxLayout()
         key_row.addWidget(self._key, 1)
         key_row.addWidget(self._get_key)
+        key_row.addWidget(self._remove_key)
         self._search_key = QLineEdit()
         self._search_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self._search_key.setToolTip("Brave Search API key (free tier). Without it, web search uses DuckDuckGo, which often blocks it.")
+        self._search_key.setToolTip("Optional Brave Search API key (free tier). A saved DeepSeek key searches through DeepSeek first; with neither, web search uses DuckDuckGo, which often blocks it.")
         get_search = QPushButton("Get a key")
         get_search.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(BRAVE_KEY_PAGE)))
+        self._remove_search = QPushButton("Remove")
+        self._remove_search.clicked.connect(lambda: self._forget_key(True))
         search_row = QHBoxLayout()
         search_row.addWidget(self._search_key, 1)
         search_row.addWidget(get_search)
+        search_row.addWidget(self._remove_search)
         self._thinking = QComboBox()
         for level in THINKING_LEVELS:
             self._thinking.addItem(level.title(), level)
@@ -503,7 +510,7 @@ class AiChat(QWidget):
         self._save_btn.clicked.connect(self._save_and_test)
         for widget in (self._provider, self._url, self._model, self._key, self._search_key, self._thinking):
             widget.setStyleSheet(_FIELD_CSS)
-        for widget in (self._get_key, get_search, self._save_btn):
+        for widget in (self._get_key, get_search, self._remove_key, self._remove_search, self._save_btn):
             widget.setStyleSheet(_BUTTON_CSS)
             widget.setCursor(Qt.CursorShape.PointingHandCursor)
         for row_label, field in (("Provider", self._provider), ("Base URL", self._url), ("Model", self._model)):
@@ -522,8 +529,27 @@ class AiChat(QWidget):
         label.setStyleSheet(f"color: {TEXT_DIM_HEX};")
         return label
 
-    def _key_placeholder(self, has_key: bool) -> None:
-        self._key.setPlaceholderText("Saved in Windows Credential Manager" if has_key else "Paste your API key")
+    def _refresh_keys(self) -> None:
+        """Short placeholders (they must fit beside two buttons) and Remove only when a key is saved."""
+        try:
+            has_key = bool(load_key(validate_base_url(self._url.text())))
+        except ValueError:
+            has_key = False
+        has_search = bool(load_key(BRAVE_URL))
+        self._key.setPlaceholderText("Saved" if has_key else "Paste API key")
+        self._search_key.setPlaceholderText("Saved" if has_search else "Optional")
+        self._remove_key.setEnabled(has_key)
+        self._remove_search.setEnabled(has_search)
+
+    def _forget_key(self, search: bool) -> None:
+        try:
+            url = BRAVE_URL if search else validate_base_url(self._url.text())
+        except ValueError:
+            return
+        delete_key(url)
+        self._refresh_keys()
+        self._refresh_title()
+        self._set_status("Search key removed." if search else "API key removed.")
 
     def _load_setup(self) -> None:
         p = self._plugin
@@ -534,10 +560,8 @@ class AiChat(QWidget):
         self._url.setEnabled(p.provider == "custom")
         self._model.setText(p.model)
         self._key.clear()
-        self._key_placeholder(p.has_key())
         self._search_key.clear()
-        self._search_key.setPlaceholderText("Brave Search key (saved)" if load_key(BRAVE_URL)
-                                            else "Optional: Brave Search key for web search")
+        self._refresh_keys()
         self._get_key.setEnabled(p.provider in KEY_PAGES)
         self._thinking.setCurrentIndex(max(0, self._thinking.findData(p.thinking)))
 
@@ -549,10 +573,7 @@ class AiChat(QWidget):
             self._model.setText(model)
         self._url.setEnabled(key == "custom")
         self._get_key.setEnabled(key in KEY_PAGES)
-        try:
-            self._key_placeholder(bool(load_key(validate_base_url(self._url.text()))))
-        except ValueError:
-            self._key_placeholder(False)
+        self._refresh_keys()
 
     def _open_key_page(self) -> None:
         page = KEY_PAGES.get(self._provider.currentData())
@@ -584,7 +605,6 @@ class AiChat(QWidget):
                 self._set_status("That search key could not be saved.", False)
                 return
             self._search_key.clear()
-            self._search_key.setPlaceholderText("Brave Search key (saved)")
         key = self._key.text().strip()
         if key:
             if not valid_key(key):
@@ -603,7 +623,7 @@ class AiChat(QWidget):
         else:
             p.set_custom_url(url)
         p.model, p.thinking = model, self._thinking.currentData()
-        self._key_placeholder(True)
+        self._refresh_keys()
         self._refresh_title()
         self._set_status("Saved. Testing with a tiny request...")
         self._testing = True

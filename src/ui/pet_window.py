@@ -37,7 +37,7 @@ from PyQt6.QtGui import (
     QPen,
     QPixmap,
 )
-from PyQt6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMenu, QWidget
+from PyQt6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMenu, QToolTip, QWidget
 
 from src.engine.models import PetState, PetStats
 from src.engine.pet_state import PetStateMachine
@@ -419,7 +419,7 @@ class PetWindow(QWidget):
     def _reassert_topmost(self) -> None:
         if sys.platform != "win32" or not self._always_on_top or not self.isVisible():
             return
-        if QApplication.activePopupWidget() is not None:  # raising over an open menu or dropdown hides it
+        if QApplication.activePopupWidget() is not None or QToolTip.isVisible():  # raising would cover it
             return
         # HWND_TOPMOST, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE: re-raise without stealing focus
         set_pos = ctypes.windll.user32.SetWindowPos
