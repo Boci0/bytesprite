@@ -15,7 +15,7 @@ from typing import Any
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 from PyQt6.QtGui import QCursor, QGuiApplication, QImage
 
-from src.tools.ai_tools import FILE_TOOLS, PET_ACTIONS, TOOL_SPECS, run_file_tool
+from src.tools.ai_tools import FILE_TOOLS, PET_ACTIONS, TOOL_SPECS, load_skill, run_file_tool, skills_dir
 from src.tools.macros import parse_recipe
 from src.ui.quick_tools import ocr_image_file
 
@@ -39,6 +39,8 @@ class AiToolHost(QObject):
         if name in FILE_TOOLS:
             project = self._win._state_machine.registry.get_plugin("project")
             return run_file_tool(getattr(project, "repo", None), name, args)
+        if name == "load_skill":
+            return load_skill(skills_dir(), args.get("name"))
         if name == "read_screen":
             image = self._on_gui(self._grab_screen)
             return self._ocr(image) if isinstance(image, QImage) and not image.isNull() else "error: no screen grab"

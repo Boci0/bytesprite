@@ -10,7 +10,9 @@ from types import SimpleNamespace
 import pytest
 
 from src.tools import ai_assist
-from src.tools.ai_tools import TOOL_SPECS, run_file_tool
+from src.tools.ai_assist import chat_messages
+from src.tools.ai_tools import (MAX_SKILL_CHARS, MAX_SKILL_DESC, MAX_SKILLS, TOOL_SPECS, list_skills, load_skill,
+                                parse_skill, run_file_tool, skills_dir, skills_prompt)
 
 
 @pytest.fixture()
@@ -147,3 +149,52 @@ def test_tool_host_runs_pet_tools_on_the_qt_thread(repo: Path) -> None:
     assert results["action"].startswith("done") and triggered == ["pomodoro:toggle"]
     assert "not an allowed" in results["denied"] and started == ["Grab"] and "AI chat itself" in results["asky"]
     assert "https" in results["link"] and results["files"] == "src/app.py"
+
+
+def _skill(root: Path, name: str, text: str) -> None:
+    (root / name).mkdir(parents=True)
+    (root / name / "SKILL.md").write_text(text, encoding="utf-8")
+
+
+def test_parse_skill_frontmatter() -> None:
+    meta, body = parse_skill('\ufeff---\nname: tidy\ndescription: "Tidy imports"\n---\n\nSort them.\n')
+    assert meta == {"name": "tidy", "description": "Tidy imports"} and body == "Sort them."
+    assert parse_skill("no frontmatter") == ({}, "no frontmatter")
+    assert parse_skill("---\nname: x\nnever closed") == ({}, "---\nname: x\nnever closed")
+
+
+def test_skills_list_is_capped_and_lands_in_the_system_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    root = skills_dir()
+    assert skills_prompt(root) == "" and "load_skill" not in chat_messages([{"role": "user", "content": "hi"}])[0][
+        "content"]
+    for i in range(MAX_SKILLS + 5):
+        _skill(root, f"s{i:02d}", f"---\ndescription: does {i} " + "x" * 500 + "\n---\nbody")
+    (root / "no_md").mkdir()
+    listed = list_skills(root)
+    assert len(listed) == MAX_SKILLS and listed[0][0] == "s00" and len(listed[0][1]) == MAX_SKILL_DESC
+    system = chat_messages([{"role": "user", "content": "hi"}])[0]["content"]
+    assert "load_skill" in system and "- s00: does 0" in system and "s34" not in system
+
+
+def test_load_skill_returns_listed_bodies_only(tmp_path: Path) -> None:
+    root = tmp_path / "skills"
+    _skill(root, "tidy", "---\nname: tidy\ndescription: d\n---\nSort imports.\n")
+    _skill(root, "huge", "---\ndescription: d\n---\n" + "y" * (MAX_SKILL_CHARS + 50))
+    (tmp_path / "secret").mkdir()
+    (tmp_path / "secret" / "SKILL.md").write_text("private", encoding="utf-8")
+    assert load_skill(root, " tidy ") == "Sort imports."
+    assert load_skill(root, "huge").endswith("(skill cut off)") and len(load_skill(root, "huge")) < MAX_SKILL_CHARS + 30
+    for bad in ("../secret", "..", str(tmp_path / "secret"), "tidy/../../secret", None, 3):
+        assert load_skill(root, bad).startswith("error: no such skill. Skills: huge, tidy")
+    assert load_skill(tmp_path / "missing", "tidy") == "error: no such skill. Skills: none"
+    assert any(s["function"]["name"] == "load_skill" for s in TOOL_SPECS)
+
+
+def test_host_runs_load_skill(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from src.ui import ai_tool_host
+
+    _skill(tmp_path, "tidy", "---\ndescription: d\n---\nSort imports.")
+    monkeypatch.setattr(ai_tool_host, "skills_dir", lambda: tmp_path)
+    host = SimpleNamespace(_win=None)
+    assert ai_tool_host.AiToolHost.run(host, "load_skill", {"name": "tidy"}) == "Sort imports."
+    assert ai_assist._run_tool("load_skill", '{"name": "tidy"}', _Host()) == "ok"  # routed to the host

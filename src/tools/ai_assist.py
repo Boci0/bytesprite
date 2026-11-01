@@ -41,7 +41,7 @@ from urllib.parse import parse_qs, quote_plus, urljoin, urlsplit
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from src.engine.models import CompanionState, HudBar, HudData, ToolMenuItem
-from src.tools.ai_tools import LOCAL_DATA_TOOLS
+from src.tools.ai_tools import LOCAL_DATA_TOOLS, skills_dir, skills_prompt
 
 # key: (menu label, base URL, default model; '' means the user must pick one)
 PRESETS: dict[str, tuple[str, str, str]] = {
@@ -244,7 +244,9 @@ def chat_messages(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
             {"type": "text", "text": content}, *({"type": "image_url", "image_url": {"url": u}} for u in images),
         ] if images else content})
         total += len(content)
-    return [{"role": "system", "content": f"{SYSTEM_PROMPT} Today is {date.today()}."}, *reversed(kept)]
+    system = f"{SYSTEM_PROMPT} Today is {date.today()}."
+    skills = skills_prompt(skills_dir())
+    return [{"role": "system", "content": f"{system}\n\n{skills}" if skills else system}, *reversed(kept)]
 
 
 def is_deepseek(base_url: str) -> bool:
@@ -747,6 +749,7 @@ class AiAssistPlugin:
         sub = self.SUBMENU_NAME
         return [
             ToolMenuItem(label=f"Open AI Chat\t{HOTKEY_LABEL}+A", callback_id="ai:chat", submenu=sub),
+            ToolMenuItem(label="Open Skills Folder", callback_id="ai:skills", submenu=sub),
             ToolMenuItem(label="Remove API Key", callback_id="ai:forget", enabled=self.has_key(), submenu=sub),
             ToolMenuItem(label="Remove Search Key", callback_id="ai:forget_search",
                          enabled=bool(load_key(BRAVE_URL)), submenu=sub),

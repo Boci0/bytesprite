@@ -246,7 +246,7 @@ def test_plugin_settings_persist_without_the_key(monkeypatch: pytest.MonkeyPatch
     old.load_dict({"provider": "deepseek", "model": "deepseek-chat", "low_effort": True})  # saved before levels
     assert (old.model, old.thinking) == ("deepseek-chat", "low")
     labels = [i.label for i in plugin.get_menu_items()]
-    assert labels[0].startswith("Open AI Chat") and "Remove API Key" in labels and "Remove Search Key" in labels
+    assert labels[0].startswith("Open AI Chat") and "Open Skills Folder" in labels and "Remove API Key" in labels and "Remove Search Key" in labels
     gone = []
     monkeypatch.setattr(ai_assist, "delete_key", lambda url: gone.append(url) or True)
     assert plugin.execute_action("ai:forget_search")[1] == "KEY GONE" and gone == [ai_assist.BRAVE_URL]

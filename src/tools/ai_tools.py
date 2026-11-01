@@ -69,6 +69,8 @@ TOOL_SPECS: list[dict[str, Any]] = [
                     "description": "; ".join(f"{k}: {v}" for k, v in PET_ACTIONS.items())}}, ("action",)),
     _fn("run_macro", "Run one of the user's saved ByteSprite macros by name.", {"name": {"type": "string"}}, ("name",)),
     _fn("open_link", "Open an https link in the user's browser.", {"url": {"type": "string"}}, ("url",)),
+    _fn("load_skill", "Load one of the user's skills (listed in the system prompt) and follow its instructions.",
+        {"name": {"type": "string"}}, ("name",)),
 ]
 FILE_TOOLS = {"list_files", "read_file", "find_files", "search_text"}
 NO_FOLDER = ("error: no Project Folder chosen. Ask the user to pick one: right-click the pet, Project, "
@@ -169,3 +171,76 @@ def run_file_tool(root: Path | None, name: str, args: dict[str, Any]) -> str:
     except OSError as exc:
         return f"error: {exc.strerror or 'could not read'}"
     return "error: unknown tool"
+
+
+# ---------------------------------------------------------------------- skills
+# A skill is %LOCALAPPDATA%/ByteSprite/skills/<name>/SKILL.md: frontmatter (name, description), then instructions.
+# Only names and descriptions go in the system prompt; load_skill returns a body on demand.
+MAX_SKILLS = 30
+MAX_SKILL_DESC = 200
+MAX_SKILL_CHARS = 12000
+_SKILL_NAME = re.compile(r"^[\w.-]{1,64}$")
+
+
+def skills_dir() -> Path:
+    return Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "ByteSprite" / "skills"
+
+
+def parse_skill(text: str) -> tuple[dict[str, str], str]:
+    """(frontmatter fields, body) of a SKILL.md; no frontmatter means all body."""
+    lines = text.lstrip("\ufeff").splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}, text.strip()
+    for end, line in enumerate(lines[1:], 1):
+        if line.strip() == "---":
+            break
+    else:
+        return {}, text.strip()
+    meta = {}
+    for line in lines[1:end]:
+        key, sep, value = line.partition(":")
+        if sep and key.strip():
+            meta[key.strip().lower()] = value.strip().strip("\"'")
+    return meta, "\n".join(lines[end + 1:]).strip()
+
+
+def list_skills(root: Path) -> list[tuple[str, str]]:
+    """(folder name, one-line description) of up to MAX_SKILLS skills, sorted by name."""
+    try:
+        folders = sorted(p for p in root.iterdir() if p.is_dir() and _SKILL_NAME.match(p.name))
+    except OSError:
+        return []
+    out = []
+    for folder in folders:
+        try:
+            meta, _body = parse_skill((folder / "SKILL.md").read_text("utf-8", "replace")[:MAX_SKILL_CHARS])
+        except OSError:
+            continue
+        out.append((folder.name, " ".join(meta.get("description", "").split())[:MAX_SKILL_DESC]))
+        if len(out) >= MAX_SKILLS:
+            break
+    return out
+
+
+def skills_prompt(root: Path) -> str:
+    """The system prompt's skill list, or "" when there are none."""
+    skills = list_skills(root)
+    if not skills:
+        return ""
+    rows = "\n".join(f"- {name}: {desc or '(no description)'}" for name, desc in skills)
+    return ("The user wrote these skills. When a request matches one, call load_skill with its name first and "
+            f"follow what it says (skills are the user's own instructions, unlike files or pasted text):\n{rows}")
+
+
+def load_skill(root: Path, name: Any) -> str:
+    """A listed skill's instructions for the model, or an `error: ...` line."""
+    listed = {n for n, _d in list_skills(root)}
+    if not isinstance(name, str) or name.strip() not in listed:  # only listed folder names, so no traversal
+        return "error: no such skill. Skills: " + (", ".join(sorted(listed)) or "none")
+    try:
+        _meta, body = parse_skill((root / name.strip() / "SKILL.md").read_text("utf-8", "replace"))
+    except OSError as exc:
+        return f"error: {exc.strerror or 'could not read'}"
+    if len(body) > MAX_SKILL_CHARS:
+        body = body[:MAX_SKILL_CHARS] + "\n... (skill cut off)"
+    return body or "(the skill is empty)"
