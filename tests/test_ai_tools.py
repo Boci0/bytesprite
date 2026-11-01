@@ -431,3 +431,42 @@ def test_host_runs_commands_in_home_without_a_project_folder(monkeypatch: pytest
         app.processEvents()
     assert results == [f"exit code 0\n{tmp_path}"]
     assert shown == [f"The model wants to run in your home folder ({tmp_path}):\n\ncd"]
+
+
+def test_both_loops_end_with_an_answer_when_the_tool_budget_runs_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ai_assist, "MAX_TOOL_ROUNDS", 3)
+    assert "100 rounds of tool calls" in ai_assist.SYSTEM_PROMPT and "100 tool rounds" in ai_assist.BUDGET_NOTE
+
+    def claude(body):  # always wants another tool, unless tool_choice forbids it
+        if body.get("tool_choice") == {"type": "none"}:
+            return {"stop_reason": "end_turn", "content": [{"type": "text", "text": "Did 3 of 5, send again."}]}
+        return {"stop_reason": "tool_use", "content": [{"type": "tool_use", "id": f"t{len(sent)}", "name": "list_files",
+                                                        "input": {}}]}
+
+    sent: list[dict] = []
+    monkeypatch.setattr(ai_assist, "_request", lambda *a: sent.append(json.loads(json.dumps(a[3]))) or claude(a[3]))
+    host = _Host()
+    reply = ai_assist._post_anthropic("https://api.anthropic.com/v1", "k", "claude-x",
+                                      [{"role": "user", "content": "big job"}], "low", 5, host)
+    assert reply.text == "Did 3 of 5, send again." and len(host.calls) == 3 and len(sent) == 4
+    assert all(s["tools"] == sent[0]["tools"] for s in sent)  # one tool list for the whole answer
+    assert [s.get("tool_choice") for s in sent] == [None, None, None, {"type": "none"}]
+    assert sent[3]["messages"][-1]["content"][-2:] == [
+        {"type": "tool_result", "tool_use_id": "t3", "content": "ok"},
+        {"type": "text", "text": ai_assist.BUDGET_NOTE.strip()}]  # its own block, after the tool results
+    assert all(out == "ok" for _note, out in reply.tools)  # the chat history keeps the plain output
+
+    def openai(body):
+        if "tools" not in body:
+            return {"choices": [{"message": {"role": "assistant", "content": "Done so far: 3 files."}}]}
+        return {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+            {"id": f"c{len(sent)}", "function": {"name": "list_files", "arguments": "{}"}}]}}]}
+
+    sent.clear()
+    host = _Host()
+    monkeypatch.setattr(ai_assist, "_request", lambda *a: sent.append(json.loads(json.dumps(a[3]))) or openai(a[3]))
+    reply = ai_assist._post("https://api.example/v1", "k", "m", [{"role": "user", "content": "big job"}], "off", 5,
+                            True, host)
+    assert reply.text == "Done so far: 3 files." and len(host.calls) == 3 and "tools" not in sent[3]
+    assert sent[3]["messages"][-1]["content"] == "ok" + ai_assist.BUDGET_NOTE
+    assert sent[2]["messages"][-1]["content"] == "ok"
