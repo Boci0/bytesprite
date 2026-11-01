@@ -2,7 +2,7 @@
 
     python scripts/release.py keygen            create the signing key (once) and print its public key
     python scripts/release.py build vX.Y.Z      dist/bytesprite.zip + .sig from a clean git HEAD
-    python scripts/release.py publish vX.Y.Z    build, then `gh release create` with both files
+    python scripts/release.py publish vX.Y.Z    build, tag HEAD, push branch + tag, then `gh release create`
 
 The private key lives at ~/.bytesprite-signing/release_ed25519.key, outside the repo, and must
 never be committed or uploaded. Back it up offline: losing it means installed copies can only be
@@ -74,7 +74,19 @@ def build(tag: str) -> tuple[Path, Path]:
 
 def publish(tag: str) -> None:
     zip_path, sig_path = build(tag)
-    subprocess.run(["gh", "release", "create", tag, "--generate-notes", str(zip_path), str(sig_path)],
+    head = git("rev-parse", "HEAD").strip()
+    tagged = subprocess.run(["git", "rev-parse", "-q", "--verify", f"refs/tags/{tag}^{{commit}}"],
+                            cwd=ROOT, capture_output=True, text=True).stdout.strip()
+    if tagged and tagged != head:
+        sys.exit(f"{tag} already points at {tagged[:7]}, not HEAD {head[:7]}")
+    if not tagged:
+        git("tag", tag)
+    # Push first: without a pushed tag, `gh release create` tags whatever the remote branch holds (v0.9.6 bug)
+    pushed = subprocess.run(["git", "push", "--atomic", "origin", "HEAD", f"refs/tags/{tag}"],
+                            cwd=ROOT, capture_output=True, text=True)
+    if pushed.returncode != 0:
+        sys.exit(f"git push failed, nothing published:\n{pushed.stderr}")
+    subprocess.run(["gh", "release", "create", tag, "--verify-tag", "--generate-notes", str(zip_path), str(sig_path)],
                    cwd=ROOT, check=True)
 
 

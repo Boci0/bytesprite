@@ -118,7 +118,8 @@ python -m venv .venv
 1. Bump `__version__` in `src/__init__.py` (the single version source) and commit.
 2. Build, sign and publish: `python scripts/release.py publish vX.Y.Z`. It refuses a dirty tree, builds
    `dist/bytesprite.zip` with `git archive`, signs it with the key at
-   `~/.bytesprite-signing/release_ed25519.key` and runs `gh release create` with the zip and its `.sig`.
+   `~/.bytesprite-signing/release_ed25519.key`, tags `HEAD`, pushes the branch and tag, and runs
+   `gh release create --verify-tag` with the zip and its `.sig`.
    A release without both files cannot be installed by the updater.
 
 The signing key is created once with `python scripts/release.py keygen`; its public half is
