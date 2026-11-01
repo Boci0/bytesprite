@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (QAbstractButton, QComboBox, QFileDialog, QFormLayou
                              QVBoxLayout, QWidget)
 
 from src.tools.ai_assist import (BRAVE_KEY_PAGE, BRAVE_URL, KEY_PAGES, MAX_INPUT_CHARS, PRESETS,
-                                 THINKING_LEVELS, AiAssistPlugin, AiJob, AiReply, ModelInfo, ToolHost, ask, chat_messages, delete_key, history_text, list_models, load_key, save_key, valid_key,
+                                 THINKING_LEVELS, AiAssistPlugin, AiJob, AiReply, ModelInfo, ToolHost, ask, chat_messages, delete_key, list_models, load_key, save_key, valid_key,
                                  valid_model, validate_base_url)
 from src.ui.context_menu import style_menu
 from src.ui.quick_tools import OcrJob
@@ -841,7 +841,7 @@ class AiChat(QWidget):
             if failed and not self._draft.toPlainText():
                 self._draft.setPlainText(failed["content"])  # nothing lost: edit and press Enter again
             return
-        self._history.append({"role": "assistant", "content": history_text(reply)})
+        self._history.append({"role": "assistant", "content": reply.text, "tools": reply.tools})
         self._plugin.record(reply.total_tokens)
         row, _label = self._add_row("assistant", reply.text)
         self._add_details(row, reply)

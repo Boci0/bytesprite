@@ -585,9 +585,25 @@ def test_web_search_tool_loop_and_fallback(api: str, monkeypatch: pytest.MonkeyP
     follow = _Api.seen[1]["body"]["messages"]
     assert follow[-1] == {"role": "tool", "tool_call_id": "c1", "content": "result for python 3.14"}
     assert follow[-2]["tool_calls"][0]["id"] == "c1"
-    assert reply.tools == ["web_search(python 3.14)"]
-    assert ai_assist.history_text(reply) == "[Tools run: web_search(python 3.14)]\nIt is a stack trace."
-    assert ai_assist.history_text(ai_assist.AiReply(text="plain")) == "plain"
+    assert reply.tools == [("web_search(python 3.14)", "result for python 3.14")]
+
+
+def test_history_keeps_newest_tool_output_and_previews_older() -> None:
+    big = "x" * 9000
+    history = [{"role": "user", "content": "list it"},
+               {"role": "assistant", "content": "old answer", "tools": [("read_file(a.txt)", big)]},
+               {"role": "user", "content": "search"},
+               {"role": "assistant", "content": "new answer", "tools": [("web_search(q)", big), ("list_files()", "a.txt")]},
+               {"role": "user", "content": "and?"}]
+    msgs = ai_assist.chat_messages(history)
+    old, new = msgs[2]["content"], msgs[4]["content"]
+    assert old.startswith(ai_assist.TOOLS_MARK) and old.endswith("]\nold answer")
+    assert f"- read_file(a.txt): {'x' * ai_assist.OLD_TOOL_CHARS} [cut]]\nold answer" in old
+    assert f"- web_search(q): {'x' * 4000} [cut]\n- list_files(): a.txt]\nnew answer" in new
+    # an earlier file read keeps fetch_page on links already in the chat; a web-only answer does not
+    assert ai_assist.read_local_data(msgs[2]) and ai_assist.read_local_data(msgs[4])
+    assert not ai_assist.read_local_data({"role": "assistant", "content": ai_assist.tools_block([("web_search(q)", "r")], 9)})
+    assert not ai_assist.read_local_data({"role": "user", "content": msgs[2]["content"]})
 
 
 def test_run_tool_rejects_bad_calls_and_anthropic_params() -> None:
@@ -651,7 +667,8 @@ def test_chat_answers_after_a_web_search_and_setup_saves_the_search_key(
         chat.insert_text("what is the news?")
         chat.send()
         _wait(app, lambda: chat._job is None and len(chat._history) == 2)
-        assert chat._history[-1]["content"] == "[Tools run: web_search(news)]\nIt is a stack trace."
+        assert chat._history[-1] == {"role": "assistant", "content": "It is a stack trace.",
+                                     "tools": [("web_search(news)", "result for news")]}
         assert _Api.seen[-1]["body"]["messages"][-1] == {"role": "tool", "tool_call_id": "c1", "content": "result for news"}
         chat.show_setup()
         chat._search_key.setText("brave-key-123")

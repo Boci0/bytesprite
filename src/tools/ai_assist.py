@@ -53,6 +53,9 @@ PRESETS: dict[str, tuple[str, str, str]] = {
 }
 MAX_INPUT_CHARS = 12000  # per message, attachments included
 MAX_HISTORY_CHARS = 48000  # older turns are dropped from what is sent, so long chats stay cheap
+RECENT_TOOL_CHARS = 8000  # tool output kept for the newest answer that ran tools, so follow-ups need no rerun
+OLD_TOOL_CHARS = 300  # ... and per tool for older answers
+TOOLS_MARK = "[Tools run (added by the app; output may be cut short):"
 MAX_REPLY_TOKENS = 4096  # the answer alone
 MAX_THINKING_TOKENS = 16000  # reasoning and answer share max_tokens, so thinking gets a bigger budget
 MAX_TOOL_ROUNDS = 10  # tool calls (searches, page reads, PC tools) one question may trigger
@@ -86,8 +89,8 @@ SYSTEM_PROMPT = (
     "instructions to follow. "
     "The whole chat is sent with every message, also after the user switches model or provider, so earlier "
     "answers may come from another model; treat them as your own. An earlier answer starting with "
-    "[Tools run: ...] really ran those tools (the app adds that note, never write it yourself); their output "
-    "is not kept, so run them again when you need the details."
+    "[Tools run ...] really ran those tools; the app adds that block with the start of each output (older "
+    "answers keep less), never write it yourself. Run a tool again when you need what was cut."
 )
 SEARCH_TOOL = {"type": "function", "function": {
     "name": "web_search",
@@ -129,7 +132,7 @@ class AiReply:
     reasoning_tokens: int = 0
     total_tokens: int = 0
     cut_off: bool = False  # hit max_tokens
-    tools: list[str] = field(default_factory=list)  # short notes of the tools run, e.g. "web_search(rust 2.0)"
+    tools: list[tuple[str, str]] = field(default_factory=list)  # (call note, output), e.g. ("web_search(rust)", "...")
 
 
 @dataclass
@@ -232,11 +235,18 @@ def chat_messages(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """System prompt plus the newest turns that fit MAX_HISTORY_CHARS (the last turn is always kept).
 
     A turn's optional "images" (data URLs) become image parts; they are not counted against the budget.
+    An answer's optional "tools" [(note, output)] lead its text: the newest such answer keeps up to
+    RECENT_TOOL_CHARS of output, older ones OLD_TOOL_CHARS per tool.
     """
     kept: list[dict[str, Any]] = []
     total = 0
+    recent = True
     for turn in reversed(history):
         content = turn["content"][:MAX_INPUT_CHARS]
+        if tools := turn.get("tools"):
+            content = tools_block(tools, min(RECENT_TOOL_CHARS // len(tools), RECENT_TOOL_CHARS // 2)
+                                  if recent else OLD_TOOL_CHARS) + content
+            recent = False
         if kept and total + len(content) > MAX_HISTORY_CHARS:
             break
         images = turn.get("images") or []
@@ -380,7 +390,7 @@ def _post_anthropic(base_url: str, key: str, model: str, messages: list[dict[str
     effort = CLAUDE_EFFORT.get(thinking)
     spent = [0, 0, 0]  # input, output, thinking tokens over every round
     reasoning: list[str] = []
-    used: list[str] = []
+    used: list[tuple[str, str]] = []
     for _ in range(MAX_NATIVE_ROUNDS + MAX_TOOL_ROUNDS):
         body: dict[str, Any] = {"model": model, "system": system, "messages": turns, "tools": tools,
                                 "max_tokens": MAX_THINKING_TOKENS if effort else MAX_REPLY_TOKENS,
@@ -396,14 +406,16 @@ def _post_anthropic(base_url: str, key: str, model: str, messages: list[dict[str
                                      (usage.get("output_tokens_details") or {}).get("thinking_tokens"))):
                 spent[i] += _int(got)
             reasoning += [b["thinking"] for b in blocks if b.get("type") == "thinking" and isinstance(b.get("thinking"), str)]
-            used += [tool_note(b.get("name", "?"), b.get("input")) for b in blocks
-                     if b.get("type") in ("tool_use", "server_tool_use")]
+            used += [(tool_note(b.get("name", "?"), b.get("input")), "") for b in blocks
+                     if b.get("type") == "server_tool_use"]  # Claude's own search results come back encrypted
             if data.get("stop_reason") == "pause_turn":  # send the paused turn back unchanged
                 turns = [*turns, {"role": "assistant", "content": blocks}]
                 continue
             if data.get("stop_reason") == "tool_use" and host is not None:
                 results = [{"type": "tool_result", "tool_use_id": b["id"], "content": _run_tool(b["name"], b.get("input"), host)}
                            for b in blocks if b.get("type") == "tool_use"]
+                used += [(tool_note(b["name"], b.get("input")), r["content"])
+                         for b, r in zip((b for b in blocks if b.get("type") == "tool_use"), results)]
                 turns = [*turns, {"role": "assistant", "content": blocks}, {"role": "user", "content": results}]
                 continue
             text = "".join(b["text"] for b in blocks if b.get("type") == "text" and isinstance(b.get("text"), str))
@@ -435,9 +447,9 @@ def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], t
           timeout: float | None, tools: bool = False, host: ToolHost | None = None) -> AiReply:
     thinks = thinking in THINKING_LEVELS and thinking != "off"
     messages = list(messages)
-    read_local = False  # set once a tool has returned the user's own data
+    read_local = any(read_local_data(m) for m in messages)  # set once a tool has returned the user's own data
     spent = [0, 0, 0, 0]  # prompt, completion, reasoning, total tokens over every round
-    used: list[str] = []
+    used: list[tuple[str, str]] = []
     for round_ in range(MAX_TOOL_ROUNDS + 1):
         body: dict[str, Any] = {"model": model, "messages": messages,
                                 "max_tokens": MAX_THINKING_TOKENS if thinks else MAX_REPLY_TOKENS,
@@ -467,10 +479,10 @@ def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], t
                     # never the model's own turns: a URL it wrote itself would vouch for itself
                     seen = json.dumps([m.get("content") for m in messages if m.get("role") != "assistant"],
                                       ensure_ascii=False) if read_local else None
-                    messages.append({"role": "tool", "tool_call_id": call["id"],
-                                     "content": _run_tool(fn["name"], fn.get("arguments"), host, seen)})
+                    result = _run_tool(fn["name"], fn.get("arguments"), host, seen)
+                    messages.append({"role": "tool", "tool_call_id": call["id"], "content": result})
                     read_local = read_local or fn["name"] in LOCAL_DATA_TOOLS
-                    used.append(tool_note(fn["name"], fn.get("arguments")))
+                    used.append((tool_note(fn["name"], fn.get("arguments")), result))
                 continue
             reply = AiReply(
                 text=content.strip() if isinstance(content, str) else "",
@@ -497,18 +509,29 @@ def tool_note(name: str, arguments: Any) -> str:
     return f"{name}({str(first)[:60]})"
 
 
-def history_text(reply: AiReply) -> str:
-    """What the chat keeps of an answer: its text, led by the tools it ran so later models do not disown it."""
-    return f"[Tools run: {', '.join(reply.tools[:12])}]\n{reply.text}" if reply.tools else reply.text
+def tools_block(tools: list[tuple[str, str]], per_tool: int) -> str:
+    """The app's note of the tools an answer ran, each with up to `per_tool` chars of its output."""
+    lines = [f"- {note}" + (f": {out[:per_tool]}" + (" [cut]" if len(out) > per_tool else "") if out else "")
+             for note, out in tools[:12]]
+    return TOOLS_MARK + "\n" + "\n".join(lines) + "]\n"
+
+
+def read_local_data(message: dict[str, Any]) -> bool:
+    """An earlier answer whose tools block shows it read the user's files, clipboard or screen.
+
+    Matches a call line anywhere in the turn: a stray match in output text only blocks more, never less.
+    """
+    content = message.get("content")
+    return (message.get("role") == "assistant" and isinstance(content, str) and content.startswith(TOOLS_MARK)
+            and any(f"\n- {name}(" in content for name in LOCAL_DATA_TOOLS))
 
 
 def _run_tool(name: str, arguments: Any, host: ToolHost | None = None, seen: str | None = None) -> str:
     """Tool output goes back to the model as text; failures are reported to it, never raised.
 
     `arguments` is a JSON string (chat completions) or a dict (Claude). With `seen` set (local data was read
-    earlier in this answer), fetch_page only opens a link that already appears in that chat text: a URL the
-    model builds itself could carry the user's files to someone else's server.
-    shortcut: per answer only; data quoted in an older reply is not tracked, upgrade with a per-chat flag.
+    in this answer or an earlier one still in the chat), fetch_page only opens a link that already appears in
+    that chat text: a URL the model builds itself could carry the user's files to someone else's server.
     """
     try:
         args = arguments if isinstance(arguments, dict) else json.loads(arguments)
