@@ -42,6 +42,8 @@ $py = Find-Python
 # 1. Source: this folder when run from a clone, else the latest GitHub release
 $Source = $PSScriptRoot
 $Temp = $null
+# Any failure below still removes the download folder; break re-throws the error
+trap { if ($Temp) { Remove-Item $Temp -Recurse -Force -ErrorAction SilentlyContinue }; break }
 if (-not $Source -or -not (Test-Path (Join-Path $Source "src\main.py"))) {
     Write-Host "Downloading the latest ByteSprite release..."
     $release = Invoke-RestMethod "https://api.github.com/repos/$Repo/releases/latest"
