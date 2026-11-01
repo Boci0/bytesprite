@@ -119,7 +119,11 @@ def install_source_zip(data: bytes, app_dir: Path = APP_DIR) -> None:
         shutil.rmtree(new_dir, ignore_errors=True)
         raise ValueError("update has no src/main.py")
     (app_dir / "src").rename(old_dir)
-    new_dir.rename(app_dir / "src")
+    try:
+        new_dir.rename(app_dir / "src")
+    except OSError:
+        old_dir.rename(app_dir / "src")  # e.g. antivirus still scanning src.new: keep the old code, not none
+        raise
     shutil.rmtree(old_dir, ignore_errors=True)
 
 

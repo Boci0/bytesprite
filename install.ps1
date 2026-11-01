@@ -67,6 +67,11 @@ if (-not $Source -or -not (Test-Path (Join-Path $Source "src\main.py"))) {
     if ($LASTEXITCODE -ne 0) { throw "Release signature check failed; nothing was installed" }
     Expand-Archive $zip -DestinationPath $Temp
     $Source = Join-Path $Temp "bytesprite"
+    # An older signed zip re-attached to a new tag must not install (same rule as the updater)
+    $init = Get-Content (Join-Path $Source "src\__init__.py") -Raw
+    if ($init -notmatch '__version__\s*=\s*["'']([^"'']+)' -or $Matches[1] -ne $release.tag_name.TrimStart("v")) {
+        throw "Release $($release.tag_name) contains a different version; nothing was installed"
+    }
 }
 
 # 2. Copy the app (src is mirrored so deleted modules do not linger)

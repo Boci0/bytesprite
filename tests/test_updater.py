@@ -55,6 +55,21 @@ def test_bad_update_keeps_running_install(tmp_path: Path) -> None:
     assert not (tmp_path.parent / "evil.py").exists()
 
 
+def test_locked_new_src_rolls_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    app = _app(tmp_path)
+    real_rename = Path.rename
+
+    def rename(self: Path, target: Path) -> Path:
+        if self.name == "src.new":
+            raise PermissionError("in use by antivirus")
+        return real_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", rename)
+    with pytest.raises(PermissionError):
+        install_source_zip(_zipball({"src/main.py": "new"}), app)
+    assert (app / "src" / "main.py").read_text() == "old"
+
+
 def test_git_checkout_is_not_an_install(tmp_path: Path) -> None:
     assert not is_installed(tmp_path)
     (tmp_path / ".installed").write_text("")
