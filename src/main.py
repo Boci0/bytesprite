@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import QApplication, QSystemTrayIcon
 
 from src.engine.pet_state import PetStateMachine
 from src.graphics.animation_controller import AnimationController
-from src.storage.storage_manager import StorageManager
+from src.storage.storage_manager import StorageManager, repair_autostart
 from src.ui.pet_window import PetWindow, build_app_icon
 from src.ui.quick_tools import GlobalHotkeys
 from src.ui.theme import APP_STYLESHEET
@@ -117,6 +117,7 @@ class ByteSpriteApp:
             self.hotkeys.triggered.connect(
                 lambda m: self.window.trigger_tool_action(m if m.startswith("macrokey:") else f"snip:{m}"))
             self.hotkeys.start()
+            repair_autostart()  # copies updated in place may hold a Run value for a launcher they never received
             if is_installed():
                 # One quiet check per launch; installing waits for Settings > Check for Updates
                 QTimer.singleShot(20_000, lambda: self.window.check_for_updates(install=False))

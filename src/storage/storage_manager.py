@@ -23,14 +23,15 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def autostart_command() -> str:
-    """Console-free launch command; a Run key has no working dir, so run the root-level launcher file.
+    """Console-free launch command; a Run key has no working dir, so run a launcher file that finds the app root.
 
-    Run values are capped at 260 characters, so no inline -c code here.
+    Run values are capped at 260 characters, so no inline -c code here. The launcher sits in src/ because in-place
+    updates replace src/ only: a root-level file never reached updated copies, so the Run value pointed at nothing.
     """
     exe = Path(sys.executable)
     gui_exe = exe.with_name("pythonw.exe")
     launcher = gui_exe if gui_exe.exists() else exe
-    return f'"{launcher}" "{_PROJECT_ROOT / "bytesprite.pyw"}"'
+    return f'"{launcher}" "{_PROJECT_ROOT / "src" / "autostart.pyw"}"'
 
 
 def autostart_enabled() -> bool:
@@ -45,6 +46,28 @@ def autostart_enabled() -> bool:
         return True
     except OSError:
         return False
+
+
+def stale_autostart(value: str, root: Path, command: str) -> bool:
+    """A Run value for this copy (it names `root`) that differs from today's command: the old inline -c form, or
+    the root bytesprite.pyw that updated copies never received. Another copy's value is never this copy's to fix."""
+    return str(root).lower() in value.lower() and value != command
+
+
+def repair_autostart() -> bool:
+    """Rewrite this copy's Run value when stale; True if it was rewritten."""
+    if sys.platform != "win32":
+        return False
+    import winreg
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY) as key:
+            value, _kind = winreg.QueryValueEx(key, _RUN_VALUE)
+    except OSError:
+        return False
+    if not isinstance(value, str) or not stale_autostart(value, _PROJECT_ROOT, autostart_command()):
+        return False
+    return set_autostart(True)
 
 
 def set_autostart(enabled: bool) -> bool:

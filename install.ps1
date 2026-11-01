@@ -101,7 +101,7 @@ Set-ItemProperty -Path $key -Name NoRepair -Value 1 -Type DWord
 
 # 6. Optional Start with Windows (same Run value the in-app toggle writes)
 if ($StartWithWindows) {
-    Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name ByteSprite -Value "`"$Pythonw`" `"$App\bytesprite.pyw`""
+    Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name ByteSprite -Value "`"$Pythonw`" `"$App\src\autostart.pyw`""
 }
 
 if ($Temp) { Remove-Item $Temp -Recurse -Force -ErrorAction SilentlyContinue }
