@@ -15,7 +15,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import (QBuffer, QByteArray, QIODevice, QMimeData, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer,
                           QUrl, pyqtSignal)
-from PyQt6.QtGui import (QColor, QDesktopServices, QDragEnterEvent, QDropEvent, QGuiApplication, QImage,
+from PyQt6.QtGui import (QColor, QDesktopServices, QDragEnterEvent, QDropEvent, QFont, QGuiApplication, QImage,
                          QKeyEvent, QPainter, QPainterPath, QPalette, QPen, QPixmap, QTextBlockFormat, QTextCharFormat,
                          QTextCursor, QTextDocument, QTextFormat, QTextOption)
 from PyQt6.QtWidgets import (QAbstractButton, QComboBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
@@ -60,6 +60,8 @@ _BUTTON_CSS = (
     " border-radius: 0; padding: 4px 12px; }"
     f" QPushButton:hover {{ background: {rgba_css(HOVER_RGBA)}; color: {ACCENT_HEX}; }}"
 )
+_ALLOW_CSS = _BUTTON_CSS.replace(f"border: 1px solid {rgba_css(OUTLINE_RGBA)}", f"border: 1px solid {ACCENT_HEX}")
+_DENY_CSS = _BUTTON_CSS.replace(f"color: {ACCENT_HEX}; }}", f"color: {DANGER_HEX}; }}")
 
 
 def image_data_url(image: QImage) -> str:
@@ -453,6 +455,46 @@ class _Bubble(QFrame):
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(qcolor(BUBBLE_RGBA))
         painter.drawRoundedRect(QRectF(self.rect()), 12, 12)
+        painter.end()
+
+
+class _Card(QFrame):
+    """A non-reply row (permission, error, saved file): raised rounded panel, coloured left stripe, small header."""
+
+    def __init__(self, title: str, color: str, glyph: str) -> None:
+        super().__init__()
+        self._color = QColor(color)
+        self._head = QLabel()
+        self._head.setTextFormat(Qt.TextFormat.PlainText)
+        font = ui_font(8)
+        font.setBold(True)
+        self._head.setFont(font)
+        self._head.setWordWrap(True)
+        self.body = QVBoxLayout(self)
+        self.body.setContentsMargins(14, 8, 10, 8)
+        self.body.setSpacing(6)
+        self.body.addWidget(self._head)
+        self.set_header(title, color, glyph)
+
+    def set_header(self, title: str, color: str, glyph: str) -> None:
+        self._color = QColor(color)
+        self._head.setText(f"{glyph}  {title}")
+        self._head.setStyleSheet(f"color: {color};")
+        self.update()
+
+    def paintEvent(self, _event) -> None:  # type: ignore[override]
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        path = QPainterPath()
+        path.addRoundedRect(rect, 8, 8)
+        painter.fillPath(path, qcolor(GLASS_RAISED_RGBA))
+        painter.save()
+        painter.setClipPath(path)
+        painter.fillRect(QRectF(rect.left(), rect.top(), 3, rect.height()), self._color)
+        painter.restore()
+        painter.setPen(QPen(qcolor(HAIRLINE_RGBA), 1))
+        painter.drawPath(path)
         painter.end()
 
 
@@ -1049,16 +1091,16 @@ class AiChat(QWidget):
 
     def _add_saved_row(self, path: Path) -> None:
         """A file the model saved (the user picked where): Open, unless it would run as a program, and Show."""
-        row = QWidget()
-        layout = QHBoxLayout(row)
-        layout.setContentsMargins(2, 0, 2, 0)
-        layout.setSpacing(10)
-        name = QLabel(f"Saved {path.name}")
+        row = _Card("Saved file", ACCENT_HEX, "✓")
+        name = QLabel(path.name)
         name.setTextFormat(Qt.TextFormat.PlainText)
         name.setToolTip(str(path))
-        name.setFont(ui_font(8))
-        name.setStyleSheet(f"color: {TEXT_DIM_HEX};")
-        layout.addWidget(name)
+        name.setFont(ui_font(9))
+        name.setStyleSheet(f"color: {TEXT_HEX};")
+        row.body.addWidget(name)
+        layout = QHBoxLayout()
+        layout.setSpacing(12)
+        row.body.addLayout(layout)
         links = [("Show in folder", lambda: subprocess.Popen(f'explorer /select,"{path}"'))]
         if path.suffix.lower() not in _RUNNABLE_SUFFIXES:
             links.insert(0, ("Open", lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))))
@@ -1168,8 +1210,15 @@ class AiChat(QWidget):
                 chips.addWidget(Chip(item))
             layout.addLayout(chips)
         label = ChatText(text, markdown=markdown, pt=9 if role in ("error", "note") else 10,
-                         color={"error": DANGER_HEX, "thinking": ACCENT_HEX, "note": TEXT_DIM_HEX}.get(role, TEXT_HEX))
-        if role == "user":
+                         color={"thinking": ACCENT_HEX, "note": TEXT_DIM_HEX}.get(role, TEXT_HEX))
+        if role == "error":
+            card = _Card("Error", DANGER_HEX, "!")
+            card.body.addWidget(label)
+            layout.addWidget(card)
+        elif role == "note":
+            label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            layout.addWidget(label)
+        elif role == "user":
             bubble = _Bubble(label)
             # Bubbles hug their text: pin the width so the right alignment has something to align
             longest = max((label.fontMetrics().horizontalAdvance(line) for line in text.splitlines()), default=0)
@@ -1178,13 +1227,16 @@ class AiChat(QWidget):
             layout.addWidget(bubble, 0, align)
         else:
             layout.addWidget(label)
+        self._append(row)
+        return row, label
+
+    def _append(self, row: QWidget) -> None:
         self._thread_layout.addWidget(row)
         self._stack.setCurrentIndex(0)
         self._panel.show()
         self._follow, self._scroll_target = True, None
         self._relayout()
         QTimer.singleShot(0, self._relayout_and_scroll)  # wrapped heights settle after the first layout pass
-        return row, label
 
     def _relayout_and_scroll(self) -> None:
         self._relayout()
@@ -1206,19 +1258,32 @@ class AiChat(QWidget):
         self.confirm(f"mcp:{server}", f'The model wants to use your MCP server "{server}" ({tool}). '
                      "Allow it for this chat?", f'MCP server "{server}"', done, once=False)
 
-    def confirm(self, key: str, text: str, what: str, done: Callable[[bool], None], once: bool = True) -> None:
+    def confirm(self, key: str, text: str, what: str, done: Callable[[bool], None], once: bool = True,
+                danger: str = "") -> None:
         """Allow/Deny row in the chat; the worker thread waits for done(allowed).
 
         `key` already allowed for this chat answers at once. With `once`, the row offers Allow once, Allow for
-        this chat and Deny; without, Allow (for this chat) and Deny.
+        this chat and Deny; without, Allow (for this chat) and Deny. A `danger` (what looks destructive) is never
+        remembered and always asks: a red card with Allow once and Deny only.
         """
-        if key in self._allowed:
+        if key in self._allowed and not danger:
             done(True)
             return
-        row, label = self._add_row("assistant", text)
+        intro, _sep, detail = text.partition("\n\n")  # the command, diff or note is shown apart from the question
+        card = _Card("Permission needed", ACCENT_HEX, "◆")
+        if danger:
+            card.set_header(f'Destructive command ("{danger[:30]}") - check it', DANGER_HEX, "!")
+        card.body.addWidget(ChatText(intro, pt=9))
+        if detail:
+            code = ChatText(detail, pt=8.5)
+            code.setFont(QFont("Consolas", 9))
+            code.document().setDocumentMargin(6)
+            code.setStyleSheet(f"QTextBrowser {{ background: {rgba_css(GLASS_RGBA)}; color: {TEXT_HEX}; }}")
+            card.body.addWidget(code)
         buttons = QHBoxLayout()
-        choices = ([("Allow once", "once"), ("Allow for this chat", "chat")] if once else [("Allow", "chat")]) + [
-            ("Deny", None)]
+        buttons.setSpacing(6)
+        choices = ([("Allow once", "once"), ("Allow for this chat", "chat")] if once and not danger
+                   else [("Allow once", "once")] if danger else [("Allow", "chat")]) + [("Deny", None)]
         btns: list[QPushButton] = []
 
         def answer(choice: str | None) -> None:
@@ -1227,20 +1292,24 @@ class AiChat(QWidget):
             self._pending = None
             if choice == "chat":
                 self._allowed.add(key)
-            label.set_text(f"{text}\n\n{'Denied' if choice is None else 'Allowed'}: {what}"
-                          + (" for this chat." if choice == "chat" else "."))
+            if choice is None:
+                card.set_header(f"Denied  -  {what}", DANGER_HEX, "✕")
+            else:
+                card.set_header(f"Allowed  -  {what}" + (" for this chat" if choice == "chat" else ""), ACCENT_HEX, "✓")
             for btn in btns:
                 btn.hide()
+            QTimer.singleShot(0, self._relayout)  # the card is shorter without its buttons
             done(choice is not None)
 
         for title, choice in choices:
             btn = QPushButton(title)
-            btn.setStyleSheet(_BUTTON_CSS)
+            btn.setStyleSheet(_DENY_CSS if choice is None else _ALLOW_CSS if choice == "once" or not once else _BUTTON_CSS)
             btn.clicked.connect(lambda _c=False, choice=choice: answer(choice))
             buttons.addWidget(btn)
             btns.append(btn)
         buttons.addStretch(1)
-        row.layout().addLayout(buttons)
+        card.body.addLayout(buttons)
+        self._append(card)
         self._pending = answer
         self.show()
         self._relayout()

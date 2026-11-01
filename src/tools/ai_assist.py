@@ -473,10 +473,16 @@ def _post_anthropic(base_url: str, key: str, model: str, messages: list[dict[str
                 turns = [*turns, {"role": "assistant", "content": blocks}]
                 continue
             if data.get("stop_reason") == "tool_use" and host is not None and tool_rounds < MAX_TOOL_ROUNDS:
-                results = [{"type": "tool_result", "tool_use_id": b["id"], "content": _run_tool(b["name"], b.get("input"), host)}
-                           for b in blocks if b.get("type") == "tool_use"]
-                used += [(tool_note(b["name"], b.get("input")), r["content"])
-                         for b, r in zip((b for b in blocks if b.get("type") == "tool_use"), results)]
+                results = []
+                for b in (b for b in blocks if b.get("type") == "tool_use"):
+                    out = _run_tool(b["name"], b.get("input"), host)
+                    shot = _take_shot(host)
+                    content: Any = out if not shot else [{"type": "text", "text": out}, {"type": "image", "source": {
+                        "type": "base64", "media_type": "image/png", "data": shot.split(",", 1)[1]}}]
+                    results.append({"type": "tool_result", "tool_use_id": b["id"], "content": content})
+                    used.append((tool_note(b["name"], b.get("input")), out))
+                    if shot:
+                        turns = _drop_old_shots(turns)  # only the newest screenshot stays in the request
                 tool_rounds += 1
                 note = [{"type": "text", "text": BUDGET_NOTE.strip()}] if tool_rounds == MAX_TOOL_ROUNDS else []
                 turns = [*turns, {"role": "assistant", "content": blocks}, {"role": "user", "content": results + note}]
@@ -513,14 +519,24 @@ def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], t
     read_local = any(read_local_data(m) for m in messages)  # set once a tool has returned the user's own data
     spent = [0, 0, 0, 0]  # prompt, completion, reasoning, total tokens over every round
     used: list[tuple[str, str]] = []
+    shot_at: int | None = None  # index in `messages` of the screenshot message
     for round_ in range(MAX_TOOL_ROUNDS + 1):
+        shots: list[str] = []
         body: dict[str, Any] = {"model": model, "messages": messages,
                                 "max_tokens": MAX_THINKING_TOKENS if thinks else MAX_REPLY_TOKENS,
                                 **thinking_params(base_url, thinking)}
         if tools and round_ < MAX_TOOL_ROUNDS:
             body["tools"] = [SEARCH_TOOL, FETCH_TOOL, *(host.specs if host else [])]
-        data = _request(base_url, key, "/chat/completions", body,
-                        timeout or (THINKING_TIMEOUT_S if thinks else TIMEOUT_S))
+        try:
+            data = _request(base_url, key, "/chat/completions", body,
+                            timeout or (THINKING_TIMEOUT_S if thinks else TIMEOUT_S))
+        except ValueError as exc:
+            if str(exc) != "bad request" or shot_at is None:
+                raise
+            _NO_VISION.add((base_url, model))  # this model refuses the screenshot: go on with the text lists
+            messages[shot_at] = {"role": "user", "content": "(this model cannot see screenshots; use the text lists)"}
+            shot_at = None
+            continue
         try:
             choice = data["choices"][0]
             message = choice["message"]
@@ -548,6 +564,16 @@ def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], t
                                      "content": result + BUDGET_NOTE if last else result})
                     read_local = read_local or fn["name"] in LOCAL_DATA_TOOLS or MCP_SEP in fn["name"]
                     used.append((tool_note(fn["name"], fn.get("arguments")), result))
+                    shot = _take_shot(host)
+                    if shot:
+                        shots.append(shot)
+                if shots and (base_url, model) not in _NO_VISION:
+                    if shot_at is not None:  # only the newest screenshot stays in the request
+                        messages[shot_at] = {"role": "user", "content": "(earlier screenshot removed)"}
+                    messages.append({"role": "user", "content": [
+                        {"type": "text", "text": "Screenshot from screen_map:"},
+                        {"type": "image_url", "image_url": {"url": shots[-1]}}]})
+                    shot_at = len(messages) - 1
                 continue
             reply = AiReply(
                 text=content.strip() if isinstance(content, str) else "",
@@ -562,6 +588,25 @@ def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], t
             raise ValueError("cut off" if reply.cut_off else "empty reply")
         return reply
     raise ValueError("bad reply")
+
+
+def _take_shot(host: ToolHost | None) -> str:
+    """The screenshot (data URL) a tool such as screen_map left on the host, or ''."""
+    take = getattr(host, "take_image", None)
+    return take() if callable(take) else ""
+
+
+def _drop_old_shots(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Claude: earlier tool results keep their text but lose their screenshot (each costs tokens and request size)."""
+    out = []
+    for turn in turns:
+        content = turn["content"]
+        if turn["role"] == "user" and isinstance(content, list):
+            content = [{**b, "content": b["content"][0]["text"]} if b.get("type") == "tool_result"
+                       and isinstance(b.get("content"), list) else b for b in content]
+            turn = {**turn, "content": content}
+        out.append(turn)
+    return out
 
 
 def tool_note(name: str, arguments: Any) -> str:

@@ -197,7 +197,7 @@ class SnipSession:
 # ---------------------------------------------------------------------------
 
 OCR_PS_SCRIPT = r"""
-param([string]$Path)
+param([string]$Path, [switch]$Boxes)
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 Add-Type -AssemblyName System.Runtime.WindowsRuntime
@@ -219,19 +219,33 @@ $bitmap = Await ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.S
 $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
 $result = Await ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
 $stream.Dispose()
-$result.Lines | ForEach-Object { $_.Text }
+if ($Boxes) {
+    foreach ($line in $result.Lines) {
+        $left = 1000000.0; $top = 1000000.0; $right = 0.0; $bottom = 0.0
+        foreach ($word in $line.Words) {
+            $r = $word.BoundingRect
+            if ($r.X -lt $left) { $left = $r.X }
+            if ($r.Y -lt $top) { $top = $r.Y }
+            if ($r.X + $r.Width -gt $right) { $right = $r.X + $r.Width }
+            if ($r.Y + $r.Height -gt $bottom) { $bottom = $r.Y + $r.Height }
+        }
+        $w = [int]($right - $left); $h = [int]($bottom - $top)
+        "$([int]$left),$([int]$top),$w,$h`t$($line.Text)"
+    }
+} else { $result.Lines | ForEach-Object { $_.Text } }
 """
 
 
-def ocr_image_file(png_path: Path, timeout_s: float = 30.0) -> str:
-    """Return text recognized in a PNG via Windows OCR, or '' on any failure."""
+def ocr_image_file(png_path: Path, timeout_s: float = 30.0, boxes: bool = False) -> str:
+    """Return text recognized in a PNG via Windows OCR, or '' on any failure. With `boxes`, one `x,y,w,h<TAB>text`
+    line per recognized line (pixels of the PNG)."""
     script = png_path.with_suffix(".ps1")
     script.write_text(OCR_PS_SCRIPT, encoding="utf-8")
     try:
         proc = subprocess.run(
             [
                 "powershell.exe", "-NoProfile", "-NonInteractive",
-                "-ExecutionPolicy", "Bypass", "-File", str(script), str(png_path),
+                "-ExecutionPolicy", "Bypass", "-File", str(script), str(png_path), *(["-Boxes"] if boxes else []),
             ],
             capture_output=True,
             timeout=timeout_s,

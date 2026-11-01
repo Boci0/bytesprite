@@ -571,3 +571,59 @@ def test_memory_lands_in_the_system_prompt_before_skills(tmp_path: Path) -> None
     system = ai_assist.chat_messages([{"role": "user", "content": "hi"}])[0]["content"]
     assert system.index("Your memory") < system.index("The user wrote these skills")
     assert "- User's tests live in tests/" in system and "Improve yourself" in system
+
+
+def test_destructive_reason_flags_deletes_but_not_reads() -> None:
+    from src.tools.ai_tools import destructive_reason
+
+    for bad in ("del /s /q *.py", "rm -rf build", "Remove-Item x -Recurse", "git reset --hard HEAD~1",
+                "git push --force origin main", "rd /s /q C:/x", "reg delete HKCU/x"):
+        assert destructive_reason(bad), bad
+    for ok in ('dir /a /b "%USERPROFILE%/.bytesprite" 2>nul', "git status", "pytest -q", "type model.txt",
+               "git log --format=%H"):
+        assert not destructive_reason(ok), ok
+
+
+def test_computer_tools_parse_and_flag_risky_actions() -> None:
+    import pytest
+
+    from src.tools.ai_tools import COMPUTER_TOOLS, TOOL_SPECS, computer_action, parse_boxes
+    from src.tools.computer import parse_keys
+
+    assert parse_keys("ctrl+shift+s") == [0x11, 0x10, ord("S")] and parse_keys("F5") == [0x74]
+    for bad in ("", "ctrl+", "nope", "ctrl+alt+shift+win+x"):
+        with pytest.raises(ValueError):
+            parse_keys(bad)
+    assert {s["function"]["name"] for s in TOOL_SPECS} >= COMPUTER_TOOLS | {"screen_map"}
+    assert computer_action("mouse_click", {"x": 10, "y": 20, "double": True}) == ("double-left-click at (10, 20)", "")
+    assert computer_action("type_text", {"text": "hello"})[1] == ""
+    assert computer_action("type_text", {"text": "del /q *.*"})[1]  # a destructive command typed into a terminal
+    assert computer_action("press_key", {"keys": "ctrl+s"})[1] == ""
+    assert computer_action("press_key", {"keys": "Alt+F4"})[1] and computer_action("press_key", {"keys": "delete"})[1]
+    for name, args in (("mouse_click", {"x": "1", "y": 2}), ("mouse_click", {"x": True, "y": 2}),
+                       ("type_text", {"text": ""}), ("scroll", {})):
+        with pytest.raises(ValueError):
+            computer_action(name, args)
+    mapped = parse_boxes("100,50,200,20\tFile Edit\nbad line\n0,0,10,10\t  ", 1920, 1080)
+    assert mapped.endswith("Visible text lines (OCR):\n(200, 60) File Edit") and "Controls" not in mapped
+    assert "No text or controls" in parse_boxes("", 1920, 1080)
+    both = parse_boxes("100,50,200,20\tFile Edit", 1920, 1080, "10,10,30,30\tButton\tSave  as\nbad\n", "Scaled 1.2x.")
+    assert 'Controls in the front window (exact):\n[Button] "Save as" (25, 25)' in both and "Scaled 1.2x." in both
+
+
+def test_screenshots_ride_along_with_tool_results_and_only_the_newest_stays() -> None:
+    from src.tools.ai_assist import _drop_old_shots, _take_shot
+
+    class Host:
+        def take_image(self) -> str:
+            return "data:image/png;base64,AAAA"
+
+    assert _take_shot(Host()) == "data:image/png;base64,AAAA" and _take_shot(None) == "" and _take_shot(object()) == ""
+    image = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
+    turns = [{"role": "user", "content": "hi"},
+             {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "1",
+                                           "content": [{"type": "text", "text": "map"}, image]},
+                                          {"type": "tool_result", "tool_use_id": "2", "content": "plain"}]}]
+    kept = _drop_old_shots(turns)
+    assert kept[1]["content"][0]["content"] == "map" and kept[1]["content"][1]["content"] == "plain"
+    assert kept[0] == turns[0]

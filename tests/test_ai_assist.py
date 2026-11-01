@@ -586,6 +586,40 @@ def test_web_search_tool_loop_and_fallback(api: str, monkeypatch: pytest.MonkeyP
     assert reply.tools == [("web_search(python 3.14)", "result for python 3.14")]
 
 
+def test_screen_map_screenshot_follows_the_tool_results(api: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = {"n": 0}
+    orig = _Api.do_POST
+
+    def look_then_answer(self) -> None:  # noqa: ANN001
+        calls["n"] += 1
+        if calls["n"] > 1 or "tools" not in json.loads(self.rfile.peek(65536)):
+            return orig(self)
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        _Api.seen.append({"path": self.path, "body": body})
+        data = json.dumps({"usage": {"total_tokens": 10}, "choices": [{"message": {"content": None, "tool_calls": [
+            {"id": "c1", "function": {"name": "screen_map", "arguments": "{}"}}]}}]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    class Host:
+        specs = [{"type": "function", "function": {"name": "screen_map", "description": "", "parameters": {}}}]
+        shots = ["data:image/png;base64,AAAA"]
+
+        def run(self, name: str, args: dict) -> str:
+            return "Screen 10x10."
+
+        def take_image(self) -> str:
+            return self.shots.pop() if self.shots else ""
+
+    monkeypatch.setattr(_Api, "do_POST", look_then_answer)
+    ask(api, KEY, "m-shot", T, host=Host())
+    follow = _Api.seen[1]["body"]["messages"]
+    assert follow[-2] == {"role": "tool", "tool_call_id": "c1", "content": "Screen 10x10."}
+    assert follow[-1]["content"][1] == {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+
+
 def test_history_keeps_newest_tool_output_and_previews_older() -> None:
     big = "x" * (ai_assist.RECENT_TOOL_CHARS + 1000)  # over the newest-answer budget too
     history = [{"role": "user", "content": "list it"},

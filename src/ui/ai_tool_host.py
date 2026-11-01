@@ -12,15 +12,18 @@ from __future__ import annotations
 
 import tempfile
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from PyQt6.QtCore import QCoreApplication, QObject, QStandardPaths, QTimer, pyqtSignal
+from PyQt6.QtCore import QCoreApplication, QObject, QStandardPaths, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QCursor, QGuiApplication, QImage
 from PyQt6.QtWidgets import QFileDialog
 
-from src.tools.ai_tools import (FILE_TOOLS, PET_ACTIONS, TOOL_SPECS, apply_edit, load_skill, memory_path, plan_edit,
+from src.tools import computer
+from src.tools.ai_tools import (COMPUTER_TOOLS, FILE_TOOLS, PET_ACTIONS, TOOL_SPECS, apply_edit, computer_action, destructive_reason,
+                                load_skill, memory_path, parse_boxes, plan_edit,
                                 plan_memory, plan_skill_update, run_command, run_file_tool, save_args, skill_text,
                                 skills_dir, write_memory, write_skill)
 from src.tools.macros import parse_recipe
@@ -43,6 +46,7 @@ class AiToolHost(QObject):
         super().__init__(window)  # lives on the Qt thread, so the queued signal lands there
         self._win = window
         self.saved: list[Path] = []
+        self._shot = ""
         self.mcp = mcp or McpHub()
         self._call.connect(self._on_call)
         app = QCoreApplication.instance()
@@ -77,7 +81,9 @@ class AiToolHost(QObject):
                 return "error: give a command"
             cwd = self._project() or Path.home()
             where = "the Project Folder" if self._project() else f"your home folder ({cwd})"
-            if not self._allowed("run_command", f"The model wants to run in {where}:\n\n{command.strip()}", "commands"):
+            risk = destructive_reason(command)
+            if not self._allowed("run_command", f"The model wants to run in {where}:\n\n{command.strip()}", "commands",
+                                 risk):
                 return "error: the user declined this command"
             return run_command(cwd, command)
         if name == "load_skill":
@@ -131,6 +137,24 @@ class AiToolHost(QObject):
         if name == "read_screen":
             image = self._on_gui(self._grab_screen)
             return self._ocr(image) if isinstance(image, QImage) and not image.isNull() else "error: no screen grab"
+        if name == "screen_map":
+            got = self._on_gui(lambda done: self._grab_screen(done, primary=True))
+            if not isinstance(got, tuple) or not isinstance(got[0], QImage) or got[0].isNull():
+                return "error: no screen grab"
+            image, hwnd = got
+            with ThreadPoolExecutor(max_workers=2) as pool:  # OCR and the control tree overlap
+                controls = pool.submit(computer.ui_elements, hwnd)
+                lines = pool.submit(self._ocr, image, True).result()
+                elements = controls.result()
+            from src.ui.ai_chat import MAX_IMAGE_SIDE, image_data_url
+
+            side = max(image.width(), image.height())
+            self._shot = image_data_url(image)
+            note = (f"The screenshot you see is scaled down {side / MAX_IMAGE_SIDE:.2f}x: do not read pixels from "
+                    "it, use the (x, y) listed here." if side > MAX_IMAGE_SIDE else "The screenshot is at full size.")
+            return parse_boxes(lines, image.width(), image.height(), elements, note)
+        if name in COMPUTER_TOOLS:
+            return self._computer(name, args)
         if name == "save_file":
             try:
                 file_name, content = save_args(args)
@@ -140,6 +164,58 @@ class AiToolHost(QObject):
             return out if isinstance(out, str) else "error: the user did not answer the Save dialog in time"
         out = self._on_gui(lambda done: done(self._pet_tool(name, args)))
         return out if isinstance(out, str) else "error: the pet did not answer in time"
+
+    def _computer(self, name: str, args: dict[str, Any]) -> str:
+        """Mouse and keyboard on the primary monitor. Every action needs the user's Allow (once or for the chat); a
+        delete key or a destructive typed command asks every time."""
+        try:
+            what, risk = computer_action(name, args)
+        except ValueError as exc:
+            return f"error: {exc}"
+        if not self._allowed("computer", f"The model wants to control your computer:\n\n{what}", "computer control",
+                             risk):
+            return "error: the user declined this action"
+        out = self._on_gui(lambda done: self._act(done, name, args), 90.0)  # up to 2000 chars at 20 ms
+        return out if isinstance(out, str) else "error: the action did not finish in time"
+
+    def _act(self, done: Callable[[Any], None], name: str, args: dict[str, Any]) -> None:
+        """Hide the pet and the chat (so they get no click and no keys), act, then bring them back unfocused."""
+        shown = [w for w in (self._win, self._win._ai_chat) if w is not None and w.isVisible()]
+        for w in shown:
+            w.hide()
+
+        def act() -> str:  # on a worker thread: typing takes 20 ms a character and must not freeze the pet
+            try:
+                if name == "mouse_click":
+                    computer.click(args["x"], args["y"], args.get("button") or "left", bool(args.get("double")))
+                    result = "clicked"
+                elif name == "type_text":
+                    computer.type_text(args["text"])
+                    result = f"typed {min(len(args['text']), computer.MAX_TYPE_CHARS)} characters"
+                elif name == "press_key":
+                    computer.press(computer.parse_keys(args["keys"]))
+                    result = f"pressed {args['keys']}"
+                else:
+                    computer.scroll(args["amount"], args.get("x"), args.get("y"))
+                    result = "scrolled"
+            except (ValueError, OSError) as exc:
+                result = f"error: {exc}"
+            return result
+
+        def finish(result: str) -> None:
+            for w in shown:  # back without taking the keyboard from the app the model is driving
+                w.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+                w.show()
+                w.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
+            done(result + ". Call screen_map to see the result." if not result.startswith("error") else result)
+
+        def work() -> None:
+            result = act()
+            # back on the Qt thread; the app needs a moment to react before the next look
+            self._call.emit((lambda _done: QTimer.singleShot(250, lambda: finish(result)),
+                             {"event": threading.Event(), "result": None}))
+
+        QTimer.singleShot(180, lambda: threading.Thread(target=work, daemon=True).start())
 
     def _add_mcp_server(self, args: dict[str, Any]) -> str:
         server, command = args.get("name"), args.get("command")
@@ -167,10 +243,18 @@ class AiToolHost(QObject):
     def _project(self) -> Path | None:
         return getattr(self._win._state_machine.registry.get_plugin("project"), "repo", None)
 
-    def _allowed(self, key: str, text: str, what: str) -> bool:
-        """The user's answer in the chat; no answer within APPROVE_TIMEOUT_S counts as declined."""
+    def _allowed(self, key: str, text: str, what: str, risk: str = "") -> bool:
+        """The user's answer in the chat; no answer within APPROVE_TIMEOUT_S counts as declined.
+        A `risk` (destructive command) is asked every time, even when the chat allowed the tool before."""
         chat = self._win._ai_chat
-        return self._on_gui(lambda done: chat.confirm(key, text, what, done), APPROVE_TIMEOUT_S) is True
+        ask = (lambda done: chat.confirm(key, text, what, done, danger=risk)) if risk else (
+            lambda done: chat.confirm(key, text, what, done))
+        return self._on_gui(ask, APPROVE_TIMEOUT_S) is True
+
+    def take_image(self) -> str:
+        """The screenshot (data URL) of the last screen_map, once: the request loop sends it to a model that sees."""
+        shot, self._shot = self._shot, ""
+        return shot
 
     def take_saved(self) -> list[Path]:
         """Files saved since the last call (the chat shows a row for each)."""
@@ -200,18 +284,19 @@ class AiToolHost(QObject):
 
     # ------------------------------------------------------------------ Qt-thread tools
 
-    def _grab_screen(self, done: Callable[[Any], None]) -> None:
+    def _grab_screen(self, done: Callable[[Any], None], primary: bool = False) -> None:
         chat = self._win._ai_chat
         shown = [w for w in (self._win, chat) if w is not None and w.isVisible()]
         for w in shown:  # keep the pet and the chat out of the grab
             w.hide()
 
         def grab() -> None:
-            screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
+            screen = (None if primary else QGuiApplication.screenAt(QCursor.pos())) or QGuiApplication.primaryScreen()
             image = screen.grabWindow(0).toImage() if screen is not None else None
+            hwnd = computer.foreground_window()  # the app under the hidden pet and chat
             for w in shown:
                 w.show()
-            done(image)
+            done((image, hwnd) if primary else image)
 
         QTimer.singleShot(180, grab)
 
@@ -274,14 +359,16 @@ class AiToolHost(QObject):
     # ------------------------------------------------------------------ worker-thread OCR
 
     @staticmethod
-    def _ocr(image: QImage) -> str:
+    def _ocr(image: QImage, boxes: bool = False) -> str:
         tmp = Path(tempfile.mkdtemp(prefix="bytesprite_ocr_"))
         png = tmp / "screen.png"
         try:
             image.save(str(png), "PNG")
-            text = ocr_image_file(png)
+            text = ocr_image_file(png, boxes=boxes)
         finally:
             for leftover in (png, png.with_suffix(".ps1")):
                 leftover.unlink(missing_ok=True)
             tmp.rmdir()
+        if boxes:
+            return text.strip()[:MAX_SCREEN_CHARS * 2]
         return text.strip()[:MAX_SCREEN_CHARS] or "no text found on screen"
