@@ -20,6 +20,8 @@ Per-user, no admin rights. In PowerShell:
 irm https://raw.githubusercontent.com/Boci0/bytesprite/main/install.ps1 | iex
 ```
 
+It downloads the latest signed release and refuses to install it unless the signature checks out.
+
 Or from a clone:
 
 ```powershell
@@ -134,8 +136,10 @@ offline: if it is lost, installs can only move to a new key by re-running `insta
 
 Installed copies pick the release up through **Check for Updates**. The updater replaces `src/` only;
 when `requirements.txt` changes, say in the release notes to re-run `install.ps1`. Every pin carries
-sha256 hashes and `install.ps1` installs with `--require-hashes`, so a version bump must also update
-its hashes (all files PyPI lists for that version).
+sha256 hashes, which pip checks automatically, so a version bump must also update its hashes (all
+files PyPI lists for that version). The one-line installer verifies the release zip with
+`RELEASE_PUBLIC_KEY` and a hash of `src/signing.py` pinned in `install.ps1`; if either changes,
+update the pins there (`tests/test_updater.py` fails until they match).
 
 ## License
 

@@ -191,3 +191,19 @@ def test_update_job_reports_a_broken_http_reply(monkeypatch: pytest.MonkeyPatch)
     finally:
         server.close()
     assert [status for status, _tag in results] == ["error"]
+
+
+def test_install_ps1_pins_release_key_and_verifier() -> None:
+    import hashlib
+    import re
+
+    from src.updater import RELEASE_PUBLIC_KEY
+
+    root = Path(__file__).resolve().parents[1]
+    script = (root / "install.ps1").read_text(encoding="utf-8")
+    key = re.search(r'\$ReleasePublicKey = "([0-9a-f]+)"', script).group(1)
+    pinned = re.search(r'\$SigningPySha256 = "([0-9A-F]+)"', script).group(1)
+    # raw.githubusercontent serves the LF bytes git stores, not a CRLF working copy
+    served = (root / "src" / "signing.py").read_bytes().replace(b"\r\n", b"\n")
+    assert bytes.fromhex(key) == RELEASE_PUBLIC_KEY
+    assert hashlib.sha256(served).hexdigest().upper() == pinned

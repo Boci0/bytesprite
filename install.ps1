@@ -19,6 +19,9 @@ $Repo = "Boci0/bytesprite"
 $Root = Join-Path $env:LOCALAPPDATA "ByteSprite"
 $App = Join-Path $Root "app"
 $Venv = Join-Path $Root "venv"
+# Must match RELEASE_PUBLIC_KEY in src/updater.py and sha256(src/signing.py); tests/test_updater.py checks both
+$ReleasePublicKey = "f0cc212a80d53fe877827253c020e2c01d023c4280eebf47423c6032a0259316"
+$SigningPySha256 = "B415F26BF5BA35C3BA626DCB6D22FED740714BBBC5E185B5A99B766B7B73ED15"
 
 function Find-Python {
     $ErrorActionPreference = "Continue"  # a missing runtime writes to stderr, which 5.1 would make fatal
@@ -44,10 +47,24 @@ if (-not $Source -or -not (Test-Path (Join-Path $Source "src\main.py"))) {
     $release = Invoke-RestMethod "https://api.github.com/repos/$Repo/releases/latest"
     $Temp = Join-Path $env:TEMP ("bytesprite_" + [guid]::NewGuid())
     New-Item -ItemType Directory -Path $Temp | Out-Null
-    $zip = Join-Path $Temp "src.zip"
-    Invoke-WebRequest $release.zipball_url -OutFile $zip -UseBasicParsing
+    $zip = Join-Path $Temp "bytesprite.zip"
+    $sig = "$zip.sig"
+    $verifier = Join-Path $Temp "signing.py"
+    foreach ($pair in @(@("bytesprite.zip", $zip), @("bytesprite.zip.sig", $sig))) {
+        $asset = $release.assets | Where-Object name -eq $pair[0]
+        if (-not $asset) { throw "Release $($release.tag_name) has no $($pair[0]); refusing an unsigned install" }
+        Invoke-WebRequest $asset.browser_download_url -OutFile $pair[1] -UseBasicParsing
+    }
+    # The verifier comes from the repo, pinned by hash so it is exactly as trusted as this script
+    Invoke-WebRequest "https://raw.githubusercontent.com/$Repo/main/src/signing.py" -OutFile $verifier -UseBasicParsing
+    if ((Get-FileHash $verifier -Algorithm SHA256).Hash -ne $SigningPySha256) { throw "signing.py does not match the pinned hash" }
+    $check = "import importlib.util as u,sys;s=u.spec_from_file_location('signing',sys.argv[1]);m=u.module_from_spec(s);s.loader.exec_module(m);" +
+             "sys.exit(0 if m.verify(bytes.fromhex(sys.argv[4]),open(sys.argv[2],'rb').read(),bytes.fromhex(open(sys.argv[3]).read().strip())) else 1)"
+    $pyArgs = @($py | Select-Object -Skip 1)
+    & $py[0] @pyArgs -I -c $check $verifier $zip $sig $ReleasePublicKey
+    if ($LASTEXITCODE -ne 0) { throw "Release signature check failed; nothing was installed" }
     Expand-Archive $zip -DestinationPath $Temp
-    $Source = (Get-ChildItem $Temp -Directory | Select-Object -First 1).FullName
+    $Source = Join-Path $Temp "bytesprite"
 }
 
 # 2. Copy the app (src is mirrored so deleted modules do not linger)
@@ -57,7 +74,8 @@ robocopy (Join-Path $Source "src") (Join-Path $App "src") /MIR /XD __pycache__ /
 if ($LASTEXITCODE -ge 8) { throw "Copying src failed (robocopy $LASTEXITCODE)" }
 robocopy (Join-Path $Source "assets") (Join-Path $App "assets") /MIR /NFL /NDL /NJH /NJS /NP | Out-Null
 foreach ($f in "requirements.txt", "uninstall.ps1", "README.md", "bytesprite.pyw") {
-    Copy-Item (Join-Path $Source $f) $App -Force
+    $p = Join-Path $Source $f
+    if (Test-Path $p) { Copy-Item $p $App -Force }  # signed bundles omit the legacy bytesprite.pyw
 }
 Set-Content (Join-Path $App ".installed") "installed by install.ps1" -Encoding ascii
 
@@ -70,7 +88,8 @@ if (-not (Test-Path (Join-Path $Venv "Scripts\pythonw.exe"))) {
 }
 $VenvPy = Join-Path $Venv "Scripts\python.exe"
 $Pythonw = Join-Path $Venv "Scripts\pythonw.exe"
-& $VenvPy -m pip install --disable-pip-version-check -q --require-hashes -r (Join-Path $App "requirements.txt")
+# No --require-hashes: pip checks hashes whenever the file has them, and older signed releases have none
+& $VenvPy -m pip install --disable-pip-version-check -q -r (Join-Path $App "requirements.txt")
 if ($LASTEXITCODE -ne 0) { throw "pip install failed" }
 
 # 4. Shortcuts
