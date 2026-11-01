@@ -8,7 +8,8 @@ Security:
 - Paths resolve inside the Project Folder only (`..`, absolute paths and links out of it are refused).
 - Likely secret files (.env, keys, certificates, credential stores) are never read or edited, nor is .git.
 - save_file takes a bare file name (no folders) and at most MAX_SAVE_CHARS of text.
-- edit_file shows its diff first and refuses to write if the file changed while the user was deciding.
+- edit_file and edit_files show their diffs first and refuse to write if a file changed while the user was
+  deciding; edit_files writes all of its files or none.
 - run_command runs in the Project Folder after the user allows the exact command; it is killed (with its
   child processes) after COMMAND_TIMEOUT_S.
 - Pet actions are a fixed allowlist: nothing that deletes keys, installs updates, edits macros or opens dialogs.
@@ -18,11 +19,13 @@ Security:
 
 from __future__ import annotations
 
+import codecs
 import difflib
 import fnmatch
 import os
 import re
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -36,6 +39,12 @@ MAX_SAVE_CHARS = MAX_FILE_BYTES  # one save_file call
 MAX_SCANNED = 20000  # entries one find or search walks before giving up
 MAX_DIFF_CHARS = 4000  # diff shown in the chat for the user to approve
 MAX_NOTE_CHARS = 300  # one memory note
+MAX_EDITS = 12  # files one edit_files call changes
+MAX_TASKS = 20  # items on the task list
+MAX_TASK_CHARS = 120
+TASK_STATUSES = ("pending", "in_progress", "done")
+MAX_BACKGROUND = 4  # background processes running at once
+MAX_BACKGROUND_CHARS = 100000  # output kept per background process (the newest)
 COMMAND_TIMEOUT_S = 120
 MAX_COMMAND_CHARS = 30000  # command output returned to the model (head and tail kept)
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".mypy_cache", ".pytest_cache", "dist", "build"}
@@ -58,7 +67,7 @@ PET_ACTIONS: dict[str, str] = {
 }
 # Tools whose output is the user's own data; after one runs, fetch_page may only open links already in the chat
 LOCAL_DATA_TOOLS = {"list_files", "read_file", "find_files", "search_text", "read_clipboard", "read_screen", "screen_map", "pet_status",
-                    "run_command"}
+                    "run_command", "read_background"}
 
 
 def _fn(name: str, description: str, props: dict[str, Any] | None = None, required: tuple[str, ...] = ()) -> dict:
@@ -110,10 +119,31 @@ TOOL_SPECS: list[dict[str, Any]] = [
         "old_text creates a new file. The user sees the diff and allows or declines it.",
         {"path": _PATH, "old_text": {"type": "string"}, "new_text": {"type": "string"}},
         ("path", "old_text", "new_text")),
+    _fn("edit_files", "Change several files in the Project Folder as one change: the user sees every diff in a single "
+        "approval and all edits are written, or none. Each edit works like edit_file (old_text must appear exactly "
+        "once; an empty old_text creates a file); at most one edit per file.",
+        {"edits": {"type": "array", "items": {"type": "object", "properties": {
+            "path": _PATH, "old_text": {"type": "string"}, "new_text": {"type": "string"}},
+            "required": ["path", "old_text", "new_text"]}}}, ("edits",)),
+    _fn("plan_tasks", "Show the user a checklist for a job with several steps, and call it again as you go. Give the "
+        "whole list each time: every item has a short text and a status (pending, in_progress or done). It needs no "
+        "approval.",
+        {"tasks": {"type": "array", "items": {"type": "object", "properties": {
+            "text": {"type": "string"}, "status": {"type": "string", "enum": list(TASK_STATUSES)}},
+            "required": ["text", "status"]}}}, ("tasks",)),
     _fn("run_command", f"Run a Windows cmd.exe command in the Project Folder, or in the user's home folder when none "
         f"is chosen (e.g. pytest -q, git status, npm test, winget search) "
         f"and get its exit code and output. The user allows each command first; it is stopped after "
-        f"{COMMAND_TIMEOUT_S} s, so do not start servers or watchers.", {"command": {"type": "string"}}, ("command",)),
+        f"{COMMAND_TIMEOUT_S} s; use start_background for servers, watchers and long runs.",
+        {"command": {"type": "string"}}, ("command",)),
+    _fn("start_background", f"Start a long-running cmd.exe command (dev server, watcher, long test run) in the Project "
+        f"Folder and return at once with its id. At most {MAX_BACKGROUND} run at a time. The user allows each "
+        f"command first and can stop it in the chat. Read its output with read_background.",
+        {"command": {"type": "string"}}, ("command",)),
+    _fn("read_background", "Output a background process wrote since you last read it, and whether it still runs "
+        "(or its exit code). With no id, lists the background processes.", {"id": {"type": "string"}}),
+    _fn("stop_background", "Stop a background process and everything it started.", {"id": {"type": "string"}},
+        ("id",)),
     _fn("find_mcp_servers", "Search the official MCP registry for local MCP servers that would give you a new "
         "ability (e.g. github, sqlite, browser). Gives each server's command, args and env vars for "
         "add_mcp_server.", {"query": {"type": "string"}}, ("query",)),
@@ -146,7 +176,7 @@ TOOL_SPECS: list[dict[str, Any]] = [
 ]
 # the user allows each call in the chat (or all of them for a chat)
 COMPUTER_TOOLS = {"mouse_click", "type_text", "press_key", "scroll"}
-APPROVED_TOOLS = COMPUTER_TOOLS | {"edit_file", "run_command", "add_mcp_server", "add_skill", "update_skill", "remember", "forget"}
+APPROVED_TOOLS = COMPUTER_TOOLS | {"edit_file", "edit_files", "run_command", "start_background", "add_mcp_server", "add_skill", "update_skill", "remember", "forget"}
 FILE_TOOLS = {"list_files", "read_file", "find_files", "search_text"}
 NO_FOLDER = ("error: no Project Folder chosen. Ask the user to pick one: right-click the pet, Project, "
              "Choose Project Folder.")
@@ -312,20 +342,80 @@ def plan_edit(root: Path | None, args: dict[str, Any]) -> Edit:
     return Edit(path, rel, before, after, crlf, diff or "(no change)")
 
 
-def apply_edit(edit: Edit) -> str:
-    """Write an allowed edit, unless the file changed since it was planned."""
+def plan_edits(root: Path | None, args: dict[str, Any]) -> list[Edit]:
+    """The edits edit_files asks for (each as plan_edit), or ValueError naming the one that fails. Nothing is written."""
+    items = args.get("edits")
+    if not isinstance(items, list) or not items or not all(isinstance(i, dict) for i in items):
+        raise ValueError("give edits: a list of {path, old_text, new_text}")
+    if len(items) > MAX_EDITS:
+        raise ValueError(f"at most {MAX_EDITS} edits at a time")
+    edits: list[Edit] = []
+    for n, item in enumerate(items, 1):
+        try:
+            edit = plan_edit(root, item)
+        except ValueError as exc:
+            raise ValueError(f"edit {n}: {exc}") from None
+        if any(edit.path == other.path for other in edits):
+            raise ValueError(f"edit {n}: {edit.rel} appears twice; put its changes in one edit")
+        edits.append(edit)
+    return edits
+
+
+def apply_edits(edits: list[Edit]) -> str:
+    """Write allowed edits all or nothing: refuses if any file changed since the plan, and puts back the files
+    already written if a later write fails."""
     try:
-        now = edit.path.read_bytes().decode("utf-8") if edit.path.exists() else None
-        if now != edit.before:
-            return "error: the file changed while the user was deciding; read it again"
-        edit.path.parent.mkdir(parents=True, exist_ok=True)
-        edit.path.write_text(edit.after, encoding="utf-8", newline="\r\n" if edit.crlf else "\n")
-    except (OSError, UnicodeDecodeError) as exc:
-        return f"error: could not write ({getattr(exc, 'strerror', None) or 'write failed'})"
-    lines = edit.diff.splitlines()
-    added = sum(1 for x in lines if x.startswith("+") and not x.startswith("+++"))
-    removed = sum(1 for x in lines if x.startswith("-") and not x.startswith("---"))
-    return f"{'created' if edit.before is None else 'edited'} {edit.rel} (+{added} -{removed} lines)"
+        for edit in edits:
+            now = edit.path.read_bytes().decode("utf-8") if edit.path.exists() else None
+            if now != edit.before:
+                return f"error: the file changed while the user was deciding ({edit.rel}); nothing was written, read it again"
+    except (OSError, UnicodeDecodeError):
+        return "error: could not check the files, nothing was written"
+    done: list[Edit] = []
+    for edit in edits:
+        try:
+            edit.path.parent.mkdir(parents=True, exist_ok=True)
+            edit.path.write_text(edit.after, encoding="utf-8", newline="\r\n" if edit.crlf else "\n")
+            done.append(edit)
+        except OSError as exc:
+            for back in done:  # shortcut: folders made for a new file stay, only files are restored
+                try:
+                    if back.before is None:
+                        back.path.unlink(missing_ok=True)
+                    else:
+                        back.path.write_bytes(back.before.encode("utf-8"))
+                except OSError:
+                    pass
+            return (f"error: could not write {edit.rel} ({exc.strerror or 'write failed'}); "
+                    "the other files were put back")
+    rows = []
+    for edit in edits:
+        lines = edit.diff.splitlines()
+        added = sum(1 for x in lines if x.startswith("+") and not x.startswith("+++"))
+        removed = sum(1 for x in lines if x.startswith("-") and not x.startswith("---"))
+        rows.append(f"{'created' if edit.before is None else 'edited'} {edit.rel} (+{added} -{removed} lines)")
+    return "\n".join(rows)
+
+
+def apply_edit(edit: Edit) -> str:
+    """Write one allowed edit, unless the file changed since it was planned."""
+    return apply_edits([edit])
+
+
+def task_list(args: dict[str, Any]) -> list[tuple[str, str]]:
+    """plan_tasks' (text, status) items, or ValueError."""
+    items = args.get("tasks")
+    if not isinstance(items, list) or not items or len(items) > MAX_TASKS:
+        raise ValueError(f"give 1 to {MAX_TASKS} tasks")
+    out = []
+    for item in items:
+        text = " ".join(item.get("text", "").split())[:MAX_TASK_CHARS] if isinstance(item, dict) and isinstance(
+            item.get("text"), str) else ""
+        status = item.get("status") if isinstance(item, dict) else None
+        if not text or status not in TASK_STATUSES:
+            raise ValueError("each task needs text and a status of pending, in_progress or done")
+        out.append((text, status))
+    return out
 
 
 # shortcut: a keyword scan, not a shell parser; it can miss obfuscated commands, so approval still shows the full text
@@ -422,8 +512,7 @@ def run_command(root: Path | None, command: Any) -> str:
         raw, _ = proc.communicate(timeout=COMMAND_TIMEOUT_S)
         head = f"exit code {proc.returncode}"
     except subprocess.TimeoutExpired:
-        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True,
-                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        _kill_tree(proc.pid)
         raw, _ = proc.communicate()
         head = f"stopped after {COMMAND_TIMEOUT_S} s"
     out = (raw or b"").decode("utf-8", "replace").replace("\r\n", "\n").strip()
@@ -431,6 +520,124 @@ def run_command(root: Path | None, command: Any) -> str:
         half = MAX_COMMAND_CHARS // 2
         out = f"{out[:half]}\n... {len(out) - MAX_COMMAND_CHARS} characters cut ...\n{out[-half:]}"
     return f"{head}\n{out or '(no output)'}"
+
+
+def _kill_tree(pid: int) -> None:
+    subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True,
+                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+
+class _Background:
+    """One background process: a reader thread keeps the newest MAX_BACKGROUND_CHARS of its output."""
+
+    def __init__(self, pid_name: str, command: str, proc: subprocess.Popen) -> None:
+        self.name, self.command, self.proc = pid_name, command, proc
+        self.text, self.dropped, self.read_to = "", 0, 0  # kept output, characters dropped before it, read so far
+        self.lock = threading.Lock()
+        threading.Thread(target=self._pump, daemon=True).start()
+
+    def _pump(self) -> None:
+        decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        stream = self.proc.stdout
+        while stream is not None:
+            try:
+                chunk = stream.read1(4096)
+            except (OSError, ValueError):
+                break
+            if not chunk:
+                break
+            with self.lock:
+                self.text += decoder.decode(chunk).replace("\r\n", "\n")
+                if len(self.text) > MAX_BACKGROUND_CHARS:
+                    cut = len(self.text) - MAX_BACKGROUND_CHARS
+                    self.text, self.dropped = self.text[cut:], self.dropped + cut
+
+    @property
+    def running(self) -> bool:
+        return self.proc.poll() is None
+
+    stopped = False  # set when the model or the user stopped it, so its exit code is not read as a failure
+
+
+class BackgroundProcs:
+    """Background commands for the chat model: start, read what is new, stop. At most MAX_BACKGROUND run at once;
+    output is capped per process; stopping kills the whole process tree."""
+
+    def __init__(self) -> None:
+        self._procs: dict[str, _Background] = {}
+        self._lock = threading.Lock()
+        self._count = 0
+
+    def start(self, cwd: Path, command: Any) -> str:
+        if not isinstance(command, str) or not command.strip():
+            return "error: give a command"
+        with self._lock:
+            if sum(p.running for p in self._procs.values()) >= MAX_BACKGROUND:
+                return f"error: {MAX_BACKGROUND} background processes are already running; stop one first"
+            for old in [n for n, p in self._procs.items() if not p.running][:max(0, len(self._procs) - 2 * MAX_BACKGROUND + 1)]:
+                del self._procs[old]  # finished ones nobody read pile up otherwise
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            try:
+                proc = subprocess.Popen(command, shell=True, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT, creationflags=flags)
+            except OSError as exc:
+                return f"error: could not start ({exc.strerror or 'failed'})"
+            self._count += 1
+            name = f"bg{self._count}"
+            self._procs[name] = _Background(name, command.strip(), proc)
+        return f"started {name}; read its output with read_background"
+
+    def read(self, name: Any) -> str:
+        """What `name` wrote since the last read plus its state; with no name, the list of processes."""
+        with self._lock:
+            if not isinstance(name, str) or not name.strip():
+                return "\n".join(f"{p.name}: {'running' if p.running else 'stopped' if p.stopped else 'exited'}  "
+                                 f"{p.command[:80]}"
+                                 for p in self._procs.values()) or "no background processes"
+            proc = self._procs.get(name.strip())
+        if proc is None:
+            return "error: no such background process"
+        code = proc.proc.poll()
+        with proc.lock:
+            lost = max(0, proc.dropped - proc.read_to)
+            new = proc.text[max(0, proc.read_to - proc.dropped):]
+            proc.read_to = proc.dropped + len(proc.text)
+        if len(new) > MAX_COMMAND_CHARS:
+            lost += len(new) - MAX_COMMAND_CHARS
+            new = new[-MAX_COMMAND_CHARS:]
+        state = ("running" if code is None else "stopped as asked (its exit code says nothing about a failure)"
+                 if proc.stopped else f"exited with code {code}")
+        note = f"... {lost} earlier characters dropped ...\n" if lost else ""
+        return f"{state}\n{note}{new.strip() or '(no new output)'}"
+
+    def snapshot(self) -> list[tuple[str, str]]:
+        """(name, command) of the running processes, for the chat to list."""
+        with self._lock:
+            return [(p.name, p.command) for p in self._procs.values() if p.running]
+
+    def stop(self, name: Any) -> str:
+        with self._lock:
+            proc = self._procs.get(name.strip()) if isinstance(name, str) else None
+        if proc is None:
+            return "error: no such background process"
+        if not proc.running:
+            return f"{proc.name} had already exited"
+        proc.stopped = True
+        _kill_tree(proc.proc.pid)
+        try:
+            proc.proc.wait(5)
+        except subprocess.TimeoutExpired:
+            pass
+        return f"stopped {proc.name}"
+
+    def stop_all(self) -> None:
+        with self._lock:
+            procs = list(self._procs.values())
+            self._procs.clear()
+        for proc in procs:
+            proc.stopped = True
+            if proc.running:
+                _kill_tree(proc.proc.pid)
 
 
 # ---------------------------------------------------------------------- skills

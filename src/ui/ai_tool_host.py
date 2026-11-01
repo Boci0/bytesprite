@@ -4,8 +4,9 @@
 (clipboard, screen grab, Save dialog, pet actions) is queued to the Qt thread and the worker waits for its result.
 Tools of the user's MCP servers (src/tools/mcp_client.py) join the specs; each server's first call in a chat
 waits for the user to allow it in the chat.
-edit_file, run_command, add_mcp_server, add_skill, update_skill, remember and forget also wait for the user's Allow
-in the chat (once, or for the whole chat).
+edit_file, edit_files, run_command, start_background, add_mcp_server, add_skill, update_skill, remember and forget
+also wait for the user's Allow in the chat (once, or for the whole chat). Background processes (`procs`) are
+killed when the app quits.
 """
 
 from __future__ import annotations
@@ -22,10 +23,10 @@ from PyQt6.QtGui import QCursor, QGuiApplication, QImage
 from PyQt6.QtWidgets import QFileDialog
 
 from src.tools import computer
-from src.tools.ai_tools import (COMPUTER_TOOLS, FILE_TOOLS, PET_ACTIONS, TOOL_SPECS, apply_edit, computer_action, destructive_reason,
-                                load_skill, memory_path, parse_boxes, plan_edit,
-                                plan_memory, plan_skill_update, run_command, run_file_tool, save_args, skill_text,
-                                skills_dir, write_memory, write_skill)
+from src.tools.ai_tools import (COMPUTER_TOOLS, FILE_TOOLS, PET_ACTIONS, TOOL_SPECS, BackgroundProcs, apply_edits,
+                                computer_action, destructive_reason, load_skill, memory_path, parse_boxes, plan_edit,
+                                plan_edits, plan_memory, plan_skill_update, run_command, run_file_tool, save_args,
+                                skill_text, skills_dir, task_list, write_memory, write_skill)
 from src.tools.macros import parse_recipe
 from src.tools.mcp_client import SEP, McpHub, add_server, find_servers, safe_name
 from src.ui.quick_tools import ocr_image_file
@@ -48,10 +49,12 @@ class AiToolHost(QObject):
         self.saved: list[Path] = []
         self._shot = ""
         self.mcp = mcp or McpHub()
+        self.procs = BackgroundProcs()
         self._call.connect(self._on_call)
         app = QCoreApplication.instance()
         if app is not None:
             app.aboutToQuit.connect(self.mcp.close)
+            app.aboutToQuit.connect(self.procs.stop_all)
 
     @property
     def specs(self) -> list[dict[str, Any]]:
@@ -66,15 +69,27 @@ class AiToolHost(QObject):
             return self.mcp.call(name, args) if allowed is True else "error: the user did not allow this MCP server"
         if name in FILE_TOOLS:
             return run_file_tool(self._project(), name, args)
-        if name == "edit_file":
+        if name in ("edit_file", "edit_files"):
             try:
-                edit = plan_edit(self._project(), args)
+                edits = plan_edits(self._project(), args) if name == "edit_files" else [plan_edit(self._project(), args)]
             except ValueError as exc:
                 return f"error: {exc}"
-            verb = "create" if edit.before is None else "edit"
-            if not self._allowed("edit_file", f"The model wants to {verb} {edit.rel}:\n\n{edit.diff}", "file edits"):
+            if len(edits) == 1:
+                verb = "create" if edits[0].before is None else "edit"
+                ask = f"The model wants to {verb} {edits[0].rel}:\n\n{edits[0].diff}"
+            else:
+                diffs = "\n\n".join(f"{'new file' if e.before is None else 'edit'} {e.rel}\n{e.diff}" for e in edits)
+                ask = f"The model wants to change {len(edits)} files, all or none:\n\n{diffs}"
+            if not self._allowed("edit_file", ask, "file edits"):
                 return "error: the user declined this edit"
-            return apply_edit(edit)
+            return apply_edits(edits)
+        if name == "plan_tasks":
+            try:
+                tasks = task_list(args)
+            except ValueError as exc:
+                return f"error: {exc}"
+            self._on_gui(lambda done: done(self._win._ai_chat.set_tasks(tasks) or "ok"))
+            return f"task list shown ({sum(1 for _t, s in tasks if s == 'done')} of {len(tasks)} done)"
         if name == "run_command":
             command = args.get("command")
             if not isinstance(command, str) or not command.strip():
@@ -86,6 +101,23 @@ class AiToolHost(QObject):
                                  risk):
                 return "error: the user declined this command"
             return run_command(cwd, command)
+        if name == "start_background":
+            command = args.get("command")
+            if not isinstance(command, str) or not command.strip():
+                return "error: give a command"
+            cwd = self._project() or Path.home()
+            where = "the Project Folder" if self._project() else f"your home folder ({cwd})"
+            if not self._allowed("run_command", f"The model wants to start this in the background in {where}. It keeps "
+                                 f"running until you stop it:\n\n{command.strip()}", "background commands",
+                                 destructive_reason(command)):
+                return "error: the user declined this command"
+            out = self.procs.start(cwd, command)
+            self._on_gui(lambda done: done(self._win._ai_chat.watch_procs() or "ok"))
+            return out
+        if name == "read_background":
+            return self.procs.read(args.get("id"))
+        if name == "stop_background":
+            return self.procs.stop(args.get("id"))
         if name == "load_skill":
             return load_skill(skills_dir(), args.get("name"))
         if name == "find_mcp_servers":

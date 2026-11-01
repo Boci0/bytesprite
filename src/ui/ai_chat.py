@@ -8,7 +8,10 @@ http(s) links opened on click; commands, approvals and errors stay exact plain t
 
 from __future__ import annotations
 
+import re
 import subprocess
+import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,10 +25,12 @@ from PyQt6.QtWidgets import (QAbstractButton, QComboBox, QFileDialog, QFormLayou
                              QLabel, QLineEdit, QMenu, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy,
                              QStackedWidget, QTextBrowser, QVBoxLayout, QWidget)
 
-from src.tools.ai_assist import (BRAVE_KEY_PAGE, BRAVE_URL, COMPACT_AT, KEY_PAGES, MAX_INPUT_CHARS, PRESETS,
+from src.storage.recent_files import format_age
+from src.tools.ai_assist import (BRAVE_KEY_PAGE, BRAVE_URL, COMPACT_AT, COMPACT_MARK, KEY_PAGES, MAX_INPUT_CHARS, PRESETS,
                                  compact_history, history_chars, summary_turns,
                                  THINKING_LEVELS, AiAssistPlugin, AiJob, AiReply, ModelInfo, ToolHost, ask, chat_messages, delete_key, list_models, load_key, save_key, valid_key,
                                  valid_model, validate_base_url)
+from src.tools.ai_sessions import delete_sessions, list_sessions, load_session, new_id, save_session
 from src.ui.context_menu import style_menu
 from src.ui.quick_tools import OcrJob
 from src.ui.sfx import play_cue
@@ -208,6 +213,9 @@ class IconButton(QAbstractButton):
                 path.lineTo(x, y)
             painter.drawPath(path)
             painter.drawLine(QPointF(15, 17), QPointF(22, 10))
+        elif self.kind == "history":  # clock face: saved chats
+            painter.drawEllipse(QPointF(16, 16), 7, 7)
+            painter.drawPolyline([QPointF(16, 11.5), QPointF(16, 16), QPointF(19.5, 18)])
         elif self.kind == "stop":
             painter.setBrush(color)
             painter.drawRect(QRectF(11.5, 11.5, 9, 9))
@@ -499,6 +507,95 @@ class _ClickLabel(QLabel):
             self.clicked.emit()
 
 
+class _TaskList(QWidget):
+    """The model's checklist (plan_tasks): one dim header, then a pixel marker and a line per task. A marker is hollow
+    for pending, ice-blue for in progress and dim for done (that line is struck through)."""
+
+    ROW = 17
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._tasks: list[tuple[str, str]] = []
+        self.setFont(ui_font(8.5))
+
+    def set_tasks(self, tasks: list[tuple[str, str]]) -> None:
+        self._tasks = list(tasks)
+        self.setFixedHeight((len(tasks) + 1) * self.ROW + 6 if tasks else 0)
+        self.update()
+
+    def paintEvent(self, _event) -> None:  # type: ignore[override]
+        painter = QPainter(self)
+        dim, ice, text = QColor(TEXT_DIM_HEX), QColor(ACCENT_HEX), QColor(TEXT_HEX)
+        font = self.font()
+        painter.setFont(ui_font(8))
+        painter.setPen(dim)
+        done = sum(1 for _t, status in self._tasks if status == "done")
+        painter.drawText(QRect(12, 2, self.width() - 16, self.ROW), Qt.AlignmentFlag.AlignVCenter,
+                         f"Tasks  {done} of {len(self._tasks)} done")
+        for n, (label, status) in enumerate(self._tasks, 1):
+            top = 2 + n * self.ROW
+            box = QRect(12, top + self.ROW // 2 - 3, 6, 6)
+            if status == "pending":
+                painter.setPen(dim)
+                painter.drawRect(box.adjusted(0, 0, -1, -1))
+            else:
+                painter.fillRect(box, ice if status == "in_progress" else dim)
+            font.setStrikeOut(status == "done")
+            painter.setFont(font)
+            painter.setPen(dim if status == "done" else text)
+            room = self.width() - 28
+            painter.drawText(QRect(24, top, room, self.ROW), Qt.AlignmentFlag.AlignVCenter,
+                             painter.fontMetrics().elidedText(label, Qt.TextElideMode.ElideRight, room - 8))
+        painter.end()
+
+
+class _ProcList(QWidget):
+    """Background commands that are running, each with a Stop link."""
+
+    def __init__(self, on_stop: Callable[[str], None]) -> None:
+        super().__init__()
+        self._on_stop = on_stop
+        self._rows: list[tuple[str, str]] = []
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(12, 2, 8, 2)
+        self._layout.setSpacing(2)
+
+    def set_rows(self, rows: list[tuple[str, str]]) -> bool:
+        """Rebuild when the running set changed; True if it did."""
+        if rows == self._rows:
+            return False
+        self._rows = list(rows)
+        while self._layout.count():
+            item = self._layout.takeAt(0)
+            if item is not None and item.widget() is not None:
+                item.widget().deleteLater()
+        if rows:
+            head = QLabel(f"Running in the background  {len(rows)}")
+            head.setFont(ui_font(8))
+            head.setStyleSheet(f"color: {TEXT_DIM_HEX};")
+            self._layout.addWidget(head)
+        for name, command in rows:
+            line = QHBoxLayout()
+            line.setContentsMargins(0, 0, 0, 0)
+            label = QLabel()
+            label.setFont(ui_font(8.5))
+            label.setStyleSheet(f"color: {TEXT_HEX};")
+            label.setToolTip(command)
+            label.setText(label.fontMetrics().elidedText(f"{name}  {command}", Qt.TextElideMode.ElideRight, 250))
+            stop = _ClickLabel("Stop")
+            stop.setFont(ui_font(8))
+            stop.setStyleSheet(f"color: {DANGER_HEX}; text-decoration: underline;")
+            stop.setCursor(Qt.CursorShape.PointingHandCursor)
+            stop.clicked.connect(lambda n=name: self._on_stop(n))
+            line.addWidget(label, 1)
+            line.addWidget(stop)
+            holder = QWidget()
+            holder.setLayout(line)
+            self._layout.addWidget(holder)
+        self.setVisible(bool(rows))
+        return True
+
+
 class AiChat(QWidget):
     """The chat bar. `thinking_changed` lets the pet animate while a reply is pending."""
 
@@ -540,6 +637,12 @@ class AiChat(QWidget):
         self._dots_timer.timeout.connect(self._tick_dots)
         self._thinking_row: QWidget | None = None
         self._thinking_label: ChatText | None = None
+        self._tasks: list[tuple[str, str]] = []
+        self._sid: str | None = None  # this chat's saved session, made on its first answer
+        self._created = 0.0
+        self._procs_timer = QTimer(self)  # runs only while a background command does
+        self._procs_timer.setInterval(1000)
+        self._procs_timer.timeout.connect(self._refresh_procs)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -567,13 +670,15 @@ class AiChat(QWidget):
         titles.addWidget(self._name)
         titles.addWidget(self._title)
         header.addLayout(titles, 1)
+        self._history_btn = IconButton("history", "Saved chats", size=28)
+        self._history_btn.clicked.connect(self._open_history_menu)
         self._new_btn = IconButton("new", "New chat", size=28)
         self._new_btn.clicked.connect(self.new_chat)
         self._gear = IconButton("gear", "Setup: provider, model, API key", size=28)
         self._gear.clicked.connect(self.toggle_setup)
         close_btn = IconButton("close", "Close (Esc)", size=28)
         close_btn.clicked.connect(self.hide)
-        for button in (self._new_btn, self._gear, close_btn):
+        for button in (self._history_btn, self._new_btn, self._gear, close_btn):
             header.addWidget(button, 0, Qt.AlignmentFlag.AlignTop)
         layout.addLayout(header)
         layout.addWidget(_Separator())
@@ -607,6 +712,12 @@ class AiChat(QWidget):
         self._stack.addWidget(self._scroll)
         self._stack.addWidget(self._build_setup())
         panel_layout.addWidget(self._stack)
+        self._task_list = _TaskList()
+        self._task_list.hide()
+        self._proc_list = _ProcList(self._stop_proc)
+        self._proc_list.hide()
+        panel_layout.addWidget(self._task_list)
+        panel_layout.addWidget(self._proc_list)
         panel_layout.addWidget(_Separator())
         layout.addWidget(self._panel)
 
@@ -1035,6 +1146,7 @@ class AiChat(QWidget):
                                   "within its context budget.")
         self._history.append({"role": "assistant", "content": reply.text, "tools": reply.tools})
         self._plugin.record(reply.total_tokens)
+        self._save_session()
         row, _label = self._add_row("assistant", reply.text, markdown=True)
         self._add_details(row, reply)
         self._scroll_target = row
@@ -1106,6 +1218,48 @@ class AiChat(QWidget):
             layout.addWidget(link)
         layout.addStretch(1)
         self._thread_layout.addWidget(row)
+
+    # ------------------------------------------------------------------ task list and background commands
+
+    def set_tasks(self, tasks: list[tuple[str, str]]) -> None:
+        """The model's checklist (plan_tasks), shown under the thread."""
+        self._tasks = list(tasks)
+        self._task_list.set_tasks(self._tasks)
+        self._task_list.setVisible(bool(self._tasks))
+        if self._tasks:
+            self._panel.show()
+        self._relayout()
+
+    def watch_procs(self) -> None:
+        """A background command started: list it and keep the list current until none run."""
+        self._procs_timer.start()
+        self._refresh_procs()
+
+    def _procs(self):
+        return getattr(self._tool_host, "procs", None)
+
+    def _refresh_procs(self) -> None:
+        procs = self._procs()
+        rows = procs.snapshot() if procs is not None else []
+        if self._proc_list.set_rows(rows):
+            if rows:
+                self._panel.show()
+            self._relayout()
+        if not rows:
+            self._procs_timer.stop()
+
+    def _stop_proc(self, name: str) -> None:
+        procs = self._procs()
+        if procs is not None:  # taskkill takes a moment: off the GUI thread
+            threading.Thread(target=procs.stop, args=(name,), daemon=True).start()
+            QTimer.singleShot(700, self._refresh_procs)
+
+    def _stop_all_procs(self) -> None:
+        procs = self._procs()
+        if procs is not None:
+            threading.Thread(target=procs.stop_all, daemon=True).start()
+        self._proc_list.set_rows([])
+        self._procs_timer.stop()
 
     # ------------------------------------------------------------------ model switcher
 
@@ -1307,13 +1461,80 @@ class AiChat(QWidget):
         self.show()
         self._relayout()
 
+    # ------------------------------------------------------------------ saved sessions
+
+    MAX_SHOWN_TURNS = 60  # rows rebuilt when a saved chat is resumed (the model still gets all of it)
+
+    def _save_session(self) -> None:
+        """Write this chat to its session file (after every answer); a disk error just means no saved copy."""
+        if not self._history:
+            return
+        if self._sid is None:
+            self._sid, self._created = new_id(), time.time()
+        save_session(self._sid, self._history, self._tasks, self._created)
+
+    def _open_history_menu(self) -> None:
+        menu = style_menu(QMenu(self))
+        menu.addSection("Saved chats")
+        sessions = list_sessions()
+        now = time.time()
+        for session in sessions:
+            title = session.title if len(session.title) <= 38 else session.title[:35] + "..."
+            action = menu.addAction(f"{title}  -  {format_age(max(0.0, now - session.updated))}")
+            action.setCheckable(True)
+            action.setChecked(session.id == self._sid)
+            action.triggered.connect(lambda _c=False, sid=session.id: self.resume(sid))
+        if not sessions:
+            menu.addAction("No saved chats yet").setEnabled(False)
+        else:
+            menu.addSeparator()
+            menu.addAction("Delete all saved chats").triggered.connect(lambda _c=False: self._delete_saved())
+        menu.exec(self._history_btn.mapToGlobal(QPoint(0, self._history_btn.height() + 2)))
+        menu.deleteLater()
+
+    def _delete_saved(self) -> None:
+        delete_sessions()
+        self._sid = None  # the open chat is saved again with its next answer
+
+    def resume(self, sid: str) -> bool:
+        """Open a saved chat: its turns go back into the history (so auto-compact and tool notes carry on as before)
+        and the thread shows the newest MAX_SHOWN_TURNS. False when the file is gone or unreadable."""
+        session = load_session(sid)
+        if session is None:
+            self._add_row("note", "That saved chat could not be read.")
+            return False
+        self.new_chat()
+        self._sid, self._created = session.id, session.created
+        self._history.extend(session.history)
+        shown = session.history[-self.MAX_SHOWN_TURNS:]
+        if len(shown) < len(session.history):
+            self._add_row("note", f"{len(session.history) - len(shown)} earlier messages are not shown here.")
+        for turn in shown:
+            content = turn["content"]
+            if turn["role"] == "assistant":
+                if content.startswith("Noted. Continuing from that summary."):
+                    continue
+                self._add_row("assistant", content, markdown=True)
+            elif content.startswith(COMPACT_MARK):
+                self._add_row("note", "Earlier messages were compacted into a summary.")
+            else:
+                text = re.split(r"\n*\[(?:File|Image \(attached; its text read by OCR\)): ", content, maxsplit=1)[0]
+                self._add_row("user", text or "(attachment)")
+        self.set_tasks(session.tasks)
+        self._scroll_target = None
+        self._refresh_title()
+        return True
+
     def new_chat(self) -> None:
         """Fresh start: drops a pending reply, the thread, the draft and any attachments."""
         self.stop()
+        self._sid = None
         self._history.clear()
         self._allowed.clear()
         self._draft.clear()
         self._clear_attachments()
+        self._stop_all_procs()
+        self.set_tasks([])
         while self._thread_layout.count():
             item = self._thread_layout.takeAt(0)
             if item is not None and item.widget() is not None:
