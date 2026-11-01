@@ -1,7 +1,7 @@
 """Runs the AI chat model's PC tools (src/tools/ai_tools.py) for one PetWindow.
 
 `run` is called on the chat's worker thread. File tools and OCR run right there; anything touching Qt
-(clipboard, screen grab, pet actions) is queued to the Qt thread and the worker waits for its result.
+(clipboard, screen grab, Save dialog, pet actions) is queued to the Qt thread and the worker waits for its result.
 """
 
 from __future__ import annotations
@@ -12,14 +12,16 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from PyQt6.QtCore import QObject, QTimer, pyqtSignal
+from PyQt6.QtCore import QObject, QStandardPaths, QTimer, pyqtSignal
 from PyQt6.QtGui import QCursor, QGuiApplication, QImage
+from PyQt6.QtWidgets import QFileDialog
 
-from src.tools.ai_tools import FILE_TOOLS, PET_ACTIONS, TOOL_SPECS, run_file_tool
+from src.tools.ai_tools import FILE_TOOLS, PET_ACTIONS, TOOL_SPECS, run_file_tool, save_args
 from src.tools.macros import parse_recipe
 from src.ui.quick_tools import ocr_image_file
 
 GUI_TIMEOUT_S = 15.0
+SAVE_TIMEOUT_S = 600.0  # the Save dialog waits on the user
 MAX_CLIP_CHARS = 12000
 MAX_SCREEN_CHARS = 8000
 
@@ -33,6 +35,7 @@ class AiToolHost(QObject):
     def __init__(self, window: Any) -> None:
         super().__init__(window)  # lives on the Qt thread, so the queued signal lands there
         self._win = window
+        self.saved: list[Path] = []
         self._call.connect(self._on_call)
 
     def run(self, name: str, args: dict[str, Any]) -> str:
@@ -42,16 +45,28 @@ class AiToolHost(QObject):
         if name == "read_screen":
             image = self._on_gui(self._grab_screen)
             return self._ocr(image) if isinstance(image, QImage) and not image.isNull() else "error: no screen grab"
+        if name == "save_file":
+            try:
+                file_name, content = save_args(args)
+            except ValueError as exc:
+                return f"error: {exc}"
+            out = self._on_gui(lambda done: done(self._save_file(file_name, content)), SAVE_TIMEOUT_S)
+            return out if isinstance(out, str) else "error: the user did not answer the Save dialog in time"
         out = self._on_gui(lambda done: done(self._pet_tool(name, args)))
         return out if isinstance(out, str) else "error: the pet did not answer in time"
 
+    def take_saved(self) -> list[Path]:
+        """Files saved since the last call (the chat shows a row for each)."""
+        saved, self.saved = self.saved, []
+        return saved
+
     # ------------------------------------------------------------------ thread bridge
 
-    def _on_gui(self, fn: Callable[[Callable[[Any], None]], None]) -> Any:
+    def _on_gui(self, fn: Callable[[Callable[[Any], None]], None], timeout: float = GUI_TIMEOUT_S) -> Any:
         """Run fn(done) on the Qt thread and wait for done(result)."""
         box: dict[str, Any] = {"event": threading.Event(), "result": None}
         self._call.emit((fn, box))
-        box["event"].wait(GUI_TIMEOUT_S)
+        box["event"].wait(timeout)
         return box["result"]
 
     def _on_call(self, item: tuple[Callable, dict[str, Any]]) -> None:
@@ -82,6 +97,20 @@ class AiToolHost(QObject):
             done(image)
 
         QTimer.singleShot(180, grab)
+
+    def _save_file(self, file_name: str, content: str) -> str:
+        """Nothing is written unless the user picks a path; the dialog itself confirms overwrites."""
+        downloads = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DownloadLocation)
+        path, _filter = QFileDialog.getSaveFileName(self._win._ai_chat, "Save file from ByteSprite AI",
+                                                    str(Path(downloads) / file_name))
+        if not path:
+            return "the user cancelled the save"
+        try:
+            Path(path).write_text(content, encoding="utf-8", newline="")
+        except OSError as exc:
+            return f"error: could not save ({exc.strerror or 'write failed'})"
+        self.saved.append(Path(path))
+        return f"saved to {path}"
 
     def _pet_tool(self, name: str, args: dict[str, Any]) -> str:
         cb = QGuiApplication.clipboard()

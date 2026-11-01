@@ -147,3 +147,50 @@ def test_tool_host_runs_pet_tools_on_the_qt_thread(repo: Path) -> None:
     assert results["action"].startswith("done") and triggered == ["pomodoro:toggle"]
     assert "not an allowed" in results["denied"] and started == ["Grab"] and "AI chat itself" in results["asky"]
     assert "https" in results["link"] and results["files"] == "src/app.py"
+
+
+def test_save_args_wants_a_bare_name_and_capped_text() -> None:
+    from src.tools.ai_tools import MAX_SAVE_CHARS, save_args
+
+    assert save_args({"name": " re:port?.md ", "content": "x"}) == ("re_port_.md", "x")
+    for bad in ({"name": "../x.txt", "content": ""}, {"name": "a\\b.txt", "content": ""}, {"name": "..", "content": ""},
+                {"name": "x.txt"}, {"name": "x.txt", "content": "a" * (MAX_SAVE_CHARS + 1)}):
+        with pytest.raises(ValueError):
+            save_args(bad)
+
+
+def test_save_file_writes_only_where_the_user_picks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from PyQt6.QtCore import QObject
+    from PyQt6.QtWidgets import QApplication
+
+    from src.ui import ai_tool_host
+
+    app = QApplication.instance() or QApplication([])
+    asked: list[str] = []
+    picks = iter([str(tmp_path / "out.csv"), ""])
+
+    def dialog(_parent, _title, suggested):
+        asked.append(Path(suggested).name)
+        return next(picks), ""
+
+    monkeypatch.setattr(ai_tool_host.QFileDialog, "getSaveFileName", staticmethod(dialog))
+
+    class Window(QObject):
+        _ai_chat = None
+
+    host = ai_tool_host.AiToolHost(Window())
+    results: list[str] = []
+
+    def worker() -> None:
+        results.append(host.run("save_file", {"name": "data.csv", "content": "a,b\n1,2\n"}))
+        results.append(host.run("save_file", {"name": "again.csv", "content": "x"}))
+        results.append(host.run("save_file", {"name": "C:/evil.txt", "content": "x"}))
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    while thread.is_alive():
+        app.processEvents()
+    assert results[0] == f"saved to {tmp_path / 'out.csv'}" and results[1] == "the user cancelled the save"
+    assert results[2].startswith("error") and asked == ["data.csv", "again.csv"]
+    assert (tmp_path / "out.csv").read_bytes() == b"a,b\n1,2\n" and sorted(p.name for p in tmp_path.iterdir()) == ["out.csv"]
+    assert host.take_saved() == [tmp_path / "out.csv"] and host.take_saved() == []

@@ -730,3 +730,19 @@ def test_header_and_reply_line_name_the_version_behind_an_alias(monkeypatch: pyt
     reply = ai_assist.AiReply(text="hi", model="deepseek-flash", total_tokens=3, prompt_tokens=1, completion_tokens=2)
     line = reply_details(reply, "deepseek-flash", "off", name=chat._model_name("deepseek-flash"))
     assert line.startswith("deepseek-flash (DeepSeek-V4.1-Flash)  -  3 tokens")
+
+
+def test_saved_files_get_a_row_and_programs_are_not_opened(monkeypatch: pytest.MonkeyPatch, api: str) -> None:
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from src.ui.ai_chat import _ClickLabel
+
+    _app, _plugin, chat = _chat(monkeypatch, api)
+    saved = [Path("C:/x/notes.md"), Path("C:/x/run.bat")]
+    chat._tool_host = SimpleNamespace(take_saved=lambda: [saved.pop(0)] if saved else [])
+    chat._on_done(None, "stopped")
+    chat._on_done(None, "stopped")
+    layout = chat._thread_layout
+    rows = [[w.text() for w in layout.itemAt(i).widget().findChildren(_ClickLabel)] for i in range(layout.count())]
+    assert rows == [["Open", "Show in folder"], ["Show in folder"]]

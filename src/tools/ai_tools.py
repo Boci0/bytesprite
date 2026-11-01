@@ -1,11 +1,13 @@
 """PC tools the AI chat model may call: read-only file access inside the Project Folder plus a few pet actions.
 
 File tools are plain Python and run on the chat's worker thread. Pet tools need the Qt thread and are run
-by src/ui/ai_tool_host.py. Nothing here writes or deletes files or runs commands.
+by src/ui/ai_tool_host.py. Nothing here deletes files or runs commands; save_file only writes where the user
+picks in a Save dialog.
 
 Security:
 - Paths resolve inside the Project Folder only (`..`, absolute paths and links out of it are refused).
 - Likely secret files (.env, keys, certificates, credential stores) are never read.
+- save_file takes a bare file name (no folders) and at most MAX_SAVE_CHARS of text.
 - Pet actions are a fixed allowlist: nothing that deletes keys, installs updates, edits macros or opens dialogs.
 """
 
@@ -22,6 +24,7 @@ MAX_FILE_BYTES = 2 * 1024 * 1024
 MAX_LISTED = 200
 MAX_FOUND = 100
 MAX_MATCHES = 60
+MAX_SAVE_CHARS = MAX_FILE_BYTES  # one save_file call
 MAX_SCANNED = 20000  # entries one find or search walks before giving up
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".mypy_cache", ".pytest_cache", "dist", "build"}
 _SECRET = re.compile(r"^\.env|\.(pem|key|pfx|p12|kdbx|ppk)$|^id_(rsa|dsa|ecdsa|ed25519)|credential|secret",
@@ -68,11 +71,27 @@ TOOL_SPECS: list[dict[str, Any]] = [
         {"action": {"type": "string", "enum": list(PET_ACTIONS),
                     "description": "; ".join(f"{k}: {v}" for k, v in PET_ACTIONS.items())}}, ("action",)),
     _fn("run_macro", "Run one of the user's saved ByteSprite macros by name.", {"name": {"type": "string"}}, ("name",)),
+    _fn("save_file", "Give the user a text file (code, CSV, Markdown, JSON...). They choose where to save it in a "
+        "Save dialog, or cancel.", {"name": {"type": "string", "description": "Suggested file name, e.g. report.md"},
+                                    "content": {"type": "string", "description": "The whole file's text"}},
+        ("name", "content")),
     _fn("open_link", "Open an https link in the user's browser.", {"url": {"type": "string"}}, ("url",)),
 ]
 FILE_TOOLS = {"list_files", "read_file", "find_files", "search_text"}
 NO_FOLDER = ("error: no Project Folder chosen. Ask the user to pick one: right-click the pet, Project, "
              "Choose Project Folder.")
+
+
+def save_args(args: dict[str, Any]) -> tuple[str, str]:
+    """save_file's (file name, content), or ValueError. Characters Windows refuses in names become _."""
+    name, content = args.get("name"), args.get("content")
+    if not isinstance(name, str) or not name.strip() or not isinstance(content, str):
+        raise ValueError("give a file name and its content")
+    if "/" in name or "\\" in name or name.strip() in (".", ".."):
+        raise ValueError("give a bare file name, without folders")
+    if len(content) > MAX_SAVE_CHARS:
+        raise ValueError(f"content is longer than {MAX_SAVE_CHARS} characters")
+    return re.sub(r'[<>:"|?*\x00-\x1f]', "_", name.strip()).rstrip(". ") or "file.txt", content
 
 
 def resolve(root: Path | None, rel: Any) -> Path:
