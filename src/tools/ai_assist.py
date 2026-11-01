@@ -55,7 +55,7 @@ PRESETS: dict[str, tuple[str, str, str]] = {
     "anthropic": ("Claude (Anthropic)", "https://api.anthropic.com/v1", "claude-sonnet-5-5"),
 }
 MAX_INPUT_CHARS = 48000  # per message, attachments included
-MAX_HISTORY_CHARS = 200000  # what is sent; past COMPACT_AT the chat summarizes older turns instead of dropping them
+MAX_HISTORY_CHARS = 600000  # what is sent; past COMPACT_AT the chat summarizes older turns instead of dropping them
 RECENT_TOOL_CHARS = 32000  # tool output kept for the newest answer that ran tools, so follow-ups need no rerun
 OLD_TOOL_CHARS = 1000  # ... and per tool for older answers
 COMPACT_AT = MAX_HISTORY_CHARS * 3 // 4  # history size that makes the next send summarize older turns first
