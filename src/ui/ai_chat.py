@@ -459,42 +459,35 @@ class _Bubble(QFrame):
 
 
 class _Card(QFrame):
-    """A non-reply row (permission, error, saved file): raised rounded panel, coloured left stripe, small header."""
+    """A non-reply row (permission, error, saved file) in the pet's own pixel frame, like the HUD and the menu: an
+    inset graphite panel with a stepped outline, a square pixel marker in the status colour and a dim header."""
 
-    def __init__(self, title: str, color: str, glyph: str) -> None:
+    def __init__(self, title: str, color: str) -> None:
         super().__init__()
         self._color = QColor(color)
         self._head = QLabel()
         self._head.setTextFormat(Qt.TextFormat.PlainText)
-        font = ui_font(8)
-        font.setBold(True)
-        self._head.setFont(font)
+        self._head.setFont(ui_font(8))
         self._head.setWordWrap(True)
+        self._head.setContentsMargins(12, 0, 0, 0)  # room for the marker
         self.body = QVBoxLayout(self)
-        self.body.setContentsMargins(14, 8, 10, 8)
+        self.body.setContentsMargins(8, 7, 8, 8)
         self.body.setSpacing(6)
         self.body.addWidget(self._head)
-        self.set_header(title, color, glyph)
+        self.set_header(title, color)
 
-    def set_header(self, title: str, color: str, glyph: str) -> None:
+    def set_header(self, title: str, color: str) -> None:
         self._color = QColor(color)
-        self._head.setText(f"{glyph}  {title}")
-        self._head.setStyleSheet(f"color: {color};")
+        self._head.setText(title)
+        self._head.setStyleSheet(f"color: {TEXT_DIM_HEX};")
         self.update()
 
     def paintEvent(self, _event) -> None:  # type: ignore[override]
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        path = QPainterPath()
-        path.addRoundedRect(rect, 8, 8)
-        painter.fillPath(path, qcolor(GLASS_RAISED_RGBA))
-        painter.save()
-        painter.setClipPath(path)
-        painter.fillRect(QRectF(rect.left(), rect.top(), 3, rect.height()), self._color)
-        painter.restore()
-        painter.setPen(QPen(qcolor(HAIRLINE_RGBA), 1))
-        painter.drawPath(path)
+        alert = self._color.name().lower() == DANGER_HEX.lower()  # a coral frame only for errors and denials
+        paint_pixel_panel(painter, self.rect(), qcolor(GLASS_RGBA), self._color if alert else None)
+        head = self._head.geometry()
+        painter.fillRect(QRect(8 + 2, head.center().y() - 2, 6, 6), self._color)  # one sprite-pixel marker
         painter.end()
 
 
@@ -1091,7 +1084,7 @@ class AiChat(QWidget):
 
     def _add_saved_row(self, path: Path) -> None:
         """A file the model saved (the user picked where): Open, unless it would run as a program, and Show."""
-        row = _Card("Saved file", ACCENT_HEX, "✓")
+        row = _Card("Saved file", ACCENT_HEX)
         name = QLabel(path.name)
         name.setTextFormat(Qt.TextFormat.PlainText)
         name.setToolTip(str(path))
@@ -1212,7 +1205,7 @@ class AiChat(QWidget):
         label = ChatText(text, markdown=markdown, pt=9 if role in ("error", "note") else 10,
                          color={"thinking": ACCENT_HEX, "note": TEXT_DIM_HEX}.get(role, TEXT_HEX))
         if role == "error":
-            card = _Card("Error", DANGER_HEX, "!")
+            card = _Card("Error", DANGER_HEX)
             card.body.addWidget(label)
             layout.addWidget(card)
         elif role == "note":
@@ -1270,15 +1263,15 @@ class AiChat(QWidget):
             done(True)
             return
         intro, _sep, detail = text.partition("\n\n")  # the command, diff or note is shown apart from the question
-        card = _Card("Permission needed", ACCENT_HEX, "◆")
+        card = _Card("Permission needed", ACCENT_HEX)
         if danger:
-            card.set_header(f'Destructive command ("{danger[:30]}") - check it', DANGER_HEX, "!")
+            card.set_header(f'Destructive command ("{danger[:30]}") - check it', DANGER_HEX)
         card.body.addWidget(ChatText(intro, pt=9))
         if detail:
             code = ChatText(detail, pt=8.5)
             code.setFont(QFont("Consolas", 9))
             code.document().setDocumentMargin(6)
-            code.setStyleSheet(f"QTextBrowser {{ background: {rgba_css(GLASS_RGBA)}; color: {TEXT_HEX}; }}")
+            code.setStyleSheet(f"QTextBrowser {{ background: {rgba_css(GLASS_RAISED_RGBA)}; color: {TEXT_HEX}; }}")
             card.body.addWidget(code)
         buttons = QHBoxLayout()
         buttons.setSpacing(6)
@@ -1293,9 +1286,9 @@ class AiChat(QWidget):
             if choice == "chat":
                 self._allowed.add(key)
             if choice is None:
-                card.set_header(f"Denied  -  {what}", DANGER_HEX, "✕")
+                card.set_header(f"Denied  -  {what}", TEXT_DIM_HEX)
             else:
-                card.set_header(f"Allowed  -  {what}" + (" for this chat" if choice == "chat" else ""), ACCENT_HEX, "✓")
+                card.set_header(f"Allowed  -  {what}" + (" for this chat" if choice == "chat" else ""), ACCENT_HEX)
             for btn in btns:
                 btn.hide()
             QTimer.singleShot(0, self._relayout)  # the card is shorter without its buttons

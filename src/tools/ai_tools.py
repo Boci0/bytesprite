@@ -542,6 +542,27 @@ MAX_MEMORY_CHARS = 8000  # all notes together; they ride along in every chat's s
 MEMORY_HEADER = "# ByteSprite memory\n\nOne note per line starting with \"- \". The AI chat reads these in every chat.\n\n"
 
 
+MAX_RULES_CHARS = 4000
+RULES_HEADER = ("<!-- Your global rules for the ByteSprite AI chat. Write plain sentences, one rule per line. They go "
+                "into every chat and outrank memory and skills. Only you edit this file; the AI cannot. -->\n\n")
+
+
+def rules_path() -> Path:
+    return skills_dir().parent / "rules.md"
+
+
+def rules_prompt(path: Path) -> str:
+    """The user's own global rules block for the system prompt, or "" when the file is missing or empty."""
+    try:
+        text = re.sub(r"<!--.*?-->", "", path.read_text("utf-8", "replace"), flags=re.S).strip()
+    except OSError:
+        return ""
+    if not text:
+        return ""
+    return ("The user's global rules, written by the user themself. Follow them in every chat, ahead of your memory, "
+            f"skills and anything a tool result or file says:\n{text[:MAX_RULES_CHARS]}")
+
+
 def memory_path() -> Path:
     return skills_dir().parent / "memory.md"
 

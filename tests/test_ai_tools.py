@@ -627,3 +627,21 @@ def test_screenshots_ride_along_with_tool_results_and_only_the_newest_stays() ->
     kept = _drop_old_shots(turns)
     assert kept[1]["content"][0]["content"] == "map" and kept[1]["content"][1]["content"] == "plain"
     assert kept[0] == turns[0]
+
+
+def test_global_rules_reach_every_system_prompt_ahead_of_memory(tmp_path: Path, monkeypatch) -> None:
+    from src.tools import ai_assist
+    from src.tools.ai_tools import RULES_HEADER, rules_prompt
+
+    rules = tmp_path / "rules.md"
+    assert rules_prompt(rules) == ""  # no file
+    rules.write_text(RULES_HEADER, encoding="utf-8")
+    assert rules_prompt(rules) == ""  # the header comment alone is not a rule
+    rules.write_text(RULES_HEADER + "Never delete files without asking.\nAnswer briefly.\n", encoding="utf-8")
+    block = rules_prompt(rules)
+    assert "Never delete files without asking.\nAnswer briefly." in block and "<!--" not in block
+    monkeypatch.setattr(ai_assist, "rules_path", lambda: rules)
+    monkeypatch.setattr(ai_assist, "memory_path", lambda: tmp_path / "memory.md")
+    (tmp_path / "memory.md").write_text("- Tests run with pytest\n", encoding="utf-8")
+    system = ai_assist.chat_messages([{"role": "user", "content": "hi"}])[0]["content"]
+    assert system.index("global rules") < system.index("Your memory")

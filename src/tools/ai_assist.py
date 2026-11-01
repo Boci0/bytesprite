@@ -42,7 +42,8 @@ from urllib.parse import parse_qs, quote_plus, urljoin, urlsplit
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from src.engine.models import CompanionState, HudBar, HudData, ToolMenuItem
-from src.tools.ai_tools import MEMORY_HEADER, LOCAL_DATA_TOOLS, memory_path, memory_prompt, skills_dir, skills_prompt
+from src.tools.ai_tools import (MEMORY_HEADER, LOCAL_DATA_TOOLS, RULES_HEADER, memory_path, memory_prompt, rules_path,
+                                rules_prompt, skills_dir, skills_prompt)
 from src.tools.mcp_client import SEP as MCP_SEP, ensure_config
 
 # key: (menu label, base URL, default model; '' means the user must pick one)
@@ -276,7 +277,8 @@ def chat_messages(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
         ] if images else content})
         total += len(content)
     system = f"{SYSTEM_PROMPT} Today is {date.today()}."
-    extra = [block for block in (memory_prompt(memory_path()), skills_prompt(skills_dir())) if block]
+    extra = [block for block in (rules_prompt(rules_path()), memory_prompt(memory_path()), skills_prompt(skills_dir()))
+             if block]
     return [{"role": "system", "content": "\n\n".join([system, *extra])}, *reversed(kept)]
 
 
@@ -882,6 +884,7 @@ class AiAssistPlugin:
         return [
             ToolMenuItem(label=f"Open AI Chat\t{HOTKEY_LABEL}+A", callback_id="ai:chat", submenu=sub),
             ToolMenuItem(label="Open Skills Folder", callback_id="ai:skills", submenu=sub),
+            ToolMenuItem(label="Edit Global Rules...", callback_id="ai:rules", submenu=sub),
             ToolMenuItem(label="Open Memory File", callback_id="ai:memory", submenu=sub),
             ToolMenuItem(label="Remove API Key", callback_id="ai:forget", enabled=self.has_key(), submenu=sub),
             ToolMenuItem(label="Remove Search Key", callback_id="ai:forget_search",
@@ -890,6 +893,16 @@ class AiAssistPlugin:
         ]
 
     def execute_action(self, callback_id: str) -> tuple[bool, str, str]:
+        if callback_id == "ai:rules":  # the user's own rules: no tool writes this file
+            path = rules_path()
+            try:
+                if not path.exists():
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(RULES_HEADER, encoding="utf-8")
+                os.startfile(path)  # type: ignore[attr-defined]
+            except OSError:
+                return (True, "OPEN ERR", "#EF7D57")
+            return (True, "RULES", "#8A9AF2")
         if callback_id == "ai:memory":  # the user can read, fix or delete what the AI remembered
             path = memory_path()
             try:
