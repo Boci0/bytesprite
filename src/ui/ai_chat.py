@@ -7,6 +7,7 @@ user presses Enter or the send button. Replies are plain text, never rendered or
 
 from __future__ import annotations
 
+import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +32,9 @@ MAX_FILE_BYTES = 512 * 1024
 MAX_ATTACHMENTS = 4
 MAX_IMAGE_SIDE = 1568  # longest side sent to vision models: bigger only costs tokens
 _IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp")
+# A saved file with these would run rather than open, so its row offers only Show in folder
+_RUNNABLE_SUFFIXES = {".bat", ".cmd", ".ps1", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh", ".hta", ".exe", ".com",
+                      ".scr", ".msi", ".lnk", ".url", ".reg", ".py", ".pyw", ".jar", ".cpl", ".msc", ".pif"}
 _FRIENDLY_ERRORS = {
     "bad key": "The API key was rejected. Check it in Setup (gear).",
     "no balance": "Your balance with the provider is empty. Top it up, then try again.",
@@ -831,6 +835,8 @@ class AiChat(QWidget):
         if self._thinking_row is not None:
             self._thinking_row.deleteLater()
             self._thinking_row = self._thinking_label = None
+        for path in getattr(self._tool_host, "take_saved", list)():
+            self._add_saved_row(path)
         if error or reply is None:
             failed = self._history.pop() if self._history and self._history[-1]["role"] == "user" else None
             if error != "stopped":
@@ -891,6 +897,31 @@ class AiChat(QWidget):
         toggle.clicked.connect(flip)
         layout.addWidget(toggle, 0, Qt.AlignmentFlag.AlignLeft)
         layout.addWidget(body)
+
+    def _add_saved_row(self, path: Path) -> None:
+        """A file the model saved (the user picked where): Open, unless it would run as a program, and Show."""
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(2, 0, 2, 0)
+        layout.setSpacing(10)
+        name = QLabel(f"Saved {path.name}")
+        name.setTextFormat(Qt.TextFormat.PlainText)
+        name.setToolTip(str(path))
+        name.setFont(ui_font(8))
+        name.setStyleSheet(f"color: {TEXT_DIM_HEX};")
+        layout.addWidget(name)
+        links = [("Show in folder", lambda: subprocess.Popen(f'explorer /select,"{path}"'))]
+        if path.suffix.lower() not in _RUNNABLE_SUFFIXES:
+            links.insert(0, ("Open", lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))))
+        for text, action in links:
+            link = _ClickLabel(text)
+            link.setFont(ui_font(8))
+            link.setStyleSheet(f"color: {TEXT_HEX}; text-decoration: underline;")
+            link.setCursor(Qt.CursorShape.PointingHandCursor)
+            link.clicked.connect(action)
+            layout.addWidget(link)
+        layout.addStretch(1)
+        self._thread_layout.addWidget(row)
 
     # ------------------------------------------------------------------ model switcher
 
