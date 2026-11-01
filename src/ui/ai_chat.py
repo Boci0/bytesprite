@@ -25,8 +25,8 @@ from src.tools.ai_assist import (BRAVE_KEY_PAGE, BRAVE_URL, KEY_PAGES, MAX_INPUT
 from src.ui.context_menu import style_menu
 from src.ui.quick_tools import OcrJob
 from src.ui.sfx import play_cue
-from src.ui.theme import (DANGER_HEX, FONT_FAMILY, GLASS_RAISED_RGBA, GLASS_RGBA, HAIRLINE_RGBA, HOVER_RGBA, TEXT_DIM_HEX,
-                          TEXT_HEX, qcolor, rgba_css, ui_font)
+from src.ui.theme import (ACCENT_HEX, DANGER_HEX, FONT_FAMILY, GLASS_RAISED_RGBA, GLASS_RGBA, HAIRLINE_RGBA, HOVER_RGBA,
+                          OUTLINE_RGBA, TEXT_DIM_HEX, TEXT_HEX, paint_pixel_panel, qcolor, rgba_css, ui_font)
 
 MAX_FILE_BYTES = 512 * 1024
 MAX_ATTACHMENTS = 4
@@ -46,13 +46,13 @@ _FRIENDLY_ERRORS = {
     "cut off": "The model spent its whole token budget thinking. Try a lower Thinking level.",
 }
 _FIELD_CSS = (
-    f"background: {rgba_css(GLASS_RAISED_RGBA)}; color: {TEXT_HEX}; border: 1px solid {rgba_css(HAIRLINE_RGBA)};"
-    " border-radius: 6px; padding: 4px 6px;"
+    f"background: {rgba_css(GLASS_RAISED_RGBA)}; color: {TEXT_HEX}; border: 1px solid {rgba_css(OUTLINE_RGBA)};"
+    " border-radius: 0; padding: 4px 6px;"
 )
 _BUTTON_CSS = (
-    f"QPushButton {{ color: {TEXT_HEX}; background: transparent; border: 1px solid {rgba_css(HAIRLINE_RGBA)};"
-    " border-radius: 6px; padding: 4px 12px; }"
-    f" QPushButton:hover {{ background: {rgba_css(HOVER_RGBA)}; }}"
+    f"QPushButton {{ color: {TEXT_HEX}; background: transparent; border: 1px solid {rgba_css(OUTLINE_RGBA)};"
+    " border-radius: 0; padding: 4px 12px; }"
+    f" QPushButton:hover {{ background: {rgba_css(HOVER_RGBA)}; color: {ACCENT_HEX}; }}"
 )
 
 
@@ -133,16 +133,13 @@ class Attachment:
 class _Frosted(QFrame):
     """Rounded opaque graphite panel with a white hairline, like the menus and HUD."""
 
-    def __init__(self, radius: int, raised: bool = False, parent: QWidget | None = None) -> None:
+    def __init__(self, raised: bool = False, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._radius, self._raised = radius, raised
+        self._raised = raised
 
     def paintEvent(self, _event) -> None:  # type: ignore[override]
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.setPen(QPen(qcolor(HAIRLINE_RGBA), 1))
-        painter.setBrush(qcolor(GLASS_RAISED_RGBA if self._raised else GLASS_RGBA))
-        painter.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), self._radius, self._radius)
+        paint_pixel_panel(painter, self.rect(), qcolor(GLASS_RAISED_RGBA if self._raised else GLASS_RGBA))
         painter.end()
 
 
@@ -171,10 +168,8 @@ class IconButton(QAbstractButton):
         s = self.width() / 32.0
         painter.scale(s, s)
         if self.underMouse() and self.isEnabled():
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(qcolor(HOVER_RGBA))
-            painter.drawEllipse(QRectF(1, 1, 30, 30))
-        color = QColor(TEXT_HEX if self.isEnabled() else TEXT_DIM_HEX)
+            painter.fillRect(QRectF(3, 3, 26, 26), qcolor(HOVER_RGBA))
+        color = QColor((ACCENT_HEX if self.underMouse() else TEXT_HEX) if self.isEnabled() else TEXT_DIM_HEX)
         painter.setPen(QPen(color, 1.6 / max(s, 0.6), cap=Qt.PenCapStyle.RoundCap, join=Qt.PenJoinStyle.RoundJoin))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         if self.kind == "plus":
@@ -207,7 +202,7 @@ class IconButton(QAbstractButton):
             painter.drawLine(QPointF(15, 17), QPointF(22, 10))
         elif self.kind == "stop":
             painter.setBrush(color)
-            painter.drawRoundedRect(QRectF(11.5, 11.5, 9, 9), 2, 2)
+            painter.drawRect(QRectF(11.5, 11.5, 9, 9))
         painter.end()
 
 
@@ -249,7 +244,7 @@ class Chip(_Frosted):
     """One attachment: thumbnail or document icon, name, status, and an x when removable."""
 
     def __init__(self, item: Attachment, on_remove: Callable[[], None] | None = None) -> None:
-        super().__init__(8, raised=True)
+        super().__init__(raised=True)
         self.item = item
         row = QHBoxLayout(self)
         row.setContentsMargins(4, 4, 2 if on_remove else 8, 4)
@@ -382,7 +377,7 @@ class AiChat(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         # One card styled like the right-click menu: header, conversation or setup, then the input
-        card = self._card = _Frosted(10)
+        card = self._card = _Frosted()
         root.addWidget(card)
         layout = QVBoxLayout(card)
         layout.setContentsMargins(6, 6, 6, 6)
@@ -434,7 +429,7 @@ class AiChat(QWidget):
         self._scroll.setStyleSheet(
             "QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; }"
             " QScrollBar:vertical { background: transparent; width: 6px; margin: 0; }"
-            f" QScrollBar::handle:vertical {{ background: {rgba_css(HAIRLINE_RGBA)}; border-radius: 3px;"
+            f" QScrollBar::handle:vertical {{ background: {rgba_css(OUTLINE_RGBA)}; border-radius: 0;"
             " min-height: 24px; }"
             " QScrollBar::add-line, QScrollBar::sub-line, QScrollBar::add-page, QScrollBar::sub-page"
             " { background: none; height: 0; }")
@@ -452,7 +447,7 @@ class AiChat(QWidget):
         self._chip_row.addStretch(1)
         self._chip_box.hide()
         layout.addWidget(self._chip_box)
-        field = _Frosted(8, raised=True)
+        field = _Frosted(raised=True)
         bar = QHBoxLayout(field)
         bar.setContentsMargins(2, 2, 2, 2)
         bar.setSpacing(2)
@@ -591,7 +586,7 @@ class AiChat(QWidget):
             QDesktopServices.openUrl(QUrl(page))
 
     def _set_status(self, text: str, ok: bool | None = None) -> None:
-        color = TEXT_DIM_HEX if ok is None else ("#38B764" if ok else DANGER_HEX)
+        color = TEXT_DIM_HEX if ok is None else (ACCENT_HEX if ok else DANGER_HEX)
         self._status.setStyleSheet(f"color: {color};")
         self._status.setText(text)
         self._relayout()
@@ -889,7 +884,7 @@ class AiChat(QWidget):
         body.setWordWrap(True)
         body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         body.setFont(ui_font(8))
-        body.setStyleSheet(f"color: {TEXT_DIM_HEX}; padding: 4px 6px; border-left: 2px solid {rgba_css(HAIRLINE_RGBA)};")
+        body.setStyleSheet(f"color: {TEXT_DIM_HEX}; padding: 4px 6px; border-left: 2px solid {rgba_css(OUTLINE_RGBA)};")
         body.hide()
         shown_text, hidden_text = "Hide reasoning", toggle.text()
 
@@ -1028,7 +1023,7 @@ class AiChat(QWidget):
         label.setFont(ui_font(8.5 if role == "error" else 9.5))
         if role == "user":
             label.setStyleSheet(f"color: {TEXT_HEX}; background: {rgba_css(HOVER_RGBA)};"
-                                " border-radius: 12px; padding: 6px 10px;")
+                                f" border: 1px solid {rgba_css(OUTLINE_RGBA)}; border-radius: 0; padding: 6px 10px;")
             # Wrapped labels under an alignment get a guessed width; pin it so the bubble hugs its text
             longest = max((label.fontMetrics().horizontalAdvance(line) for line in text.splitlines()), default=0)
             label.setFixedWidth(min(int(self.WIDTH * 0.72), longest + 26))
@@ -1125,11 +1120,11 @@ class AiChat(QWidget):
         """Menu-style header: name with a status dot, then the model, thinking level and host (click to switch)."""
         p = self._plugin
         if self._job is not None:
-            state, color = "Thinking", "#E8D29F"
+            state, color = "Thinking", ACCENT_HEX
         elif self._ready():
-            state, color = "Ready", "#9FD3A8"
+            state, color = "Ready", ACCENT_HEX
         else:
-            state, color = "Setup needed", "#E6A0A0"
+            state, color = "Setup needed", DANGER_HEX
         self._name.setText(
             f'<span style="font-family:\'{FONT_FAMILY}\'; font-size:10.5pt; font-weight:600; color:{TEXT_HEX};">'
             f'ByteSprite AI</span>&nbsp;&nbsp;<span style="font-family:\'{FONT_FAMILY}\'; font-size:9pt;'

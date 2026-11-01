@@ -1,4 +1,4 @@
-"""Frosted-graphite right-click context menu for ByteSprite Multi-Tool."""
+"""Pixel-framed right-click context menu for ByteSprite Multi-Tool."""
 
 from __future__ import annotations
 
@@ -17,33 +17,34 @@ from src import __version__
 from src.storage.storage_manager import autostart_enabled, set_autostart
 from src.ui.quick_tools import HOTKEY_LABEL
 from src.ui.theme import (
+    ACCENT_HEX,
+    DANGER_HEX,
     FONT_FAMILY,
-    GLASS_RGBA,
     HAIRLINE_RGBA,
     HOVER_RGBA,
+    SLEEP_HEX,
     TEXT_DIM_HEX,
     TEXT_HEX,
+    install_pixel_frame,
     rgba_css,
 )
 
 MENU_STYLESHEET = f"""
 QMenu {{
-    background-color: {rgba_css(GLASS_RGBA)};
+    background: transparent;
     color: {TEXT_HEX};
-    border: 1px solid {rgba_css(HAIRLINE_RGBA)};
-    border-radius: 10px;
-    padding: 6px;
+    border: none;
+    padding: 8px;
     font-family: "{FONT_FAMILY}";
     font-size: 10pt;
 }}
 QMenu::item {{
-    padding: 6px 28px 6px 12px;
-    border-radius: 6px;
+    padding: 6px 28px 6px 10px;
     background: transparent;
 }}
 QMenu::item:selected {{
     background-color: {rgba_css(HOVER_RGBA)};
-    color: #FFFFFF;
+    color: {ACCENT_HEX};
 }}
 QMenu::item:disabled {{
     color: {TEXT_DIM_HEX};
@@ -51,7 +52,7 @@ QMenu::item:disabled {{
 QMenu::separator {{
     height: 1px;
     background: {rgba_css(HAIRLINE_RGBA)};
-    margin: 5px 6px;
+    margin: 5px 2px;
 }}
 QMenu::indicator {{
     width: 14px;
@@ -72,15 +73,15 @@ QUICK_TOOL_ITEMS: tuple[tuple[str, str], ...] = (
 )
 
 _STATE_LABELS: dict[PetState, tuple[str, str]] = {
-    PetState.IDLE: ("Online", "#9FD3A8"),
-    PetState.PLAYING: ("Focus", "#E8D29F"),
-    PetState.HUNGRY: ("Alert", "#E6A0A0"),
-    PetState.SLEEPING: ("Do Not Disturb", "#B4B8D8"),
+    PetState.IDLE: ("Online", ACCENT_HEX),
+    PetState.PLAYING: ("Focus", ACCENT_HEX),
+    PetState.HUNGRY: ("Alert", DANGER_HEX),
+    PetState.SLEEPING: ("Do Not Disturb", SLEEP_HEX),
 }
 
 
 def style_menu(menu: QMenu) -> QMenu:
-    """Apply the frameless translucent frosted look (rounded corners need a clear backdrop)."""
+    """Apply the frameless pixel-frame look (stepped corners need a clear backdrop)."""
     menu.setWindowFlags(
         menu.windowFlags()
         | Qt.WindowType.FramelessWindowHint
@@ -88,6 +89,7 @@ def style_menu(menu: QMenu) -> QMenu:
     )
     menu.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
     menu.setStyleSheet(MENU_STYLESHEET)
+    install_pixel_frame(menu)
     return menu
 
 

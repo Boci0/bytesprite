@@ -9,12 +9,11 @@ from PyQt6.QtWidgets import (QCheckBox, QDialog, QGridLayout, QHBoxLayout, QLabe
 from src.tools.macros import MAX_NAME, MAX_RECIPE, STEPS, describe, parse_recipe
 from src.ui.ai_chat import _BUTTON_CSS, _FIELD_CSS, _Frosted
 from src.ui.quick_tools import HOTKEY_LABEL
-from src.ui.theme import DANGER_HEX, TEXT_DIM_HEX, TEXT_HEX, ui_font
+from src.ui.theme import ACCENT_HEX, DANGER_HEX, TEXT_DIM_HEX, TEXT_HEX, ui_font
 
 # Chips insert these; steps with an argument get a starter the user then edits
 _CHIP_TEXT = {"text": "text:Explain this", "open": "open:https://www.youtube.com/results?search_query={text}",
               "tool": "tool:pomodoro:toggle"}
-_OK_HEX = "#38B764"
 
 
 class MacroEditor(QDialog):
@@ -27,7 +26,7 @@ class MacroEditor(QDialog):
         self.setFixedWidth(400)
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
-        card = _Frosted(10)
+        card = _Frosted()
         root.addWidget(card)
         lay = QVBoxLayout(card)
         lay.setContentsMargins(16, 14, 16, 14)
@@ -107,7 +106,7 @@ class MacroEditor(QDialog):
             ok = False
         text = describe(self.recipe.text()) if self.recipe.text().strip() else "Tap steps to build it"
         self.preview.setText(text[:1].upper() + text[1:])
-        self.preview.setStyleSheet(f"color: {_OK_HEX if ok else DANGER_HEX if self.recipe.text().strip() else TEXT_DIM_HEX};")
+        self.preview.setStyleSheet(f"color: {ACCENT_HEX if ok else DANGER_HEX if self.recipe.text().strip() else TEXT_DIM_HEX};")
         self.save.setEnabled(ok and bool(self.name.text().strip()))
 
     def mousePressEvent(self, event) -> None:  # type: ignore[override]

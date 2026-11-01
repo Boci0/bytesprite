@@ -29,12 +29,15 @@ from src.graphics.sprite_matrix import get_sprite_frames
 from src.tools.file_forge import ForgeWheelOption
 from src.ui.sfx import TickSounds
 from src.ui.theme import (
+    ACCENT_HEX,
     DANGER_HEX,
     GLASS_RAISED_RGBA,
     GLASS_RGBA,
     HAIRLINE_RGBA,
+    OUTLINE_RGBA,
     TEXT_DIM_HEX,
     TEXT_HEX,
+    paint_pixel_panel,
     qcolor,
     ui_font,
 )
@@ -424,15 +427,10 @@ class RadialDropWheel(QWidget):
         base_opacity = _clamp01(t * 2.0)
         painter.setOpacity(base_opacity)
         header_text, header_color = self._header_preview_text()
-        banner = QRectF(18.5, 8.5, self.width() - 37.0, 26.0)
-        painter.setPen(hairline)
-        painter.setBrush(qcolor(GLASS_RGBA))
-        painter.drawRoundedRect(banner, 13.0, 13.0)
-        chosen = self.selected_option()
-        if chosen is not None:
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(chosen.color_hex))
-            painter.drawEllipse(QPointF(banner.left() + 14.0, banner.center().y()), 3.5, 3.5)
+        banner = QRectF(18, 8, self.width() - 36, 26)
+        paint_pixel_panel(painter, banner.toRect())
+        if self.selected_option() is not None:
+            painter.fillRect(QRect(int(banner.left()) + 12, int(banner.center().y()) - 2, 4, 4), QColor(ACCENT_HEX))
         painter.setFont(ui_font(8.5, bold=True))
         painter.setPen(header_color)
         painter.drawText(banner, Qt.AlignmentFlag.AlignCenter, header_text)
@@ -446,7 +444,7 @@ class RadialDropWheel(QWidget):
         painter.scale(scale, scale)
         painter.translate(-center)
         halo_r = self.OUTER_RADIUS + 6.0
-        painter.setPen(hairline)
+        painter.setPen(QPen(qcolor(OUTLINE_RGBA), 2.0))
         painter.setBrush(qcolor(GLASS_RGBA))
         painter.drawEllipse(center, halo_r, halo_r)
 
@@ -455,8 +453,7 @@ class RadialDropWheel(QWidget):
             is_hot = idx == self._hovered_index
             poly = self._hover_polys[idx] if is_hot else self._normal_polys[idx]
             if is_hot:
-                accent = QColor(opt.color_hex)
-                accent.setAlpha(230)
+                accent = QColor(ACCENT_HEX)
                 painter.setBrush(QColor(68, 72, 84, 245))
                 painter.setPen(QPen(accent, 2.0))
             else:
@@ -502,7 +499,7 @@ class RadialDropWheel(QWidget):
             )
 
             painter.setFont(sub_font)
-            painter.setPen(QColor(opt.color_hex) if is_hot else QColor(TEXT_DIM_HEX))
+            painter.setPen(QColor(ACCENT_HEX) if is_hot else QColor(TEXT_DIM_HEX))
             painter.drawText(
                 QRectF(box.left(), box.top() + 14.0, box.width(), 13.0),
                 Qt.AlignmentFlag.AlignCenter,

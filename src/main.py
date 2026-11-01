@@ -17,6 +17,7 @@ from src.graphics.animation_controller import AnimationController
 from src.storage.storage_manager import StorageManager
 from src.ui.pet_window import PetWindow, build_app_icon
 from src.ui.quick_tools import GlobalHotkeys
+from src.ui.theme import APP_STYLESHEET
 from src.updater import is_installed
 
 # Stored beside plugin state in state.json "tools"; not a ToolPlugin, so it never joins the HUD cycle
@@ -235,6 +236,7 @@ def main(argv: list[str] | None = None) -> int:
     app = QApplication(args)
     app.setApplicationName("ByteSprite")
     app.setWindowIcon(build_app_icon(64))
+    app.setStyleSheet(APP_STYLESHEET)
 
     storage_override: StorageManager | None = None
     if "--state-file" in args:

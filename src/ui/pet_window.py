@@ -62,7 +62,8 @@ from src.ui.quick_tools import OcrJob, SnipSession, open_folder_in_background
 from src.ui.sfx import play_cue, preload_tick_sounds, prewarm as prewarm_ticks
 from src.ui.tool_wheel import WEB_SHORTCUTS, ToolWheel, ToolWheelOption, WheelLayout, google_search_url
 from src.updater import APP_DIR, RELEASES_URL, UpdateJob, is_installed
-from src.ui.theme import GLASS_RGBA, HAIRLINE_RGBA, HOVER_RGBA, TEXT_DIM_HEX, TEXT_HEX, qcolor, ui_font
+from src.ui.theme import (ACCENT_HEX, GLASS_RGBA, HAIRLINE_RGBA, HOVER_RGBA, SLEEP_HEX, TEXT_DIM_HEX, TEXT_HEX,
+                          paint_pixel_panel, pet_accent, qcolor, ui_font)
 
 
 @dataclass(frozen=True)
@@ -1681,7 +1682,7 @@ class PetWindow(QWidget):
         painter.end()
 
     def _paint_hud(self, painter: QPainter) -> None:
-        """Frosted-graphite card matching PetContextMenu: rounded panel, hairline, Segoe UI."""
+        """Pixel-frame card matching PetContextMenu: stepped panel, segmented bars, Segoe UI text."""
         r = self._hud_rect
         hud = self._state_machine.get_hud_data()
         sleeping = self._state_machine.state == PetState.SLEEPING
@@ -1689,12 +1690,8 @@ class PetWindow(QWidget):
         title = plugin.display_name if plugin is not None else hud.badge_left
 
         painter.save()
-        # Smooth shapes only inside the card; the sprite keeps nearest-neighbor rendering
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-        painter.setPen(QPen(qcolor(HAIRLINE_RGBA), 1))
-        painter.setBrush(qcolor(GLASS_RGBA))
-        painter.drawRoundedRect(QRectF(r).adjusted(0.5, 0.5, -0.5, -0.5), 10, 10)
+        paint_pixel_panel(painter, r)
 
         # Header: name + colored status dot, like the menu header card
         header = QRect(r.left() + 10, r.top() + 5, r.width() - 20, 14)
@@ -1702,7 +1699,7 @@ class PetWindow(QWidget):
         # Short codes (OK, DND, ERR) stay upper case; words read like the menu's "Online"
         status = f"● {status_text if len(status_text) <= 3 else status_text.title()}"
         painter.setFont(ui_font(7))
-        painter.setPen(QColor("#8A9AF2") if sleeping else QColor(hud.badge_right_color))
+        painter.setPen(QColor(SLEEP_HEX) if sleeping else pet_accent(hud.badge_right_color))
         painter.drawText(header, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, status)
         status_w = painter.fontMetrics().horizontalAdvance(status) + 6
 
@@ -1727,14 +1724,12 @@ class PetWindow(QWidget):
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                 bar.label,
             )
-            track = QRectF(row.left() + 36, row.center().y() - 1.5, row.width() - 68, 4)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(qcolor(HOVER_RGBA))
-            painter.drawRoundedRect(track, 2, 2)
-            fill_w = (bar.clamped_value / 100.0) * track.width()
-            if fill_w > 0:
-                painter.setBrush(QColor(bar.color_hex))
-                painter.drawRoundedRect(QRectF(track.left(), track.top(), max(4.0, fill_w), track.height()), 2, 2)
+            # Chunky 4px cells like the sprite's own pixels; any nonzero value lights the first cell
+            cells = (row.width() - 68 + 1) // 5
+            lit = math.ceil(bar.clamped_value / 100.0 * cells)
+            for c in range(cells):
+                cell = QRect(row.left() + 36 + c * 5, row.center().y() - 2, 4, 4)
+                painter.fillRect(cell, pet_accent(bar.color_hex) if c < lit else qcolor(HOVER_RGBA))
             painter.setPen(QColor(TEXT_HEX))
             painter.drawText(
                 QRect(row.right() - 28, row.top(), 28, row.height()),
@@ -1754,7 +1749,7 @@ class PetWindow(QWidget):
         painter.restore()
 
     _LYRIC_FADE_MS = 240.0
-    _LYRIC_DOT = QColor(176, 222, 255)  # the focus pulse's ice blue
+    _LYRIC_DOT = QColor(ACCENT_HEX)
 
     def _lyric_waiting(self) -> bool:
         lyrics = self._state_machine.lyrics_plugin
@@ -1876,9 +1871,7 @@ class PetWindow(QWidget):
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
         painter.setOpacity(alpha)
         card = QRectF(r.left(), self._sprite_rect.top() - 4 - h + 4 * (1 - alpha), r.width(), h)
-        painter.setPen(QPen(qcolor(HAIRLINE_RGBA), 1))
-        painter.setBrush(qcolor(GLASS_RGBA))
-        painter.drawRoundedRect(card.adjusted(0.5, 0.5, -0.5, -0.5), 10, 10)
+        paint_pixel_panel(painter, card.toRect())
 
         body = QRectF(card.left() + 10, card.top() + 7, card.width() - 20, h - 14 - dots_h)
         if self._lyric_prev and change < 1.0:
@@ -1909,18 +1902,15 @@ class PetWindow(QWidget):
             for i in range(3):
                 bounce = max(0.0, math.sin(now / 160 - i * 0.9)) * 4
                 painter.setBrush(self._LYRIC_DOT if i == lit else QColor(TEXT_DIM_HEX))
-                painter.drawEllipse(QRectF(cx - 11 + i * 9, cy - 2 - bounce, 5, 5))
+                painter.drawRect(QRectF(cx - 10 + i * 8, cy - 2 - round(bounce), 4, 4))
         painter.restore()
 
     def _paint_hint(self, painter: QPainter) -> None:
         """Hint card in the HUD style: the suggestion plus a dim how-to line."""
         r = self._hint_rect
         painter.save()
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-        painter.setPen(QPen(qcolor(HAIRLINE_RGBA), 1))
-        painter.setBrush(qcolor(GLASS_RGBA))
-        painter.drawRoundedRect(QRectF(r).adjusted(0.5, 0.5, -0.5, -0.5), 10, 10)
+        paint_pixel_panel(painter, r)
         center = Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter
         painter.setFont(ui_font(8.5, bold=True))
         painter.setPen(QColor(TEXT_HEX))
@@ -1943,21 +1933,14 @@ class PetWindow(QWidget):
         pill_y = max(min_y, self._sprite_rect.top() - 22 - rise_px)
         pill = QRect(pill_x, pill_y, pill_w, pill_h)
 
-        bg = QColor(24, 20, 37, min(240, alpha))
-        painter.fillRect(pill.adjusted(1, 0, -1, 0), bg)
-        painter.fillRect(pill.adjusted(0, 1, 0, -1), bg)
-
-        border = QColor(self._toast_color)
-        border.setAlpha(min(180, alpha))
-        painter.setPen(QPen(border, 1))
-        painter.drawRect(pill.adjusted(1, 1, -2, -2))
-
-        fg = QColor(self._toast_color)
-        fg.setAlpha(alpha)
-        painter.setPen(fg)
+        painter.save()
+        painter.setOpacity(alpha / 255)
+        paint_pixel_panel(painter, pill)
+        painter.setPen(pet_accent(self._toast_color))
         toast_font = QFont("Consolas", 8, QFont.Weight.Bold)
         painter.setFont(toast_font)
         painter.drawText(pill, Qt.AlignmentFlag.AlignCenter, self._toast_text)
+        painter.restore()
 
     # ------------------------------------------------------------------
     # Lifecycle & Cleanup
