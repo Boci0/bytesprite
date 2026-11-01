@@ -604,6 +604,7 @@ def test_history_keeps_newest_tool_output_and_previews_older() -> None:
     assert ai_assist.read_local_data(msgs[2]) and ai_assist.read_local_data(msgs[4])
     assert not ai_assist.read_local_data({"role": "assistant", "content": ai_assist.tools_block([("web_search(q)", "r")], 9)})
     assert not ai_assist.read_local_data({"role": "user", "content": msgs[2]["content"]})
+    assert ai_assist.read_local_data({"role": "assistant", "content": ai_assist.tools_block([("notes__get-page(x)", "r")], 9)})
 
 
 def test_run_tool_rejects_bad_calls_and_anthropic_params() -> None:

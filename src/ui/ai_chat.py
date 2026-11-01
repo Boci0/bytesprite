@@ -364,6 +364,8 @@ class AiChat(QWidget):
         self._ocr_jobs: list[OcrJob] = []
         self._job: AiJob | None = None
         self._auto_send = False  # a macro's `ask` step: send once images are read and no reply is pending
+        self._mcp_allowed: set[str] = set()  # MCP servers the user allowed in this chat
+        self._mcp_pending: Callable[[bool], None] | None = None  # the open Allow/Deny prompt
         self._models_job: AiJob | None = None
         self._models: dict[str, list[ModelInfo]] = {}  # base URL -> its /models list, fetched on first open
         self._testing = False
@@ -799,6 +801,8 @@ class AiChat(QWidget):
         """Drop the pending reply (the request may still finish, but its answer is ignored)."""
         if self._job is None or self._testing:
             return
+        if self._mcp_pending is not None:  # the worker is waiting on it
+            self._mcp_pending(False)
         job, self._job = self._job, None
         job.finished.disconnect(self._on_done)
         job.finished.connect(job.deleteLater)  # its thread still emits: deleting it now races that emit
@@ -1048,10 +1052,42 @@ class AiChat(QWidget):
     def _add_bubble(self, role: str, text: str, attachments: list[Attachment] | None = None) -> QLabel:
         return self._add_row(role, text, attachments)[1]
 
+    def confirm_mcp(self, server: str, tool: str, done: Callable[[bool], None]) -> None:
+        """Ask before an MCP server's first tool call in this chat; the worker thread waits for done(allowed)."""
+        if server in self._mcp_allowed:
+            done(True)
+            return
+        row, label = self._add_row("assistant", f'The model wants to use your MCP server "{server}" ({tool}). '
+                                                "Allow it for this chat?")
+        buttons = QHBoxLayout()
+        allow, deny = QPushButton("Allow"), QPushButton("Deny")
+
+        def answer(ok: bool) -> None:
+            if self._mcp_pending is not answer:
+                return
+            self._mcp_pending = None
+            if ok:
+                self._mcp_allowed.add(server)
+            label.setText(f'{"Allowed" if ok else "Denied"} MCP server "{server}" for this chat.')
+            allow.hide()
+            deny.hide()
+            done(ok)
+
+        for btn, ok in ((allow, True), (deny, False)):
+            btn.setStyleSheet(_BUTTON_CSS)
+            btn.clicked.connect(lambda _c=False, ok=ok: answer(ok))
+            buttons.addWidget(btn)
+        buttons.addStretch(1)
+        row.layout().addLayout(buttons)
+        self._mcp_pending = answer
+        self.show()
+        self._relayout()
+
     def new_chat(self) -> None:
         """Fresh start: drops a pending reply, the thread, the draft and any attachments."""
         self.stop()
         self._history.clear()
+        self._mcp_allowed.clear()
         self._draft.clear()
         self._clear_attachments()
         while self._thread_layout.count():

@@ -242,6 +242,6 @@ def test_host_runs_load_skill(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -
 
     _skill(tmp_path, "tidy", "---\ndescription: d\n---\nSort imports.")
     monkeypatch.setattr(ai_tool_host, "skills_dir", lambda: tmp_path)
-    host = SimpleNamespace(_win=None)
+    host = SimpleNamespace(_win=None, mcp=SimpleNamespace(server_of=lambda name: None))
     assert ai_tool_host.AiToolHost.run(host, "load_skill", {"name": "tidy"}) == "Sort imports."
     assert ai_assist._run_tool("load_skill", '{"name": "tidy"}', _Host()) == "ok"  # routed to the host
