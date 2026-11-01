@@ -129,7 +129,8 @@ class AiToolHost(QObject):
         tools = [s["function"]["name"] for s in self.mcp.specs() if self.mcp.server_of(s["function"]["name"]) == server]
         if not tools:
             return out + ", but it did not start (wrong command, missing npx / uvx, or a missing env value)"
-        return out + f"; it started with these tools: {', '.join(tools)}"
+        return out + (f"; it started with these tools: {', '.join(tools)}. If they are not in your tool list yet, "
+                      "they are from the user's next message, so tell the user to send one.")
 
     def _project(self) -> Path | None:
         return getattr(self._win._state_machine.registry.get_plugin("project"), "repo", None)

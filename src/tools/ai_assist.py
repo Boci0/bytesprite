@@ -385,6 +385,8 @@ def _post_anthropic(base_url: str, key: str, model: str, messages: list[dict[str
     A tool_use stop runs `host`'s local tools and sends their results back. Anthropic's own web_fetch only
     opens links already in the conversation, so it needs no exfiltration guard here.
     """
+    # Fixed for the whole answer: thinking blocks are bound to the tool list, so an MCP server added mid-answer
+    # joins with the next message
     tools = CLAUDE_TOOLS + [{"name": s["function"]["name"], "description": s["function"]["description"],
                              "input_schema": s["function"]["parameters"]} for s in (host.specs if host else [])]
     system, turns = claude_messages(messages)

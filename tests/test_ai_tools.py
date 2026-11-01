@@ -394,7 +394,8 @@ def test_host_asks_before_installing_mcp_servers_and_skills(monkeypatch: pytest.
         app.processEvents()
     hub.close()
     assert results[:2] == ["error: the user declined this MCP server", "{}"]
-    assert results[2] == 'added MCP server "fake"; it started with these tools: fake__echo, fake__big, fake__hang'
+    assert results[2].startswith('added MCP server "fake"; it started with these tools: fake__echo, fake__big, '
+                                 "fake__hang. If they are not in your tool list yet")
     assert results[3].startswith("error: give a name")
     assert results[4] == 'added MCP server "gone", but it did not start (wrong command, missing npx / uvx, or a missing env value)'
     assert results[5].startswith('added skill "tidy"')
