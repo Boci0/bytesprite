@@ -24,6 +24,7 @@ import ctypes
 import ctypes.wintypes as wintypes
 import http.client
 import json
+import os
 import re
 import sys
 import threading
@@ -42,6 +43,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 
 from src.engine.models import CompanionState, HudBar, HudData, ToolMenuItem
 from src.tools.ai_tools import LOCAL_DATA_TOOLS
+from src.tools.mcp_client import SEP as MCP_SEP, ensure_config
 
 # key: (menu label, base URL, default model; '' means the user must pick one)
 PRESETS: dict[str, tuple[str, str, str]] = {
@@ -469,7 +471,7 @@ def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], t
                                       ensure_ascii=False) if read_local else None
                     messages.append({"role": "tool", "tool_call_id": call["id"],
                                      "content": _run_tool(fn["name"], fn.get("arguments"), host, seen)})
-                    read_local = read_local or fn["name"] in LOCAL_DATA_TOOLS
+                    read_local = read_local or fn["name"] in LOCAL_DATA_TOOLS or MCP_SEP in fn["name"]
                     used.append(tool_note(fn["name"], fn.get("arguments")))
                 continue
             reply = AiReply(
@@ -750,9 +752,16 @@ class AiAssistPlugin:
             ToolMenuItem(label="Remove API Key", callback_id="ai:forget", enabled=self.has_key(), submenu=sub),
             ToolMenuItem(label="Remove Search Key", callback_id="ai:forget_search",
                          enabled=bool(load_key(BRAVE_URL)), submenu=sub),
+            ToolMenuItem(label="Edit MCP Servers...", callback_id="ai:mcp", submenu=sub),
         ]
 
     def execute_action(self, callback_id: str) -> tuple[bool, str, str]:
+        if callback_id == "ai:mcp":  # the user's own file; servers restart on the next chat after it changes
+            try:
+                os.startfile(ensure_config())  # type: ignore[attr-defined]
+            except OSError:
+                return (True, "OPEN ERR", "#EF7D57")
+            return (True, "MCP", "#8A9AF2")
         if callback_id in ("ai:forget", "ai:forget_search"):
             url = self.base_url if callback_id == "ai:forget" else BRAVE_URL
             return (True, "KEY GONE" if delete_key(url) else "NO KEY", "#8A9AF2")

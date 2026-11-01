@@ -2,6 +2,8 @@
 
 `run` is called on the chat's worker thread. File tools and OCR run right there; anything touching Qt
 (clipboard, screen grab, pet actions) is queued to the Qt thread and the worker waits for its result.
+Tools of the user's MCP servers (src/tools/mcp_client.py) join the specs; each server's first call in a chat
+waits for the user to allow it in the chat.
 """
 
 from __future__ import annotations
@@ -12,14 +14,16 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from PyQt6.QtCore import QObject, QTimer, pyqtSignal
+from PyQt6.QtCore import QCoreApplication, QObject, QTimer, pyqtSignal
 from PyQt6.QtGui import QCursor, QGuiApplication, QImage
 
 from src.tools.ai_tools import FILE_TOOLS, PET_ACTIONS, TOOL_SPECS, run_file_tool
 from src.tools.macros import parse_recipe
+from src.tools.mcp_client import McpHub
 from src.ui.quick_tools import ocr_image_file
 
 GUI_TIMEOUT_S = 15.0
+APPROVE_TIMEOUT_S = 120.0  # the user reads the MCP confirm in the chat
 MAX_CLIP_CHARS = 12000
 MAX_SCREEN_CHARS = 8000
 
@@ -28,14 +32,27 @@ class AiToolHost(QObject):
     """The ToolHost the chat hands to ask(); `window` is the PetWindow."""
 
     _call = pyqtSignal(object)
-    specs = TOOL_SPECS
 
-    def __init__(self, window: Any) -> None:
+    def __init__(self, window: Any, mcp: McpHub | None = None) -> None:
         super().__init__(window)  # lives on the Qt thread, so the queued signal lands there
         self._win = window
+        self.mcp = mcp or McpHub()
         self._call.connect(self._on_call)
+        app = QCoreApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self.mcp.close)
+
+    @property
+    def specs(self) -> list[dict[str, Any]]:
+        """Built-in tools plus the MCP servers' (started on first use, on the worker thread)."""
+        return TOOL_SPECS + self.mcp.specs()
 
     def run(self, name: str, args: dict[str, Any]) -> str:
+        server = self.mcp.server_of(name)
+        if server is not None:
+            chat = self._win._ai_chat
+            allowed = self._on_gui(lambda done: chat.confirm_mcp(server, name, done), APPROVE_TIMEOUT_S)
+            return self.mcp.call(name, args) if allowed is True else "error: the user did not allow this MCP server"
         if name in FILE_TOOLS:
             project = self._win._state_machine.registry.get_plugin("project")
             return run_file_tool(getattr(project, "repo", None), name, args)
@@ -47,11 +64,11 @@ class AiToolHost(QObject):
 
     # ------------------------------------------------------------------ thread bridge
 
-    def _on_gui(self, fn: Callable[[Callable[[Any], None]], None]) -> Any:
+    def _on_gui(self, fn: Callable[[Callable[[Any], None]], None], timeout: float = GUI_TIMEOUT_S) -> Any:
         """Run fn(done) on the Qt thread and wait for done(result)."""
         box: dict[str, Any] = {"event": threading.Event(), "result": None}
         self._call.emit((fn, box))
-        box["event"].wait(GUI_TIMEOUT_S)
+        box["event"].wait(timeout)
         return box["result"]
 
     def _on_call(self, item: tuple[Callable, dict[str, Any]]) -> None:
