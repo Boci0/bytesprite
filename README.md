@@ -114,7 +114,7 @@ the real model behind an alias, e.g. `DeepSeek-V4.1-Flash` for `deepseek-flash`.
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m pip install --require-hashes -r requirements-dev.txt
 .\.venv\Scripts\python.exe -m src.main --console
 .\.venv\Scripts\pytest.exe
 ```
@@ -133,7 +133,9 @@ The signing key is created once with `python scripts/release.py keygen`; its pub
 offline: if it is lost, installs can only move to a new key by re-running `install.ps1`.
 
 Installed copies pick the release up through **Check for Updates**. The updater replaces `src/` only;
-when `requirements.txt` changes, say in the release notes to re-run `install.ps1`.
+when `requirements.txt` changes, say in the release notes to re-run `install.ps1`. Every pin carries
+sha256 hashes and `install.ps1` installs with `--require-hashes`, so a version bump must also update
+its hashes (all files PyPI lists for that version).
 
 ## License
 

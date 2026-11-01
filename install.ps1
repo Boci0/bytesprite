@@ -70,7 +70,7 @@ if (-not (Test-Path (Join-Path $Venv "Scripts\pythonw.exe"))) {
 }
 $VenvPy = Join-Path $Venv "Scripts\python.exe"
 $Pythonw = Join-Path $Venv "Scripts\pythonw.exe"
-& $VenvPy -m pip install --disable-pip-version-check -q -r (Join-Path $App "requirements.txt")
+& $VenvPy -m pip install --disable-pip-version-check -q --require-hashes -r (Join-Path $App "requirements.txt")
 if ($LASTEXITCODE -ne 0) { throw "pip install failed" }
 
 # 4. Shortcuts
