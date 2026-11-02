@@ -635,7 +635,6 @@ class AiChat(QWidget):
         self._dots_timer = QTimer(self)
         self._dots_timer.setInterval(120)
         self._dots_timer.timeout.connect(self._tick_dots)
-        self._thinking_row: QWidget | None = None
         self._thinking_label: ChatText | None = None
         self._progress = ""  # what the worker is doing now (written on its thread, shown by _tick_dots)
         self._tasks: list[tuple[str, str]] = []
@@ -713,6 +712,10 @@ class AiChat(QWidget):
         self._stack.addWidget(self._scroll)
         self._stack.addWidget(self._build_setup())
         panel_layout.addWidget(self._stack)
+        # What the worker is doing, pinned under the thread so a long command or an approval card never scrolls it away
+        self._status_line = ChatText("", color=ACCENT_HEX)
+        self._status_line.hide()
+        panel_layout.addWidget(self._status_line)
         self._task_list = _TaskList()
         self._task_list.hide()
         self._proc_list = _ProcList(self._stop_proc)
@@ -1122,10 +1125,12 @@ class AiChat(QWidget):
         self._history.append({"role": "user", "content": content, "images": [a.image_url for a in usable if a.image_url]})
         self._add_bubble("user", text, attachments=usable)
         self._clear_attachments()
-        self._thinking_row, self._thinking_label = self._add_row("thinking", f"{_THINK_GLYPHS[0]}  Thinking")
+        self._thinking_label = self._status_line
+        self._status_line.show()
         self._progress = ""
         self._dots_timer.start()
         self._tick_dots()
+        self._relayout()
         play_cue("send")
         self._start_job(history=list(self._history))
 
@@ -1190,9 +1195,7 @@ class AiChat(QWidget):
                 QTimer.singleShot(900, self._leave_setup_if_ok)
             return
         self._dots_timer.stop()
-        if self._thinking_row is not None:
-            self._thinking_row.deleteLater()
-            self._thinking_row = self._thinking_label = None
+        self._hide_status()
         for path in getattr(self._tool_host, "take_saved", list)():
             self._add_saved_row(path)
         if error or reply is None:
@@ -1423,6 +1426,11 @@ class AiChat(QWidget):
             self._relayout()
             self._draft.setFocus()
 
+    def _hide_status(self) -> None:
+        self._thinking_label = None
+        self._status_line.hide()
+        self._relayout()
+
     def _tick_dots(self) -> None:
         self._dots = (self._dots + 1) % len(_THINK_GLYPHS)
         if self._thinking_label is not None:
@@ -1627,7 +1635,7 @@ class AiChat(QWidget):
             item = self._thread_layout.takeAt(0)
             if item is not None and item.widget() is not None:
                 item.widget().deleteLater()
-        self._thinking_row = self._thinking_label = None
+        self._hide_status()
         self._panel.hide()
         self._refresh_title()
         self._relayout()
