@@ -25,6 +25,7 @@ import fnmatch
 import os
 import re
 import subprocess
+import tempfile
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -134,7 +135,9 @@ TOOL_SPECS: list[dict[str, Any]] = [
     _fn("run_command", f"Run a Windows cmd.exe command in the Project Folder, or in the user's home folder when none "
         f"is chosen (e.g. pytest -q, git status, npm test, winget search) "
         f"and get its exit code and output. The user allows each command first; it is stopped after "
-        f"{COMMAND_TIMEOUT_S} s; use start_background for servers, watchers and long runs.",
+        f"{COMMAND_TIMEOUT_S} s; use start_background for servers, watchers and long runs. To open a desktop app "
+        f'use start "" /d "<the exe\'s own folder>" "<exe>" (many apps, e.g. OBS, fail unless started in their '
+        f"own folder).",
         {"command": {"type": "string"}}, ("command",)),
     _fn("start_background", f"Start a long-running cmd.exe command (dev server, watcher, long test run) in the Project "
         f"Folder and return at once with its id. At most {MAX_BACKGROUND} run at a time. The user allows each "
@@ -503,19 +506,24 @@ def run_command(root: Path | None, command: Any) -> str:
     if not isinstance(command, str) or not command.strip():
         return "error: give a command"
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    try:
-        proc = subprocess.Popen(command, shell=True, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, creationflags=flags)
-    except OSError as exc:
-        return f"error: could not start ({exc.strerror or 'failed'})"
-    try:
-        raw, _ = proc.communicate(timeout=COMMAND_TIMEOUT_S)
-        head = f"exit code {proc.returncode}"
-    except subprocess.TimeoutExpired:
-        _kill_tree(proc.pid)
-        raw, _ = proc.communicate()
-        head = f"stopped after {COMMAND_TIMEOUT_S} s"
-    out = (raw or b"").decode("utf-8", "replace").replace("\r\n", "\n").strip()
+    # Output goes to a file, not a pipe: an app started with `start` inherits a pipe and would hold
+    # communicate() open until it quits (the chat stalled that long); a file lets the shell's exit end the call.
+    with tempfile.TemporaryFile() as sink:
+        try:
+            proc = subprocess.Popen(command, shell=True, cwd=cwd, stdin=subprocess.DEVNULL, stdout=sink,
+                                    stderr=subprocess.STDOUT, creationflags=flags)
+        except OSError as exc:
+            return f"error: could not start ({exc.strerror or 'failed'})"
+        try:
+            proc.wait(timeout=COMMAND_TIMEOUT_S)
+            head = f"exit code {proc.returncode}"
+        except subprocess.TimeoutExpired:
+            _kill_tree(proc.pid)
+            proc.wait()
+            head = f"stopped after {COMMAND_TIMEOUT_S} s"
+        sink.seek(0)
+        raw = sink.read()
+    out = raw.decode("utf-8", "replace").replace("\r\n", "\n").strip()
     if len(out) > MAX_COMMAND_CHARS:  # the end usually holds the verdict (test summary, error)
         half = MAX_COMMAND_CHARS // 2
         out = f"{out[:half]}\n... {len(out) - MAX_COMMAND_CHARS} characters cut ...\n{out[-half:]}"
