@@ -371,7 +371,7 @@ def ask(base_url: str, key: str, model: str, messages: list[dict[str, Any]], *,
     such as "Writing 840 chars" while an OpenAI-style answer streams in or a tool runs.
     """
     if is_anthropic(base_url):
-        return _post_anthropic(base_url, key, model, messages, thinking, timeout, host)
+        return _post_anthropic(base_url, key, model, messages, thinking, timeout, host, progress)
     while True:
         tools = (base_url, model) not in _NO_TOOLS
         if (base_url, model) in _NO_VISION:
@@ -418,7 +418,7 @@ def _request_once(base_url: str, key: str, path: str, body: dict[str, Any] | Non
     With `progress` the answer is streamed (server-sent events) and rebuilt into the same dict a plain call
     returns; the timeout then limits the silence between chunks, not the whole answer."""
     if progress is not None and body is not None:
-        body = {**body, "stream": True, "stream_options": {"include_usage": True}}
+        body = {**body, "stream": True, **({} if is_anthropic(base_url) else {"stream_options": {"include_usage": True}})}
     req = urllib.request.Request(
         validate_base_url(base_url) + path, data=None if body is None else json.dumps(body).encode("utf-8"),
         method="GET" if body is None else "POST",
@@ -429,7 +429,7 @@ def _request_once(base_url: str, key: str, path: str, body: dict[str, Any] | Non
     try:
         with _OPENER.open(req, timeout=timeout) as resp:
             if progress is not None and "event-stream" in (resp.headers.get("Content-Type") or ""):
-                return _read_stream(resp, progress)
+                return (_read_anthropic_stream if is_anthropic(base_url) else _read_stream)(resp, progress)
             raw = resp.read(MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as exc:  # its body may echo the request, so it is never shown
         if is_anthropic(base_url) and exc.code in (400, 422):  # ...except Anthropic's own error text, which names the cause
@@ -557,6 +557,106 @@ def _read_stream(resp: Any, progress: Callable[[str], None]) -> dict[str, Any]:
     return {"model": model, "usage": usage, "choices": [{"message": message, "finish_reason": finish}]}
 
 
+MAX_STREAM_BLOCKS = 256  # content blocks in one streamed Claude reply
+
+
+def _read_anthropic_stream(resp: Any, progress: Callable[[str], None]) -> dict[str, Any]:
+    """Rebuild a Messages API reply from its server-sent events, reporting progress as text arrives.
+
+    Same caps as `_read_stream`. Blocks come back exactly as a plain reply has them (thinking signatures,
+    citations and tool inputs included), because pause_turn and tool_use send them back unchanged. A stream
+    that ends before `message_stop` is a dropped connection."""
+    blocks: dict[int, dict[str, Any]] = {}
+    json_bufs: dict[int, list[str]] = {}  # tool input arrives as JSON fragments
+    message: dict[str, Any] = {}
+    usage: dict[str, Any] = {}
+    stop = None
+    done = False
+    written = thinking = wire = spoke = 0  # `written` counts everything kept, `spoke` only answer text
+    deadline = time.monotonic() + MAX_STREAM_S
+
+    def finish(index: int) -> None:
+        parts = json_bufs.pop(index, None)
+        if parts is not None and index in blocks:
+            try:
+                value = json.loads("".join(parts) or "{}")
+            except ValueError:
+                value = {}
+            blocks[index]["input"] = value if isinstance(value, dict) else {}
+
+    for raw_line in _stream_lines(resp):
+        wire += len(raw_line)
+        if wire > MAX_STREAM_WIRE:
+            raise ValueError("reply too large")
+        if time.monotonic() > deadline:
+            raise ValueError("network")
+        line = raw_line.decode("utf-8", "replace").strip()
+        if not line.startswith("data:"):  # "event:" names, blank separators and comments
+            continue
+        try:
+            event = json.loads(line[5:].strip())
+        except ValueError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        kind = event.get("type")
+        index = event.get("index")
+        if kind == "error":
+            err = event.get("error")
+            if isinstance(err, dict) and err.get("type") in ("overloaded_error", "api_error"):
+                raise _Transient("overloaded")
+            raise ValueError("bad reply")
+        if kind == "message_start" and isinstance(event.get("message"), dict):
+            message = event["message"]
+            usage = dict(message["usage"]) if isinstance(message.get("usage"), dict) else {}
+        elif kind == "message_delta":
+            delta = event.get("delta")
+            stop = (delta.get("stop_reason") if isinstance(delta, dict) else None) or stop
+            if isinstance(event.get("usage"), dict):
+                usage.update({k: v for k, v in event["usage"].items() if v is not None})
+        elif kind == "message_stop":
+            done = True
+            break
+        elif kind == "content_block_start" and isinstance(index, int) and not isinstance(index, bool):
+            block = event.get("content_block")
+            if not isinstance(block, dict) or (index not in blocks and len(blocks) >= MAX_STREAM_BLOCKS):
+                continue
+            blocks[index] = dict(block)
+            written += len(json.dumps(block))  # a search result arrives whole in its start event
+            if block.get("type") in ("tool_use", "server_tool_use"):
+                json_bufs[index] = []
+                progress("Preparing " + (block["name"] if isinstance(block.get("name"), str) else "a tool"))
+        elif kind == "content_block_delta" and index in blocks and isinstance(event.get("delta"), dict):
+            block, delta = blocks[index], event["delta"]
+            kind2 = delta.get("type")
+            if kind2 == "text_delta" and isinstance(delta.get("text"), str):
+                block["text"] = block.get("text", "") + delta["text"]
+                written += len(delta["text"])
+                spoke += len(delta["text"])
+                progress(f"Writing, {spoke} characters")
+            elif kind2 == "thinking_delta" and isinstance(delta.get("thinking"), str):
+                block["thinking"] = block.get("thinking", "") + delta["thinking"]
+                thinking += len(delta["thinking"])
+                progress(f"Thinking, {thinking} characters")
+            elif kind2 == "signature_delta" and isinstance(delta.get("signature"), str):
+                block["signature"] = block.get("signature", "") + delta["signature"]
+            elif kind2 == "input_json_delta" and isinstance(delta.get("partial_json"), str) and index in json_bufs:
+                json_bufs[index].append(delta["partial_json"])
+                written += len(delta["partial_json"])
+            elif kind2 == "citations_delta" and isinstance(delta.get("citation"), dict):
+                block.setdefault("citations", []).append(delta["citation"])
+        elif kind == "content_block_stop" and isinstance(index, int):
+            finish(index)
+        if written + thinking > MAX_RESPONSE_BYTES:
+            raise ValueError("reply too large")
+    if not done:
+        raise _Transient("network")
+    for index in list(json_bufs):
+        finish(index)
+    return {"model": message.get("model"), "content": [blocks[i] for i in sorted(blocks)], "usage": usage,
+            "stop_reason": stop}
+
+
 def _int(value: Any) -> int:
     return value if isinstance(value, int) and value >= 0 else 0
 
@@ -595,7 +695,8 @@ def claude_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[str,
 
 
 def _post_anthropic(base_url: str, key: str, model: str, messages: list[dict[str, Any]], thinking: str,
-                    timeout: float | None, host: ToolHost | None = None) -> AiReply:
+                    timeout: float | None, host: ToolHost | None = None,
+                    progress: Callable[[str], None] | None = None) -> AiReply:
     """One answer from Claude's native Messages API with its web search and fetch tools.
 
     Thinking levels become adaptive thinking plus an effort (older models without it get Anthropic's 400
@@ -627,7 +728,7 @@ def _post_anthropic(base_url: str, key: str, model: str, messages: list[dict[str
                                    if effort else {})}
         if tool_rounds >= MAX_TOOL_ROUNDS or _stuck(fails) or spent[0] + spent[1] >= MAX_ANSWER_TOKENS:  # same tool list (thinking is bound to it), but answer-only
             body["tool_choice"] = {"type": "none"}
-        data = _request(base_url, key, "/messages", body, timeout or THINKING_TIMEOUT_S)
+        data = _request(base_url, key, "/messages", body, timeout or THINKING_TIMEOUT_S, progress)
         try:
             blocks = data["content"]
             usage = data.get("usage") or {}

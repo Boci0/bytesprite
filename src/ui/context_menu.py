@@ -342,6 +342,9 @@ class PetContextMenu(QMenu):
             update_action = QAction(f"Check for Updates (v{__version__})", self.settings_menu)
             update_action.triggered.connect(lambda _checked=False: on_tool_action("update:check"))
             self.settings_menu.addAction(update_action)
+            log_action = QAction("Copy Log", self.settings_menu)
+            log_action.triggered.connect(lambda _checked=False: on_tool_action("log:copy"))
+            self.settings_menu.addAction(log_action)
         self.addMenu(self.settings_menu)
 
         sleep_label = (

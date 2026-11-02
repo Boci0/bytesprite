@@ -22,6 +22,22 @@ _RUN_VALUE = "ByteSprite"
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
+def log_path() -> Path:
+    return Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "ByteSprite" / "bytesprite.log"
+
+
+def log_text(max_chars: int = 100_000) -> str:
+    """The newest `max_chars` of the log (the rotated `.1` file first when the current one is short); "" if none."""
+    path = log_path()
+    parts = []
+    for p in (path.with_name(path.name + ".1"), path):
+        try:
+            parts.append(p.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            pass
+    return "".join(parts)[-max_chars:]
+
+
 def autostart_command() -> str:
     """Console-free launch command; a Run key has no working dir, so run a launcher file that finds the app root.
 

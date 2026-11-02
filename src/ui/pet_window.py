@@ -53,6 +53,7 @@ from src.ui.ai_chat import AiChat
 from src.ui.ai_tool_host import AiToolHost
 from src.ui.screen_glow import ScreenGlow, play_screen_glow
 from src.storage.recent_files import RecentFiles
+from src.storage.storage_manager import log_text
 from src.tools.web_drop import WebImageJob, html_image_src, is_web_image_source, web_image_stem
 from src.ui.context_menu import PetContextMenu, style_menu
 from src.ui.drop_wheel import RadialDropWheel
@@ -1316,6 +1317,14 @@ class PetWindow(QWidget):
             return
         if callback_id == "update:check":
             self.check_for_updates()
+            return
+        if callback_id == "log:copy":
+            text, cb = log_text(), QGuiApplication.clipboard()
+            if not text or cb is None:
+                self._show_toast("NO LOG", QColor("#EF7D57"))
+                return
+            cb.setText(text)
+            self._show_toast("LOG COPIED", QColor("#38B764"))
             return
         if callback_id.startswith("web:"):
             QDesktopServices.openUrl(QUrl(callback_id.removeprefix("web:")))

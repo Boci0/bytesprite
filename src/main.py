@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import QApplication, QSystemTrayIcon
 
 from src.engine.pet_state import PetStateMachine
 from src.graphics.animation_controller import AnimationController
-from src.storage.storage_manager import StorageManager, repair_autostart
+from src.storage.storage_manager import StorageManager, log_path, repair_autostart
 from src.ui.pet_window import PetWindow, build_app_icon
 from src.ui.quick_tools import GlobalHotkeys
 from src.ui.theme import APP_STYLESHEET
@@ -231,7 +231,7 @@ def _detach_console_if_present() -> None:
 
 def setup_logging() -> Path | None:
     """Send the app's log lines to a small rotating file (calls and errors only, never keys or message text)."""
-    path = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "ByteSprite" / "bytesprite.log"
+    path = log_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         handler = logging.handlers.RotatingFileHandler(path, maxBytes=512 * 1024, backupCount=1, encoding="utf-8")
