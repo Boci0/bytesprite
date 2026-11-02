@@ -7,6 +7,8 @@ import ctypes
 import time
 from ctypes import wintypes
 
+from src.tools.watch import is_private_title
+
 MAX_TYPE_CHARS = 2000
 MAX_SCROLL = 20
 
@@ -160,6 +162,31 @@ foreach ($e in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants,
 
 def foreground_window() -> int:
     return int(_user32().GetForegroundWindow() or 0)
+
+
+def front_state() -> tuple[str, bool]:
+    """(title, is a dialog) of the front window. Modal dialogs are owned windows, so an owner means one is open."""
+    user32 = _user32()
+    user32.GetForegroundWindow.restype = wintypes.HWND
+    user32.GetWindow.restype = wintypes.HWND
+    user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
+    user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    hwnd = user32.GetForegroundWindow()
+    if not hwnd:
+        return "", False
+    buf = ctypes.create_unicode_buffer(256)
+    user32.GetWindowTextW(hwnd, buf, 256)
+    return buf.value, bool(user32.GetWindow(hwnd, 4))  # GW_OWNER
+
+
+def front_note(before: tuple[str, bool], after: tuple[str, bool]) -> str:
+    """What an action did to the front window, in a line the model can act on without another screen_map."""
+    (was, _), (now, dialog) = before, after
+    show = lambda t: repr("a private window" if is_private_title(t) else t[:80])  # noqa: E731
+    note = f" Front window changed: {show(was)} -> {show(now)}." if now != was else f" Front window unchanged: {show(now)}."
+    if dialog:
+        note += " A dialog is open in front: answer it or press esc before anything else."
+    return note
 
 
 class _MonitorInfo(ctypes.Structure):

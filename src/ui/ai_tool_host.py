@@ -268,8 +268,10 @@ class AiToolHost(QObject):
         shown = [w for w in (self._win, self._win._ai_chat) if w is not None and w.isVisible()]
         for w in shown:
             w.hide()
+        before = [("", False)]
 
         def act() -> str:  # on a worker thread: typing takes 20 ms a character and must not freeze the pet
+            before[0] = computer.front_state()
             try:
                 if name == "mouse_click":
                     computer.click(args["x"], args["y"], args.get("button") or "left", bool(args.get("double")))
@@ -292,7 +294,8 @@ class AiToolHost(QObject):
                 w.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
                 w.show()
                 w.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
-            done(result + ". Call screen_map to see the result." if not result.startswith("error") else result)
+            done(result + "." + computer.front_note(before[0], computer.front_state()) + " Call screen_map for details."
+                 if not result.startswith("error") else result)
 
         def work() -> None:
             result = act()

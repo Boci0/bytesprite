@@ -769,3 +769,11 @@ def test_cached_prompt_tokens_cost_a_tenth_of_the_answer_budget() -> None:
 def test_pace_note_comes_before_the_last_round() -> None:
     assert 0 < ai_assist.PACE_AT < ai_assist.MAX_TOOL_ROUNDS
     assert str(ai_assist.PACE_AT) in ai_assist.PACE_NOTE and "Stop polishing" in ai_assist.PACE_NOTE
+
+
+def test_front_note_says_what_an_action_changed() -> None:
+    from src.tools.computer import front_note
+
+    assert "changed: 'Doc - Word' -> 'Font'" in front_note(("Doc - Word", False), ("Font", True))
+    assert "dialog is open" in front_note(("Doc - Word", False), ("Font", True))
+    assert "unchanged" in front_note(("Doc - Word", False), ("Doc - Word", False))
