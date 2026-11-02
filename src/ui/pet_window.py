@@ -676,6 +676,9 @@ class PetWindow(QWidget):
         return plugin if isinstance(plugin, HintsPlugin) else None
 
     def _poll_hint(self) -> None:
+        app = foreground_app()  # ~0.03ms per 3s tick
+        if (hints := self._hints_plugin()) is not None:
+            hints.note_app(app)
         if self._hint is not None:
             if time.monotonic() >= self._hint_until and not self._watch_open:
                 hints = self._hints_plugin()
@@ -689,7 +692,7 @@ class PetWindow(QWidget):
             return
         cb = QGuiApplication.clipboard()
         pomo = self._state_machine.pomodoro_plugin
-        hint = hints.poll(foreground_app(), cb.text() if cb is not None else "",
+        hint = hints.poll(app, cb.text() if cb is not None else "",
                           pomo is not None and not pomo.running, title=foreground_title(),
                           watch_ok=hints.watch and self._watch_ready())
         if hint is not None and hint.action == "watch:tidy" and not hint.data:

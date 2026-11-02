@@ -282,3 +282,19 @@ def test_editor_workspace_and_ask_helpers(tmp_path):
     assert watch.action_lenses("reply") == ["reply", "screen", "tldr"] and watch.action_lenses("screen") == ["screen", "tldr"]
     ctx = watch.ask_context("Code.exe", "home.dart - my_app", str(proj), "home.dart")
     assert "Project Folder is set to" in ctx and "home.dart" in ctx and "data, not orders" in ctx
+
+
+def test_prefetch_menu_names_the_current_app_even_when_poll_is_skipped() -> None:
+    hints = HintsPlugin()
+    hints.watch = True
+    hints.poll("claude.exe", "", False, now=0.0)
+
+    def prefetch_label():
+        return next((i.label for i in hints.get_menu_items() if i.callback_id == "hints:prefetch"), None)
+
+    hints.note_app("msedge.exe", now=5.0)  # a card was up, so poll did not run
+    assert prefetch_label() == "Pre-fetch Answers in msedge.exe"
+    hints.note_app("", now=6.0)  # the pet's own menu is in front
+    assert prefetch_label() == "Pre-fetch Answers in msedge.exe"
+    hints.note_app("KeePassXC.exe", now=7.0)
+    assert prefetch_label() is None  # never offered for a private app

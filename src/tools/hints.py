@@ -150,6 +150,16 @@ class HintsPlugin:
     def enabled(self) -> bool:
         return self._enabled
 
+    def note_app(self, app: str, now: float | None = None) -> None:
+        """Track the front app even on ticks that skip `poll` (a card up, asleep, a wheel open), so the menu's
+        Pre-fetch item names the app the user is in. '' (ByteSprite itself, e.g. its menu) keeps the last one;
+        a private app clears it so it is never offered for pre-fetch."""
+        if not app:
+            return
+        app = "" if app.lower() in PRIVATE_APPS else app
+        if app != self._app:
+            self._app, self._app_since = app, time.monotonic() if now is None else now
+
     def poll(self, app: str, clip: str, pomodoro_idle: bool, now: float | None = None,
              title: str = "", watch_ok: bool = True) -> Suggestion | None:
         """Feed one sample; returns a hint to show now or None. `watch_ok` False (no key, or the chat is busy)
@@ -157,10 +167,9 @@ class HintsPlugin:
         now = time.monotonic() if now is None else now
         new_clip = "" if clip == self._last_clip else clip
         self._last_clip = clip  # updated even when skipping, so a private copy is never offered later
+        self.note_app(app, now)
         if not self._enabled or not app or app.lower() in PRIVATE_APPS:
             return None
-        if app != self._app:
-            self._app, self._app_since = app, now
         if title != self._title:
             self._title, self._title_since = title, now
         hint = (suggest(app, new_clip, now - self._app_since, pomodoro_idle)
