@@ -361,19 +361,19 @@ def _text_only(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def ask(base_url: str, key: str, model: str, messages: list[dict[str, Any]], *,
         thinking: str = "off", timeout: float | None = None, host: ToolHost | None = None,
-        progress: Callable[[str], None] | None = None) -> AiReply:
+        progress: Callable[[str], None] | None = None, web: bool = True) -> AiReply:
     """The reply with its model and token details. Raises ValueError with a short, key-free reason.
 
     Claude goes through its native Messages API with its own server-side search and fetch. Every other model
     may call web_search and fetch_page (run here, up to MAX_TOOL_ROUNDS times); one that refuses tools or
     images (400/422) gets the request again without them, and later requests to it skip them. Both also get
-    `host`'s local PC tools when one is given. `progress` (called on the worker thread) gets a short status
+    `host`'s local PC tools when one is given. `web=False` with no host sends no tools at all (Watch mode). `progress` (called on the worker thread) gets a short status
     such as "Writing 840 chars" while an OpenAI-style answer streams in or a tool runs.
     """
     if is_anthropic(base_url):
-        return _post_anthropic(base_url, key, model, messages, thinking, timeout, host, progress)
+        return _post_anthropic(base_url, key, model, messages, thinking, timeout, host, progress, web)
     while True:
-        tools = (base_url, model) not in _NO_TOOLS
+        tools = web and (base_url, model) not in _NO_TOOLS
         if (base_url, model) in _NO_VISION:
             messages = _text_only(messages)
         try:
@@ -696,7 +696,7 @@ def claude_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[str,
 
 def _post_anthropic(base_url: str, key: str, model: str, messages: list[dict[str, Any]], thinking: str,
                     timeout: float | None, host: ToolHost | None = None,
-                    progress: Callable[[str], None] | None = None) -> AiReply:
+                    progress: Callable[[str], None] | None = None, web: bool = True) -> AiReply:
     """One answer from Claude's native Messages API with its web search and fetch tools.
 
     Thinking levels become adaptive thinking plus an effort (older models without it get Anthropic's 400
@@ -706,7 +706,7 @@ def _post_anthropic(base_url: str, key: str, model: str, messages: list[dict[str
     """
     # Fixed for the whole answer: thinking blocks are bound to the tool list, so an MCP server added mid-answer
     # joins with the next message
-    tools = CLAUDE_TOOLS + [{"name": s["function"]["name"], "description": s["function"]["description"],
+    tools = (CLAUDE_TOOLS if web else []) + [{"name": s["function"]["name"], "description": s["function"]["description"],
                              "input_schema": s["function"]["parameters"]} for s in (host.specs if host else [])]
     system, turns = claude_messages(messages)
     last = turns[-1]  # prompt cache breakpoint: tools, system and the chat so far are reused by the next message
@@ -722,11 +722,11 @@ def _post_anthropic(base_url: str, key: str, model: str, messages: list[dict[str
     fails: list[Any] = [0, 0, None]
     read_local = any(read_local_data(m) for m in messages)  # set once a tool has returned the user's own data
     for _ in range(MAX_NATIVE_ROUNDS + MAX_TOOL_ROUNDS + 1):
-        body: dict[str, Any] = {"model": model, "system": system, "messages": turns, "tools": tools,
+        body: dict[str, Any] = {"model": model, "system": system, "messages": turns, **({"tools": tools} if tools else {}),
                                 "max_tokens": MAX_THINKING_TOKENS if effort else MAX_REPLY_TOKENS,
                                 **({"thinking": {"type": "adaptive", "display": "summarized"}, "output_config": {"effort": effort}}
                                    if effort else {})}
-        if tool_rounds >= MAX_TOOL_ROUNDS or _stuck(fails) or spent[0] + spent[1] >= MAX_ANSWER_TOKENS:  # same tool list (thinking is bound to it), but answer-only
+        if tools and (tool_rounds >= MAX_TOOL_ROUNDS or _stuck(fails) or spent[0] + spent[1] >= MAX_ANSWER_TOKENS):  # same tool list (thinking is bound to it), but answer-only
             body["tool_choice"] = {"type": "none"}
         data = _request(base_url, key, "/messages", body, timeout or THINKING_TIMEOUT_S, progress)
         try:

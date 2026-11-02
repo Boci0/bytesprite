@@ -53,6 +53,25 @@ def _strings(value: Any) -> list[str]:
     return found
 
 
+def grab_screen(win: Any, done: Callable[[Any], None], primary: bool = False) -> None:
+    """Grab the screen under the cursor (or the primary one, with the front window's handle) on the Qt thread,
+    with the pet `win` and its chat hidden for the shot."""
+    chat = win._ai_chat
+    shown = [w for w in (win, chat) if w is not None and w.isVisible()]
+    for w in shown:  # keep the pet and the chat out of the grab
+        w.hide()
+
+    def grab() -> None:
+        screen = (None if primary else QGuiApplication.screenAt(QCursor.pos())) or QGuiApplication.primaryScreen()
+        image = screen.grabWindow(0).toImage() if screen is not None else None
+        hwnd = computer.foreground_window()  # the app under the hidden pet and chat
+        for w in shown:
+            w.show()
+        done((image, hwnd) if primary else image)
+
+    QTimer.singleShot(180, grab)
+
+
 class AiToolHost(QObject):
     """The ToolHost the chat hands to ask(); `window` is the PetWindow."""
 
@@ -335,20 +354,7 @@ class AiToolHost(QObject):
     # ------------------------------------------------------------------ Qt-thread tools
 
     def _grab_screen(self, done: Callable[[Any], None], primary: bool = False) -> None:
-        chat = self._win._ai_chat
-        shown = [w for w in (self._win, chat) if w is not None and w.isVisible()]
-        for w in shown:  # keep the pet and the chat out of the grab
-            w.hide()
-
-        def grab() -> None:
-            screen = (None if primary else QGuiApplication.screenAt(QCursor.pos())) or QGuiApplication.primaryScreen()
-            image = screen.grabWindow(0).toImage() if screen is not None else None
-            hwnd = computer.foreground_window()  # the app under the hidden pet and chat
-            for w in shown:
-                w.show()
-            done((image, hwnd) if primary else image)
-
-        QTimer.singleShot(180, grab)
+        grab_screen(self._win, done, primary)
 
     def _save_file(self, file_name: str, content: str) -> str:
         """Nothing is written unless the user picks a path; the dialog itself confirms overwrites."""

@@ -1150,6 +1150,27 @@ class AiChat(QWidget):
             self._history[:reply.compacted] = summary_turns(reply.summary)
             self._add_row("note", f"Compacted {reply.compacted} earlier messages into a summary to keep the chat "
                                   "within its context budget.")
+        self._accept_reply(reply)
+
+    def add_watch_answer(self, label: str, reply: AiReply) -> bool:
+        """A Watch mode answer the pet fetched itself, shown as a normal exchange so the user can follow up.
+        Its tools note (read_screen / read_clipboard) arms the fetch guard for the rest of this chat.
+        False while an answer is still coming (the history would interleave)."""
+        if self._job is not None:
+            return False
+        self._history.append({"role": "user", "content": label})
+        self._add_bubble("user", label)
+        self._asked = (reply.model or self._plugin.model, "off")
+        self._accept_reply(reply)
+        return True
+
+    def add_note(self, text: str) -> None:
+        """A dim app note in the thread (not sent to the model)."""
+        row, _label = self._add_row("note", text)
+        self._scroll_target = row
+        self._relayout()
+
+    def _accept_reply(self, reply: AiReply) -> None:
         self._history.append({"role": "assistant", "content": reply.text, "tools": reply.tools})
         self._plugin.record(reply.total_tokens)
         self._save_session()

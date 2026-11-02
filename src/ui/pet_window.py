@@ -45,12 +45,15 @@ from src.engine.pet_state import PetStateMachine
 from src.graphics.animation_controller import AnimationController
 from src.graphics.sprite_matrix import FrameMatrix, get_sprite_frames
 from src.tools.file_forge import ForgeMode, ForgeWheelOption, get_wheel_options_for_paths
-from src.tools.ai_assist import AiAssistPlugin
+from src.tools.ai_assist import AiAssistPlugin, AiJob, AiReply, load_key
 from src.tools.ai_tools import skills_dir
 from src.tools.macros import MacroBook
-from src.tools.hints import HintsPlugin, Suggestion, foreground_app
+from src.tools.hints import HintsPlugin, Suggestion, foreground_app, foreground_title
+from src.tools.watch import (LABELS as WATCH_LABELS, SOURCES as WATCH_SOURCES, WatchReply, apply_moves,
+                              folder_check, hotkey_lens, run_lens, undo_moves)
+from src.tools import computer
 from src.ui.ai_chat import AiChat
-from src.ui.ai_tool_host import AiToolHost
+from src.ui.ai_tool_host import AiToolHost, grab_screen
 from src.ui.screen_glow import ScreenGlow, play_screen_glow
 from src.storage.recent_files import RecentFiles
 from src.storage.storage_manager import log_text
@@ -403,6 +406,12 @@ class PetWindow(QWidget):
         self._hint_timer.setInterval(3000)
         self._hint_timer.timeout.connect(self._poll_hint)
         self._hint_timer.start()
+        # Watch mode: one lens answer at a time, for the hint on the card
+        self._watch_job: AiJob | None = None
+        self._watch_reply: AiReply | None = None
+        self._watch_open = False  # the user clicked: open the chat when the answer lands
+        self._folder_job: AiJob | None = None
+        self._tidy_asks = 0  # a fresh approval key per plan, so "Allow" never carries over to the next one
 
     def _configure_window(self) -> None:
         self.setWindowTitle("ByteSprite")
@@ -667,7 +676,10 @@ class PetWindow(QWidget):
 
     def _poll_hint(self) -> None:
         if self._hint is not None:
-            if time.monotonic() >= self._hint_until:
+            if time.monotonic() >= self._hint_until and not self._watch_open:
+                hints = self._hints_plugin()
+                if self._watch_reply is not None and hints is not None:
+                    hints.ignored_ready()
                 self._clear_hint()
             return
         hints = self._hints_plugin()
@@ -677,28 +689,224 @@ class PetWindow(QWidget):
         cb = QGuiApplication.clipboard()
         pomo = self._state_machine.pomodoro_plugin
         hint = hints.poll(foreground_app(), cb.text() if cb is not None else "",
-                          pomo is not None and not pomo.running)
+                          pomo is not None and not pomo.running, title=foreground_title())
+        if hint is not None and hint.action.startswith("watch:") and not self._watch_ready():
+            return
+        if hint is not None and hint.action == "watch:tidy" and not hint.data:
+            self._check_folder(hint, foreground_title())  # the card shows only if the folder is messy
+            return
         if hint is not None:
             self._hint, self._hint_until = hint, time.monotonic() + 12.0
+            if hint.action.startswith("watch:") and hints.can_prefetch(hint):
+                self._start_watch(hint, hint.data)
             self._anim.play_oneshot("spin")
             self._schedule_next_anim_tick()
             self.update()
 
     def _clear_hint(self) -> None:
         self._hint = None
+        self._drop_watch()
         self.update()
 
     def _run_hint(self) -> None:
         hint, hints = self._hint, self._hints_plugin()
-        self._clear_hint()
+        self._hint = None  # not _clear_hint: a running Watch answer is kept for the click
+        self.update()
         if hint is None:
             return
         if hints is not None:
             hints.mark_used()
+        if hint.action.startswith("watch:"):
+            self._run_watch(hint)
+            return
         if hint.action == "pet:focus":
             self.trigger_play()
         else:
             self.trigger_tool_action(hint.action)
+
+    # Watch mode: the model is called on a click, or ahead of it when hints.can_prefetch allows
+
+    def _watch_ready(self) -> bool:
+        """A key and a model are set, the chat is not mid-answer and no lens answer is in flight."""
+        ai = self._state_machine.registry.get_plugin("ai")
+        return (isinstance(ai, AiAssistPlugin) and bool(ai.model) and self._watch_job is None
+                and (self._ai_chat is None or self._ai_chat._job is None) and ai.has_key())
+
+    def _start_watch(self, hint: Suggestion, data: str | QImage | None) -> None:
+        """`data` is the clipboard text, or the screen grab for screen lenses."""
+        hints, ai = self._hints_plugin(), self._state_machine.registry.get_plugin("ai")
+        if hints is None or not isinstance(ai, AiAssistPlugin) or data is None or data == "":
+            self._clear_hint()
+            return
+        if hints.budget_left() <= 0 and hint.rule != "watch_now":  # the hotkey is the user asking, like the chat
+            self._show_toast("AI BUDGET USED", QColor("#EF7D57"))
+            self._clear_hint()
+            return
+        lens = hint.action.removeprefix("watch:")
+        url, key, model = ai.base_url, load_key(ai.base_url), ai.model
+        image = data if not isinstance(data, str) else None
+        hints.record_ai(0)  # counted at the start, so a failing provider cannot loop past the budget
+
+        def run() -> AiReply:
+            text = AiToolHost._ocr(image) if image is not None else data
+            reply = run_lens(lens, text, url, key, model)
+            reply.tools = [*reply.tools, (WATCH_SOURCES.get(lens, "read_clipboard()"), text)]
+            return reply
+
+        job = self._watch_job = AiJob(self)
+        job.finished.connect(lambda reply, error, h=hint: self._on_watch_done(job, h, reply, error))
+        job.start(run)
+        QTimer.singleShot(60, lambda: self._warm_watch(ai))  # after the card repaints
+
+    def _warm_watch(self, ai: AiAssistPlugin) -> None:
+        """While the model works: wake the audio output (a ~0.2s blocking resume) and build the chat, so the
+        answer opens without those hitches. The output stays awake IDLE_SUSPEND_MS (20s)."""
+        if self._watch_job is None:
+            return
+        prewarm_ticks()
+        if self._ai_chat is None:
+            self._make_ai_chat(ai)
+
+    def _on_watch_done(self, job: AiJob, hint: Suggestion, reply: AiReply | None, error: str) -> None:
+        job.deleteLater()
+        if job is not self._watch_job:
+            return  # dismissed or replaced meanwhile
+        self._watch_job = None
+        hints = self._hints_plugin()
+        if hints is not None and reply is not None:
+            hints.ai_tokens += max(0, reply.total_tokens)
+        if error or reply is None:
+            self._watch_open = False
+            self._show_toast("AI ERROR", QColor("#EF7D57"))
+            self._clear_hint()
+            return
+        self._watch_reply = reply
+        if self._watch_open:
+            self._show_watch(hint)
+        elif self._hint is hint:
+            self._hint = Suggestion(hint.rule, "Answer ready. Click to see it", hint.action, hint.data)
+            self._hint_until = time.monotonic() + 20.0
+            self.update()
+
+    def _run_watch(self, hint: Suggestion) -> None:
+        if self._watch_reply is not None:
+            self._show_watch(hint)
+            return
+        self._hint, self._hint_until = Suggestion(hint.rule, "Working on it...", hint.action, hint.data), 0.0
+        self._watch_open = True
+        self.update()
+        if self._watch_job is not None:
+            return
+        if not self._watch_ready():
+            self._clear_hint()
+            self.open_ai_chat()  # shows Setup when no key or model is set
+            return
+        if hint.data:
+            self._start_watch(hint, hint.data)
+        else:  # screen lenses read the screen only now, after the click
+            grab_screen(self, lambda image, h=hint: self._start_watch(h, image) if self._watch_open else None)
+
+    def watch_now(self) -> None:
+        """Hotkey or menu: read the front window now with the lens it fits (error, store, else a general read).
+        Works with Watch mode off; it is an explicit ask, so it is counted but not stopped by the daily budget."""
+        if self._watch_job is not None or self._watch_open:
+            self._show_toast("ALREADY ON IT", QColor("#8A9AF2"))
+            return
+        if not self._watch_ready():
+            self.open_ai_chat()  # Setup when no key or model; a chat mid-answer is shown as is
+            return
+        title = foreground_title()
+        lens = hotkey_lens(foreground_app(), title)
+        hint = Suggestion("watch_now", "Reading the folder..." if lens == "tidy" else "Reading the screen...",
+                          f"watch:{lens}")
+        self._hint, self._hint_until, self._watch_open = hint, 0.0, True
+        self.update()
+        if lens == "tidy":
+            self._check_folder(hint, title, min_files=2)
+            return
+        grab_screen(self, lambda image, h=hint: self._start_watch(h, image) if self._watch_open else None)
+
+    def _check_folder(self, hint: Suggestion, title: str, min_files: int | None = None) -> None:
+        """Resolve the front Explorer window's folder on a worker thread (about 0.3s of PowerShell). Offered
+        tidy hints show only for a messy folder; the hotkey goes straight on to the model."""
+        hwnd = computer.foreground_window()
+        job = self._folder_job = AiJob(self)
+        args = (hwnd, title) if min_files is None else (hwnd, title, min_files)
+
+        def done(found: tuple[str, int] | None, _error: str) -> None:
+            job.deleteLater()
+            if job is not self._folder_job:
+                return
+            self._folder_job = None
+            if hint.rule == "watch_now":
+                if not self._watch_open:
+                    return  # dismissed meanwhile
+                if found is None:
+                    self._clear_hint()
+                    self._show_toast("NOTHING TO TIDY", QColor("#8A9AF2"))
+                    return
+                self._start_watch(Suggestion(hint.rule, hint.text, hint.action, found[0]), found[0])
+                return
+            if found is not None and self._hint is None and foreground_title() == title:
+                self._hint = Suggestion(hint.rule, f"Tidy this folder? ({found[1]} files)", hint.action, found[0])
+                self._hint_until = time.monotonic() + 12.0
+                self._anim.play_oneshot("spin")
+                self._schedule_next_anim_tick()
+                self.update()
+
+        job.finished.connect(done)
+        job.start(lambda: folder_check(*args))
+
+    def _show_watch(self, hint: Suggestion) -> None:
+        reply = self._watch_reply
+        self._clear_hint()
+        chat = self.ensure_ai_chat()
+        if reply is None or chat is None:
+            return
+        if not chat.add_watch_answer(WATCH_LABELS.get(hint.action.removeprefix("watch:"), "Watch"), reply):
+            self._show_toast("CHAT BUSY", QColor("#EF7D57"))
+            return
+        if not isinstance(reply, WatchReply):
+            return
+        hints = self._hints_plugin()
+        cb = QGuiApplication.clipboard()
+        if reply.copy_text and cb is not None:
+            cb.setText(reply.copy_text)  # copied, never typed or sent: the user pastes it where they want
+            if hints is not None:
+                hints.note_own_copy(reply.copy_text)
+            self._show_toast("REPLY COPIED", QColor("#38B764"))
+        if reply.moves:
+            folder, moves = reply.folder, reply.moves
+            n = sum(len(f) for f in moves.values())
+            plan = "\n".join(f"{name}/  <-  " + ", ".join(files) for name, files in moves.items())
+            self._tidy_asks += 1
+            chat.confirm(f"tidy:{self._tidy_asks}", f"Move {n} files into {len(moves)} folders inside {folder}? "
+                         "Nothing is deleted or overwritten.\n\n" + plan[:4000], "Tidy folder",
+                         lambda ok: self._apply_tidy(folder, moves) if ok else None, once=False)
+
+    def _apply_tidy(self, folder: str, moves: dict[str, list[str]]) -> None:
+        done, created, skipped = apply_moves(folder, moves)
+        hints = self._hints_plugin()
+        if hints is not None and done:
+            hints.last_tidy = (done, created)
+        if self._ai_chat is not None:
+            self._ai_chat.add_note(f"Moved {len(done)} files into {len(moves)} folders"
+                                   + (f", skipped {skipped} (name taken or file gone)" if skipped else "")
+                                   + ". Undo: right-click the pet, Hints, Undo Last Tidy.")
+        self._show_toast(f"MOVED {len(done)}", QColor("#38B764"))
+
+    def _undo_tidy(self) -> None:
+        hints = self._hints_plugin()
+        if hints is None or hints.last_tidy is None:
+            return
+        back = undo_moves(*hints.last_tidy)
+        hints.last_tidy = None
+        self._show_toast(f"PUT BACK {back}", QColor("#8A9AF2"))
+
+    def _drop_watch(self) -> None:
+        self._watch_job = None  # its late answer is ignored by _on_watch_done
+        self._watch_reply = None
+        self._watch_open = False
 
     def _dismiss_hint(self) -> None:
         hint, hints = self._hint, self._hints_plugin()
@@ -1108,6 +1316,9 @@ class PetWindow(QWidget):
         if mode == "ai":  # Ctrl+Shift+Alt+A opens the chat bar
             self.open_ai_chat()
             return
+        if mode == "watch":  # Alt+` or Ctrl+Shift+Alt+W: Watch lens on the screen now
+            self.watch_now()
+            return
         if self._snip_session is not None:
             return
         if mode == "ask" and self._ai_chat is not None:
@@ -1200,9 +1411,7 @@ class PetWindow(QWidget):
         if not isinstance(plugin, AiAssistPlugin):
             return
         if self._ai_chat is None:
-            self._ai_chat = AiChat(plugin, on_attach_screen=lambda: self.trigger_snip("ask"),
-                                   tool_host=AiToolHost(self))
-            self._ai_chat.thinking_changed.connect(self._on_ai_thinking)
+            self._make_ai_chat(plugin)
         elif self._ai_chat.isVisible():
             self._ai_chat.hide()
             return
@@ -1215,6 +1424,11 @@ class PetWindow(QWidget):
         self._anim.play_oneshot("spin")
         self._schedule_next_anim_tick()
         self._ai_chat.open_near(sprite)
+
+    def _make_ai_chat(self, plugin: AiAssistPlugin) -> None:
+        """Build the chat card hidden (about 0.4s of widget setup on the Qt thread)."""
+        self._ai_chat = AiChat(plugin, on_attach_screen=lambda: self.trigger_snip("ask"), tool_host=AiToolHost(self))
+        self._ai_chat.thinking_changed.connect(self._on_ai_thinking)
 
     def ensure_ai_chat(self) -> AiChat | None:
         """Open the chat if it is closed (never toggles it shut, unlike open_ai_chat)."""
@@ -1251,6 +1465,12 @@ class PetWindow(QWidget):
             self._schedule_next_anim_tick()
 
     def trigger_tool_action(self, callback_id: str) -> None:
+        if callback_id == "watch:now":
+            self.watch_now()
+            return
+        if callback_id == "watch:undo_tidy":
+            self._undo_tidy()
+            return
         if callback_id.startswith("snip:"):
             self.trigger_snip(callback_id.split(":", 1)[1])
             return

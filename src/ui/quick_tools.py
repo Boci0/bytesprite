@@ -334,14 +334,18 @@ class OcrJob(QObject):
 _MOD_ALT, _MOD_CONTROL, _MOD_SHIFT, _MOD_NOREPEAT = 0x1, 0x2, 0x4, 0x4000
 _WM_HOTKEY, _WM_QUIT = 0x0312, 0x0012
 HOTKEY_LABEL = "Ctrl+Shift+Alt"
-HOTKEY_MODES: dict[int, tuple[str, str]] = {1: ("S", "image"), 2: ("T", "text"), 3: ("C", "color"), 4: ("A", "ai")}
+HOTKEY_MODES: dict[int, tuple[str, str]] = {1: ("S", "image"), 2: ("T", "text"), 3: ("C", "color"), 4: ("A", "ai"),
+                                             5: ("W", "watch")}
 # shortcut: 1..9 are held even with fewer macros, register per macro if a user reports a clash
 HOTKEY_MODES.update({10 + n: (str(n), f"macrokey:{n}") for n in range(1, 10)})
+# Two-key combos (id: modifiers, virtual key, mode). Alt+` (VK_OEM_3) has no Windows or app-menu meaning
+SHORT_HOTKEYS: dict[int, tuple[int, int, str]] = {30: (_MOD_ALT, 0xC0, "watch")}
+WATCH_SHORT_LABEL = "Alt+`"
 
 
 class GlobalHotkeys(QObject):
-    """Ctrl+Shift+Alt+S/T/C/A/1-9 system-wide hotkeys; `triggered` delivers the snip mode ("ai" for A,
-    "macrokey:N" for digits) on the Qt thread.
+    """Ctrl+Shift+Alt+S/T/C/A/W/1-9 and Alt+` system-wide hotkeys; `triggered` delivers the snip mode ("ai" for A,
+    "watch" for W and Alt+`, "macrokey:N" for digits) on the Qt thread.
 
     Thread-level hotkeys (hWnd NULL) post WM_HOTKEY to the registering thread's queue, so a
     plain GetMessageW loop on a worker thread receives them without touching nativeEvent.
@@ -367,17 +371,21 @@ class GlobalHotkeys(QObject):
         user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 0)  # create the queue before close() can post
         self._thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
         mods = _MOD_CONTROL | _MOD_SHIFT | _MOD_ALT | _MOD_NOREPEAT
-        for hk_id, (key, mode) in HOTKEY_MODES.items():
+        combos = [(hk_id, mods, ord(key), mode) for hk_id, (key, mode) in HOTKEY_MODES.items()]
+        combos += [(hk_id, m | _MOD_NOREPEAT, vk, mode) for hk_id, (m, vk, mode) in SHORT_HOTKEYS.items()]
+        for hk_id, combo_mods, vk, mode in combos:
             # Combos already owned by another app fail here and are skipped
-            if user32.RegisterHotKey(None, hk_id, mods, ord(key)):
+            if user32.RegisterHotKey(None, hk_id, combo_mods, vk):
                 self.registered.append(mode)
         self._ready.set()
         try:
             while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
                 if msg.message == _WM_HOTKEY and msg.wParam in HOTKEY_MODES:
                     self.triggered.emit(HOTKEY_MODES[msg.wParam][1])
+                elif msg.message == _WM_HOTKEY and msg.wParam in SHORT_HOTKEYS:
+                    self.triggered.emit(SHORT_HOTKEYS[msg.wParam][2])
         finally:
-            for hk_id in HOTKEY_MODES:
+            for hk_id in [*HOTKEY_MODES, *SHORT_HOTKEYS]:
                 user32.UnregisterHotKey(None, hk_id)
 
     def close(self) -> None:
