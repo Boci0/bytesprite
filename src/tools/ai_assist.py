@@ -542,9 +542,10 @@ def _read_stream(resp: Any, progress: Callable[[str], None]) -> dict[str, Any]:
                 written += len(name) + len(arguments)
         if written + thinking > MAX_RESPONSE_BYTES:
             raise ValueError("reply too large")
-        if calls and not text:
+        spoke = any(text)  # empty content deltas come with tool calls and are not an answer yet
+        if calls and not spoke:
             progress("Preparing " + (next(iter(calls.values()))["function"]["name"] or "a tool"))
-        elif text:
+        elif spoke:
             progress(f"Writing, {written} characters")
         elif thought:
             progress(f"Thinking, {thinking} characters")
