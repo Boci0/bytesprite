@@ -637,6 +637,7 @@ class AiChat(QWidget):
         self._dots_timer.timeout.connect(self._tick_dots)
         self._thinking_row: QWidget | None = None
         self._thinking_label: ChatText | None = None
+        self._progress = ""  # what the worker is doing now (written on its thread, shown by _tick_dots)
         self._tasks: list[tuple[str, str]] = []
         self._sid: str | None = None  # this chat's saved session, made on its first answer
         self._created = 0.0
@@ -1063,6 +1064,7 @@ class AiChat(QWidget):
         self._add_bubble("user", text, attachments=usable)
         self._clear_attachments()
         self._thinking_row, self._thinking_label = self._add_row("thinking", f"{_THINK_GLYPHS[0]}  Thinking")
+        self._progress = ""
         self._dots_timer.start()
         self._tick_dots()
         play_cue("send")
@@ -1095,12 +1097,15 @@ class AiChat(QWidget):
         job.finished.connect(self._on_done)
         host = None if self._testing else self._tool_host
 
+        def note(text: str) -> None:
+            self._progress = text
+
         def run() -> AiReply:
             if history is None:
                 return ask(url, key, model, messages or [], thinking=thinking, host=host)
             sent, n, summary = (compact_history(url, key, model, history) if history_chars(history) > COMPACT_AT
                                 else (history, 0, ""))
-            reply = ask(url, key, model, chat_messages(sent), thinking=thinking, host=host)
+            reply = ask(url, key, model, chat_messages(sent), thinking=thinking, host=host, progress=note)
             reply.compacted, reply.summary = n, summary
             return reply
 
@@ -1340,7 +1345,7 @@ class AiChat(QWidget):
     def _tick_dots(self) -> None:
         self._dots = (self._dots + 1) % len(_THINK_GLYPHS)
         if self._thinking_label is not None:
-            self._thinking_label.set_text(f"{_THINK_GLYPHS[self._dots]}  Thinking")
+            self._thinking_label.set_text(f"{_THINK_GLYPHS[self._dots]}  {self._progress or 'Thinking'}")
 
     def _add_row(self, role: str, text: str, attachments: list[Attachment] | None = None,
                  markdown: bool = False) -> tuple[QWidget, ChatText]:

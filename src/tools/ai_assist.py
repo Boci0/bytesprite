@@ -271,6 +271,7 @@ _HTTP_ERRORS = {400: "bad request", 401: "bad key", 402: "no balance", 403: "for
                 404: "bad model or url", 422: "bad request", 429: "rate limited"}
 _NO_VISION: set[tuple[str, str]] = set()  # (base_url, model) that refused images this session
 _NO_TOOLS: set[tuple[str, str]] = set()  # ... or the web_search tool
+_NO_STREAM: set[tuple[str, str]] = set()  # ... or streaming
 
 
 def chat_messages(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -358,13 +359,15 @@ def _text_only(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def ask(base_url: str, key: str, model: str, messages: list[dict[str, Any]], *,
-        thinking: str = "off", timeout: float | None = None, host: ToolHost | None = None) -> AiReply:
+        thinking: str = "off", timeout: float | None = None, host: ToolHost | None = None,
+        progress: Callable[[str], None] | None = None) -> AiReply:
     """The reply with its model and token details. Raises ValueError with a short, key-free reason.
 
     Claude goes through its native Messages API with its own server-side search and fetch. Every other model
     may call web_search and fetch_page (run here, up to MAX_TOOL_ROUNDS times); one that refuses tools or
     images (400/422) gets the request again without them, and later requests to it skip them. Both also get
-    `host`'s local PC tools when one is given.
+    `host`'s local PC tools when one is given. `progress` (called on the worker thread) gets a short status
+    such as "Writing 840 chars" while an OpenAI-style answer streams in or a tool runs.
     """
     if is_anthropic(base_url):
         return _post_anthropic(base_url, key, model, messages, thinking, timeout, host)
@@ -373,7 +376,7 @@ def ask(base_url: str, key: str, model: str, messages: list[dict[str, Any]], *,
         if (base_url, model) in _NO_VISION:
             messages = _text_only(messages)
         try:
-            return _post(base_url, key, model, messages, thinking, timeout, tools, host)
+            return _post(base_url, key, model, messages, thinking, timeout, tools, host, progress)
         except ValueError as exc:
             if str(exc) != "bad request":
                 raise
@@ -389,11 +392,12 @@ class _Transient(ValueError):
     """A failure worth another try: rate limit, server error, dropped connection."""
 
 
-def _request(base_url: str, key: str, path: str, body: dict[str, Any] | None, timeout: float) -> Any:
+def _request(base_url: str, key: str, path: str, body: dict[str, Any] | None, timeout: float,
+             progress: Callable[[str], None] | None = None) -> Any:
     """`_request_once` with up to len(RETRY_DELAYS) more tries when the failure is transient."""
     for attempt in range(len(RETRY_DELAYS) + 1):
         try:
-            return _request_once(base_url, key, path, body, timeout)
+            return _request_once(base_url, key, path, body, timeout, progress)
         except _Transient as exc:
             if attempt == len(RETRY_DELAYS):
                 logger.warning("request %s failed after %d tries: %s", path.split("?")[0], attempt + 1, exc)
@@ -406,8 +410,14 @@ def _request(base_url: str, key: str, path: str, body: dict[str, Any] | None, ti
     raise AssertionError("unreachable")
 
 
-def _request_once(base_url: str, key: str, path: str, body: dict[str, Any] | None, timeout: float) -> Any:
-    """One JSON call through the no-redirect opener; errors are short and never echo the key or body."""
+def _request_once(base_url: str, key: str, path: str, body: dict[str, Any] | None, timeout: float,
+                  progress: Callable[[str], None] | None = None) -> Any:
+    """One JSON call through the no-redirect opener; errors are short and never echo the key or body.
+
+    With `progress` the answer is streamed (server-sent events) and rebuilt into the same dict a plain call
+    returns; the timeout then limits the silence between chunks, not the whole answer."""
+    if progress is not None and body is not None:
+        body = {**body, "stream": True, "stream_options": {"include_usage": True}}
     req = urllib.request.Request(
         validate_base_url(base_url) + path, data=None if body is None else json.dumps(body).encode("utf-8"),
         method="GET" if body is None else "POST",
@@ -417,6 +427,8 @@ def _request_once(base_url: str, key: str, path: str, body: dict[str, Any] | Non
     )
     try:
         with _OPENER.open(req, timeout=timeout) as resp:
+            if progress is not None and "event-stream" in (resp.headers.get("Content-Type") or ""):
+                return _read_stream(resp, progress)
             raw = resp.read(MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as exc:  # its body may echo the request, so it is never shown
         if is_anthropic(base_url) and exc.code in (400, 422):  # ...except Anthropic's own error text, which names the cause
@@ -432,6 +444,59 @@ def _request_once(base_url: str, key: str, path: str, body: dict[str, Any] | Non
         return json.loads(raw)
     except ValueError:
         raise ValueError("bad reply") from None
+
+
+def _read_stream(resp: Any, progress: Callable[[str], None]) -> dict[str, Any]:
+    """Rebuild a chat-completions reply from its server-sent events, reporting progress as text arrives."""
+    text, thought, calls = [], [], {}
+    model = usage = finish = None
+    size = 0
+    for raw_line in resp:
+        size += len(raw_line)
+        if size > MAX_RESPONSE_BYTES:
+            raise ValueError("reply too large")
+        line = raw_line.decode("utf-8", "replace").strip()
+        if not line.startswith("data:"):  # blank separators and ": keep-alive" comments
+            continue
+        payload = line[5:].strip()
+        if payload == "[DONE]":
+            break
+        try:
+            event = json.loads(payload)
+        except ValueError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("error"):
+            raise ValueError("bad reply")
+        model, usage = event.get("model") or model, event.get("usage") or usage
+        for choice in (event.get("choices") or [])[:1]:
+            delta, finish = choice.get("delta") or {}, choice.get("finish_reason") or finish
+            if isinstance(delta.get("content"), str):
+                text.append(delta["content"])
+            for field in ("reasoning_content", "reasoning"):
+                if isinstance(delta.get(field), str):
+                    thought.append(delta[field])
+            for part in delta.get("tool_calls") or []:
+                call = calls.setdefault(part.get("index", 0), {"id": "", "type": "function",
+                                                               "function": {"name": "", "arguments": ""}})
+                fn = part.get("function") or {}
+                call["id"] = part.get("id") or call["id"]
+                call["function"]["name"] += fn.get("name") or ""
+                call["function"]["arguments"] += fn.get("arguments") or ""
+        written = sum(map(len, text))
+        if calls and not written:
+            progress("Preparing " + (next(iter(calls.values()))["function"]["name"] or "a tool"))
+        elif written:
+            progress(f"Writing, {written} characters")
+        elif thought:
+            progress(f"Thinking, {sum(map(len, thought))} characters")
+    message: dict[str, Any] = {"role": "assistant", "content": "".join(text) or (None if calls else "")}
+    if thought:
+        message["reasoning_content"] = "".join(thought)
+    if calls:
+        message["tool_calls"] = [calls[i] for i in sorted(calls)]
+    return {"model": model, "usage": usage, "choices": [{"message": message, "finish_reason": finish}]}
 
 
 def _int(value: Any) -> int:
@@ -561,7 +626,8 @@ def _post_anthropic(base_url: str, key: str, model: str, messages: list[dict[str
 
 
 def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], thinking: str,
-          timeout: float | None, tools: bool = False, host: ToolHost | None = None) -> AiReply:
+          timeout: float | None, tools: bool = False, host: ToolHost | None = None,
+          progress: Callable[[str], None] | None = None) -> AiReply:
     thinks = thinking in THINKING_LEVELS and thinking != "off"
     messages = list(messages)
     read_local = any(read_local_data(m) for m in messages)  # set once a tool has returned the user's own data
@@ -576,10 +642,14 @@ def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], t
                                 **thinking_params(base_url, thinking)}
         if tools and round_ < MAX_TOOL_ROUNDS and not _stuck(fails) and spent[3] < MAX_ANSWER_TOKENS:
             body["tools"] = [SEARCH_TOOL, FETCH_TOOL, *(host.specs if host else [])]
+        streams = progress is not None and (base_url, model) not in _NO_STREAM
         try:
             data = _request(base_url, key, "/chat/completions", body,
-                            timeout or (THINKING_TIMEOUT_S if thinks else TIMEOUT_S))
+                            timeout or (THINKING_TIMEOUT_S if thinks else TIMEOUT_S), progress if streams else None)
         except ValueError as exc:
+            if streams and str(exc) == "bad request":  # some servers refuse stream_options: ask again without
+                _NO_STREAM.add((base_url, model))
+                continue
             if str(exc) != "bad request" or shot_at is None:
                 raise
             _NO_VISION.add((base_url, model))  # this model refuses the screenshot: go on with the text lists
@@ -607,6 +677,8 @@ def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], t
                     # never the model's own turns: a URL it wrote itself would vouch for itself
                     seen = json.dumps([m.get("content") for m in messages if m.get("role") != "assistant"],
                                       ensure_ascii=False) if read_local else None
+                    if progress is not None:
+                        progress(f"Running {fn['name']}")
                     result = _run_tool(fn["name"], fn.get("arguments"), host, seen)
                     last = round_ == MAX_TOOL_ROUNDS - 1 and call is calls[-1]  # the next round sends no tools
                     messages.append({"role": "tool", "tool_call_id": call["id"],

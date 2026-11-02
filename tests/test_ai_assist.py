@@ -963,3 +963,35 @@ def test_request_retries_transient_failures_only(monkeypatch: pytest.MonkeyPatch
     with pytest.raises(ValueError, match="network"):
         ai_assist._request("https://api.example/v1", "k", "/x", {}, 5)
     assert len(calls) == 3  # first try plus both retries
+
+
+def _sse(*events) -> list[bytes]:
+    return [b": keep-alive\n", *[b"data: " + (e if isinstance(e, bytes) else json.dumps(e).encode()) + b"\n\n" for e in events], b"data: [DONE]\n"]
+
+
+def test_stream_is_rebuilt_into_a_plain_reply() -> None:
+    seen: list[str] = []
+    lines = _sse(
+        {"model": "m1", "choices": [{"delta": {"reasoning_content": "hm"}}]},
+        {"choices": [{"delta": {"content": "Hel"}}]},
+        {"choices": [{"delta": {"content": "lo"}, "finish_reason": "stop"}]},
+        {"choices": [], "usage": {"total_tokens": 9}})
+    data = ai_assist._read_stream(lines, seen.append)
+    msg = data["choices"][0]["message"]
+    assert msg == {"role": "assistant", "content": "Hello", "reasoning_content": "hm"}
+    assert data["usage"] == {"total_tokens": 9} and data["model"] == "m1" and data["choices"][0]["finish_reason"] == "stop"
+    assert seen[0].startswith("Thinking") and seen[-1] == "Writing, 5 characters"
+
+
+def test_stream_joins_split_tool_calls() -> None:
+    lines = _sse(
+        {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "c1", "function": {"name": "list_files", "arguments": ""}}]}}]},
+        {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": "{\"p\":"}}]}}]},
+        {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": "\"a\"}"}}]}, "finish_reason": "tool_calls"}]})
+    seen: list[str] = []
+    msg = ai_assist._read_stream(lines, seen.append)["choices"][0]["message"]
+    assert msg["content"] is None and msg["tool_calls"] == [
+        {"id": "c1", "type": "function", "function": {"name": "list_files", "arguments": "{\"p\":\"a\"}"}}]
+    assert seen[0] == "Preparing list_files"
+    with pytest.raises(ValueError, match="bad reply"):
+        ai_assist._read_stream(_sse({"error": {"message": "x"}}), seen.append)
