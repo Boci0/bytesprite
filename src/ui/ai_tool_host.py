@@ -11,6 +11,7 @@ killed when the app quits.
 
 from __future__ import annotations
 
+import json
 import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -65,7 +66,9 @@ class AiToolHost(QObject):
         server = self.mcp.server_of(name)
         if server is not None:
             chat = self._win._ai_chat
-            allowed = self._on_gui(lambda done: chat.confirm_mcp(server, name, done), APPROVE_TIMEOUT_S)
+            shown = json.dumps(args, ensure_ascii=False)
+            risk = "destructive tool" if self.mcp.is_destructive(name) else destructive_reason(shown)
+            allowed = self._on_gui(lambda done: chat.confirm_mcp(server, name, done, shown[:600], risk), APPROVE_TIMEOUT_S)
             return self.mcp.call(name, args) if allowed is True else "error: the user did not allow this MCP server"
         if name in FILE_TOOLS:
             return run_file_tool(self._project(), name, args)

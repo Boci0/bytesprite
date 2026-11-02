@@ -38,6 +38,22 @@ CALL_TIMEOUT_S = 60.0
 MAX_RESULT_CHARS = 30000
 MAX_TOOLS_PER_SERVER = 64
 _NAME = re.compile(r"[^A-Za-z0-9_-]")
+MAX_DESCRIPTION_CHARS = 500  # a tool description goes into the model's context, so a server could plant text there
+# What a server inherits from the app's environment: the system basics, proxies and certificates, package-manager
+# settings. Everything else (API keys, tokens in the user's variables) stays out unless mcp.json lists it in "env".
+_ENV_KEEP = {"PATH", "PATHEXT", "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "TEMP", "TMP", "USERPROFILE",
+             "USERNAME", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "PROGRAMFILES",
+             "PROGRAMFILES(X86)", "PROGRAMW6432", "COMPUTERNAME", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE",
+             "OS", "LANG", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR",
+             "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS"}
+_ENV_KEEP_PREFIXES = ("NPM_CONFIG_", "UV_", "PIP_")
+
+
+def child_env(extra: dict[str, str], base: dict[str, str] | None = None) -> dict[str, str]:
+    """The environment for an MCP server: the allowed part of `base` (default: ours) plus the configured `extra`."""
+    kept = {k: v for k, v in (os.environ if base is None else base).items()
+            if k.upper() in _ENV_KEEP or k.upper().startswith(_ENV_KEEP_PREFIXES)}
+    return {**kept, **extra}
 
 
 def safe_name(name: str) -> str:
@@ -71,7 +87,7 @@ def tool_spec(server: str, tool: dict[str, Any]) -> dict[str, Any]:
     schema.setdefault("properties", {})
     return {"type": "function", "function": {
         "name": f"{server}{SEP}{safe_name(str(tool.get('name', '')))}",
-        "description": f"(MCP server {server}) {str(tool.get('description') or '')[:1000]}".strip(),
+        "description": f"(MCP server {server}) {' '.join(str(tool.get('description') or '').split())[:MAX_DESCRIPTION_CHARS]}".strip(),
         "parameters": schema}}
 
 
@@ -96,13 +112,14 @@ class McpServer:
     def __init__(self, name: str, cfg: dict[str, Any]) -> None:
         self.name = name
         self.tools: dict[str, str] = {}  # safe tool name -> the server's own name
+        self.destructive: set[str] = set()  # safe names of tools that declare destructiveHint (and not readOnlyHint)
         self._lock = threading.Lock()
         self._lines: queue.Queue[str | None] = queue.Queue()
         self._next_id = 0
         command = shutil.which(cfg["command"]) or cfg["command"]  # finds npx.cmd and the like
         self._proc = subprocess.Popen(
             [command, *cfg["args"]], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, env={**os.environ, **cfg["env"]},
+            stderr=subprocess.DEVNULL, env=child_env(cfg["env"]),
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         threading.Thread(target=self._read, daemon=True).start()
 
@@ -160,7 +177,11 @@ class McpServer:
         specs = []
         for tool in tools[:MAX_TOOLS_PER_SERVER]:
             spec = tool_spec(self.name, tool)
-            self.tools[spec["function"]["name"].removeprefix(self.name + SEP)] = tool["name"]
+            short = spec["function"]["name"].removeprefix(self.name + SEP)
+            self.tools[short] = tool["name"]
+            hints = tool.get("annotations") if isinstance(tool.get("annotations"), dict) else {}
+            if hints.get("destructiveHint") is True and hints.get("readOnlyHint") is not True:
+                self.destructive.add(short)
             specs.append(spec)
         return specs
 
@@ -216,6 +237,11 @@ class McpHub:
         """The server that owns a model-facing tool name, if any."""
         server, sep, tool = name.partition(SEP)
         return server if sep and tool in getattr(self._servers.get(server), "tools", {}) else None
+
+    def is_destructive(self, name: str) -> bool:
+        """Whether the tool's server declared it destructive (it then asks before every call)."""
+        server, _sep, tool = name.partition(SEP)
+        return tool in getattr(self._servers.get(server), "destructive", ())
 
     def call(self, name: str, args: dict[str, Any]) -> str:
         server, _sep, tool = name.partition(SEP)

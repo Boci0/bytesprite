@@ -1405,10 +1405,12 @@ class AiChat(QWidget):
     def _add_bubble(self, role: str, text: str, attachments: list[Attachment] | None = None) -> QLabel:
         return self._add_row(role, text, attachments)[1]
 
-    def confirm_mcp(self, server: str, tool: str, done: Callable[[bool], None]) -> None:
-        """Ask before an MCP server's first tool call in this chat; the worker thread waits for done(allowed)."""
-        self.confirm(f"mcp:{server}", f'The model wants to use your MCP server "{server}" ({tool}). '
-                     "Allow it for this chat?", f'MCP server "{server}"', done, once=False)
+    def confirm_mcp(self, server: str, tool: str, done: Callable[[bool], None], args: str = "", danger: str = "") -> None:
+        """Ask before an MCP server's first tool call in this chat, showing the arguments; the worker thread waits
+        for done(allowed). A `danger` (a tool declared destructive, or arguments that look it) asks every time."""
+        text = (f'The model wants to use your MCP server "{server}" ({tool}). '
+                + ("Allow this call?" if danger else "Allow it for this chat?") + (f"\n\n{args}" if args not in ("", "{}") else ""))
+        self.confirm(f"mcp:{server}", text, f'MCP server "{server}"', done, once=False, danger=danger)
 
     def confirm(self, key: str, text: str, what: str, done: Callable[[bool], None], once: bool = True,
                 danger: str = "") -> None:

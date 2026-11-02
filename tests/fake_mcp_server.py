@@ -10,6 +10,8 @@ TOOLS = [
         "properties": {"text": {"type": "string"}}, "required": ["text"]}},
     {"name": "big", "description": "Lots of text"},
     {"name": "hang", "description": "Never answers"},
+    {"name": "wipe", "description": "Deletes\nthings", "annotations": {"destructiveHint": True}},
+    {"name": "peek", "annotations": {"destructiveHint": True, "readOnlyHint": True}},
 ]
 
 print("a log line on stdout", flush=True)
