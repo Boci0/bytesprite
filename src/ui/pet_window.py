@@ -275,6 +275,7 @@ class PetWindow(QWidget):
     SPRITE_SCALE: int = 4  # 32x32 * 4 = 128x128 crisp integer scaling
     DRAG_THRESHOLD_PX: int = 5
     HOLD_TO_WHEEL_MS: int = 450
+    PREWARM_DELAY_MS: int = 150  # a drag has usually passed DRAG_THRESHOLD_PX by now; still before the wheel opens
 
     def __init__(
         self,
@@ -1726,7 +1727,9 @@ class PetWindow(QWidget):
             self._wheel_holding = False  # a hold whose release never arrived (wheel watchdog closed it)
             self._walk_steps_remaining = 0
             self._hold_timer.start()
-            prewarm_ticks()  # resume audio during the hold delay, not as the tool wheel appears
+            # Resume audio during the hold delay, not as the tool wheel appears. Waits PREWARM_DELAY_MS and skips
+            # drags (they stop the hold timer): the blocking ~175ms resume froze the start of every drag.
+            QTimer.singleShot(self.PREWARM_DELAY_MS, lambda: self._hold_timer.isActive() and prewarm_ticks())
             event.accept()
             return
 
