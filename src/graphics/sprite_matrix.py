@@ -28,6 +28,8 @@ ALL_ANIMATIONS: tuple[str, ...] = (
     "music",
     "cheer",
     "yawn",
+    "dangle",
+    "land",
 )
 
 # Frosted-glass neutral palette: low-saturation translucent greys that read on light and dark
@@ -351,6 +353,16 @@ def _build_32_animations() -> dict[str, list[FrameMatrix]]:
         frame(dy=-1, eyes="closed", mouth="munch_open", shadow=7),
         frame(eyes="half", mouth="flat"),
     ]
+    # 12. DANGLE (held by a drag: lifted off its shadow, round-mouthed, swaying)
+    animations["dangle"] = [
+        frame(dx=dx, dy=-2, eyes="open", mouth="munch_open", shadow=5) for dx in (-1, 0, 1, 0)
+    ]
+    # 13. LAND (drag released: squash onto the shadow, small rebound, settle)
+    animations["land"] = [
+        frame(dy=2, eyes="closed", mouth="flat", shadow=10),
+        frame(dy=-1, eyes="happy", mouth="smile", shadow=7),
+        frame(dy=0, eyes="open", mouth="smile"),
+    ]
     return animations
 
 
@@ -429,6 +441,8 @@ def _build_16_animations() -> dict[str, list[FrameMatrix]]:
             _build_16_base(dy=-1, eyes="happy", extra="spark"), _build_16_base(eyes="happy"),
         ],
         "yawn": [_build_16_base(eyes="closed"), _build_16_base(dy=-1, eyes="closed"), _build_16_base()],
+        "dangle": [_build_16_base(dy=-1), _build_16_base(dy=-1, eyes="closed")],
+        "land": [_build_16_base(dy=1, eyes="closed"), _build_16_base(eyes="happy"), _build_16_base()],
     }
 
 

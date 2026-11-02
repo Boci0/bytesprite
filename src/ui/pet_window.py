@@ -48,7 +48,7 @@ from src.tools.file_forge import ForgeMode, ForgeWheelOption, get_wheel_options_
 from src.tools.ai_assist import AiAssistPlugin, AiJob, AiReply, fit_thinking, load_key, thinking_levels
 from src.tools.ai_tools import skills_dir
 from src.tools.macros import MacroBook
-from src.tools.hints import HintsPlugin, Suggestion, foreground_app, foreground_title
+from src.tools.hints import HintsPlugin, Suggestion, foreground_app, foreground_title, idle_seconds, display_kept_on
 from src.tools.watch import (ACTION_LABELS, EDITORS, LABELS as WATCH_LABELS, SOURCES as WATCH_SOURCES, WatchReply,
                               action_lenses, apply_moves, ask_context, editor_title_parts, editor_workspace,
                               folder_check, hotkey_lens, run_lens, undo_moves)
@@ -275,6 +275,7 @@ class PetWindow(QWidget):
     SPRITE_SCALE: int = 4  # 32x32 * 4 = 128x128 crisp integer scaling
     DRAG_THRESHOLD_PX: int = 5
     HOLD_TO_WHEEL_MS: int = 450
+    AWAY_AFTER_S: float = 300.0  # no keyboard or mouse input this long: the idle clip becomes a nap
     PREWARM_DELAY_MS: int = 150  # a drag has usually passed DRAG_THRESHOLD_PX by now; still before the wheel opens
 
     def __init__(
@@ -357,6 +358,7 @@ class PetWindow(QWidget):
         self._ocr_jobs: list[OcrJob] = []
         self._ai_chat: AiChat | None = None  # built on first open
         self._ai_thinking: bool = False
+        self._away: bool = False  # no input for AWAY_AFTER_S: idle naps (visual only, never DND)
         self._glows: list[ScreenGlow] = []
         # Image dragged out of a browser (URL or raw image), fetched only once a slice is chosen
         self._pending_web_source: str | QImage | None = None
@@ -536,10 +538,14 @@ class PetWindow(QWidget):
             PetState.PLAYING: "focus",
             PetState.HUNGRY: "hungry",
         }
+        if self._did_drag and self._press_global_pos is not None:
+            return "dangle"  # held in the air, whatever the state
         clip = mapping.get(state, "idle")
         if self._ai_thinking and clip == "idle":
             return "focus"
-        return "music" if clip == "idle" and self._state_machine.music_playing else clip
+        if clip == "idle" and self._state_machine.music_playing:
+            return "music"
+        return "sleep" if clip == "idle" and self._away else clip
 
     def _sync_animation_to_pet_state(self, state: PetState) -> None:
         self._anim.set_state(self._base_clip(state))
@@ -594,7 +600,7 @@ class PetWindow(QWidget):
             return
         if self._open_wheels():
             return  # a hop or blink must not move the pet out from under an open wheel
-        if self._state_machine.state != PetState.IDLE:
+        if self._state_machine.state != PetState.IDLE or self._away:
             return
 
         roll = random.random()
@@ -681,7 +687,19 @@ class PetWindow(QWidget):
             plugin.levels = lambda: thinking_levels(ai.base_url, ai.model)
         return plugin
 
+    def _check_away(self) -> None:
+        away = idle_seconds() >= self.AWAY_AFTER_S and not display_kept_on()  # watching a video is not away
+        if away == self._away:
+            return
+        self._away = away
+        self._sync_animation_to_pet_state(self._state_machine.state)
+        if not away and self._anim.base_state == "idle":
+            self._anim.play_oneshot("yawn")  # waking up as the user comes back
+        self._schedule_next_anim_tick()
+        self.update()
+
     def _poll_hint(self) -> None:
+        self._check_away()
         app = foreground_app()  # ~0.03ms per 3s tick
         if (hints := self._hints_plugin()) is not None:
             hints.note_app(app)
@@ -1754,9 +1772,11 @@ class PetWindow(QWidget):
                 event.accept()
                 return
             delta = global_pos - self._press_global_pos
-            if delta.manhattanLength() >= self.DRAG_THRESHOLD_PX:
+            if not self._did_drag and delta.manhattanLength() >= self.DRAG_THRESHOLD_PX:
                 self._did_drag = True
                 self._hold_timer.stop()
+                self._sync_animation_to_pet_state(self._state_machine.state)  # picks up "dangle"
+                self._schedule_next_anim_tick()
             if self._did_drag:
                 step_dx = (
                     (global_pos.x() - self._last_drag_global_pos.x())
@@ -1794,6 +1814,10 @@ class PetWindow(QWidget):
             self._did_drag = False
             if not was_drag:
                 self._click_timer.start()
+            else:
+                self._sync_animation_to_pet_state(self._state_machine.state)
+                self._anim.play_oneshot("land")
+                self._schedule_next_anim_tick()
             event.accept()
             return
         super().mouseReleaseEvent(event)

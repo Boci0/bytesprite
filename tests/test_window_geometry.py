@@ -465,3 +465,45 @@ def test_topmost_yields_to_held_buttons_and_foreign_topmost_windows() -> None:
     assert yield_topmost({99}, User32(topmost={10}))  # Snap Assist / Alt+Tab / Start has focus
     assert yield_topmost({99}, User32(topmost={20}))  # a topmost flyout under the cursor
     assert not yield_topmost({10, 20}, User32(topmost={10, 20}))  # our own chat or wheel never blocks it
+
+
+def test_away_naps_and_wakes_with_a_yawn(qapp: QApplication, monkeypatch: pytest.MonkeyPatch) -> None:
+    import src.ui.pet_window as pw
+
+    sm = PetStateMachine(PetStats())
+    win = PetWindow(state_machine=sm, animation_controller=AnimationController(size=32), auto_wander=False)
+    try:
+        monkeypatch.setattr(pw, "idle_seconds", lambda: win.AWAY_AFTER_S + 1)
+        monkeypatch.setattr(pw, "display_kept_on", lambda: True)  # a video is playing
+        win._check_away()
+        assert win._anim.base_state == "idle"
+
+        monkeypatch.setattr(pw, "display_kept_on", lambda: False)
+        win._check_away()
+        assert win._anim.base_state == "sleep"
+        assert sm.state == PetState.IDLE  # a nap is visual only, never DND
+
+        monkeypatch.setattr(pw, "idle_seconds", lambda: 0.5)
+        win._check_away()
+        assert win._anim.base_state == "idle"
+        assert win._anim.active_clip_name == "yawn"
+    finally:
+        win.shutdown()
+        win.close()
+
+
+def test_drag_dangles_then_lands(qapp: QApplication) -> None:
+    sm = PetStateMachine(PetStats())
+    win = PetWindow(state_machine=sm, animation_controller=AnimationController(size=32), auto_wander=False)
+    try:
+        start = win.mapToGlobal(win.sprite_center_point())
+        win.mousePressEvent(_mouse(QEvent.Type.MouseButtonPress, win, start, Qt.MouseButton.LeftButton))
+        win.mouseMoveEvent(_mouse(QEvent.Type.MouseMove, win, start + QPoint(40, 0), Qt.MouseButton.LeftButton))
+        assert win._anim.base_state == "dangle"
+        win.mouseReleaseEvent(_mouse(QEvent.Type.MouseButtonRelease, win, start + QPoint(40, 0), Qt.MouseButton.NoButton))
+        assert win._anim.base_state == "idle"
+        assert win._anim.active_clip_name == "land"
+        assert not win._click_timer.isActive()  # a drag never also cycles the HUD
+    finally:
+        win.shutdown()
+        win.close()
