@@ -23,7 +23,7 @@ from src.storage.storage_manager import StorageManager, log_path, repair_autosta
 from src.ui.pet_window import PetWindow, build_app_icon
 from src.ui.quick_tools import GlobalHotkeys
 from src.ui.theme import APP_STYLESHEET
-from src.updater import is_installed
+from src.updater import APP_DIR, FROZEN, is_installed, remove_old_build
 
 # Stored beside plugin state in state.json "tools"; not a ToolPlugin, so it never joins the HUD cycle
 RECENT_FILES_KEY = "recent"
@@ -314,6 +314,9 @@ def main(argv: list[str] | None = None) -> int:
     """Launch ByteSprite on the Windows desktop."""
     if argv is None:
         _detach_console_if_present()
+    if FROZEN:
+        os.chdir(APP_DIR.parent)  # outside the app folder, so an update can rename it while we run
+        remove_old_build()
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )

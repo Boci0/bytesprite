@@ -67,7 +67,7 @@ from src.ui.quick_tools import (HOTKEY_ACTIONS, OcrJob, SnipSession, default_hot
                                  parse_hotkey)
 from src.ui.sfx import play_cue, preload_tick_sounds, prewarm as prewarm_ticks
 from src.ui.tool_wheel import WEB_SHORTCUTS, ToolWheel, ToolWheelOption, WheelLayout, google_search_url
-from src.updater import APP_DIR, RELEASES_URL, UpdateJob, is_installed
+from src.updater import APP_DIR, FROZEN, RELEASES_URL, UpdateJob, is_installed
 from src.ui.theme import (ACCENT_HEX, GLASS_RGBA, HAIRLINE_RGBA, HOVER_RGBA, SLEEP_HEX, TEXT_DIM_HEX, TEXT_HEX,
                           paint_pixel_panel, pet_accent, qcolor, ui_font)
 
@@ -1216,7 +1216,10 @@ class PetWindow(QWidget):
 
     def restart(self) -> None:
         self.trigger_quit()  # saves state.json before the new copy loads it
-        QProcess.startDetached(sys.executable, ["-m", "src.main"], str(APP_DIR))
+        if FROZEN:
+            QProcess.startDetached(sys.executable, [], str(APP_DIR.parent))
+        else:
+            QProcess.startDetached(sys.executable, ["-m", "src.main"], str(APP_DIR))
 
     def _start_web_fetch(self, source: str | QImage, mode: ForgeMode) -> None:
         job = WebImageJob()
