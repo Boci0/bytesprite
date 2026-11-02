@@ -25,8 +25,8 @@ from PyQt6.QtWidgets import QFileDialog
 
 from src.tools import computer
 from src.tools.ai_tools import (COMPUTER_TOOLS, FILE_TOOLS, PET_ACTIONS, TOOL_SPECS, BackgroundProcs, apply_edits,
-                                computer_action, destructive_reason, load_skill, memory_path, parse_boxes, plan_edit,
-                                plan_edits, plan_memory, plan_skill_update, run_command, run_file_tool, save_args,
+                                computer_action, destructive_reason, is_secret, load_skill, memory_path, parse_boxes, plan_edit,
+                                plan_edits, plan_memory, plan_skill_update, resolve, run_command, run_file_tool, save_args,
                                 skill_text, skills_dir, task_list, write_memory, write_skill)
 from src.tools.macros import parse_recipe
 from src.tools.mcp_client import SEP, McpHub, add_server, find_servers, safe_name
@@ -121,7 +121,17 @@ class AiToolHost(QObject):
             allowed = self._on_gui(lambda done: chat.confirm_mcp(server, name, done, shown[:600], risk), APPROVE_TIMEOUT_S)
             return self.mcp.call(name, args) if allowed is True else "error: the user did not allow this MCP server"
         if name in FILE_TOOLS:
-            return run_file_tool(self._project(), name, args)
+            secrets = False
+            if name == "read_file":
+                try:
+                    path = resolve(self._project(), args.get("path"))
+                except (OSError, ValueError):
+                    path = None
+                if path is not None and is_secret(path) and path.is_file():
+                    secrets = self._allowed("read_secret", f"The model wants to read {path}, which looks like a "
+                                            "secrets file (keys, passwords or tokens).", "secret files",
+                                            "secrets file")
+            return run_file_tool(self._project(), name, args, secrets=secrets)
         if name in ("edit_file", "edit_files"):
             try:
                 edits = plan_edits(self._project(), args) if name == "edit_files" else [plan_edit(self._project(), args)]
@@ -339,6 +349,13 @@ class AiToolHost(QObject):
             lambda done: chat.confirm(key, text, what, done))
         return self._on_gui(ask, APPROVE_TIMEOUT_S) is True
 
+    def allow_link(self, name: str, url: str) -> bool:
+        """A link the model built after reading local data: the user checks the full URL for their data."""
+        verb = "open this link in your browser" if name == "open_link" else "fetch this page"
+        return self._allowed("link", f"The model wants to {verb} after reading your files, clipboard or screen. "
+                             f"Check the address does not carry your data:\n\n{url[:2000]}", "links",
+                             "new link after reading your data")
+
     def take_image(self) -> str:
         """The screenshot (data URL) of the last screen_map, once: the request loop sends it to a model that sees."""
         shot, self._shot = self._shot, ""
@@ -425,8 +442,8 @@ class AiToolHost(QObject):
             return f"started macro {macro.name}: {macro.recipe}"
         if name == "open_link":
             url = args.get("url")
-            if not isinstance(url, str) or not url.startswith("https://"):
-                return "error: https links only"
+            if not isinstance(url, str) or not url.startswith(("https://", "http://")):
+                return "error: web links (http or https) only"
             self._win.trigger_tool_action("web:" + url)
             return "opened in the browser"
         return "error: unknown tool"

@@ -84,10 +84,14 @@ Attach with `+`, drag-and-drop or paste: text files up to 512 KB go as text, ima
 local OCR and only that text is sent, never the pixels.
 
 While answering, the model can search the web (through DeepSeek's own search when you have a DeepSeek key,
-else an optional Brave Search key) and use a few PC tools: read files in your **Project Folder** (read-only,
-never `.env` or key files), read your clipboard or the text on screen, check the pet's readouts, and run
-safe pet actions, your macros or https links. It cannot write files or run commands. The header shows
-the real model behind an alias, e.g. `DeepSeek-V4.1-Flash` for `deepseek-flash`.
+else an optional Brave Search key) and use your PC: read and search files anywhere (relative paths start
+in your **Project Folder**, or your home folder when none is set), read your clipboard or the screen, click
+and type, and run pet actions, your macros or links. Anything that changes something asks you first in the
+chat: every file edit shows its diff, every command shows the exact command line, and a `.env` or key file
+is read only after you allow that file. It opens and reads web links freely; once it has read your files,
+clipboard or screen, a link it made up itself shows you the full address first, so your data cannot leave
+inside a URL without you seeing it. The reach is the same for every model; how well it uses it depends
+on the model. The header shows the real model behind an alias, e.g. `DeepSeek-V4.1-Flash` for `deepseek-flash`.
 
 <p align="center">
   <img src="docs/images/moods.png" width="720" alt="Idle, music, focus, spin, sleep and cheer poses">
@@ -105,6 +109,10 @@ the real model behind an alias, e.g. `DeepSeek-V4.1-Flash` for `deepseek-flash`.
 - **Smart hints** (offline, no network): copy a JWT, an epoch timestamp or one-line JSON and the pet
   offers to decode or format it; ten minutes in a code editor suggests a focus session. Click to run,
   right-click to mute that hint. Turn off under **Hints > Smart Suggestions**.
+- **Watch mode** (opt-in, uses AI, **Hints > Watch Mode**): copy an error, a foreign text, a long article
+  or an odd-looking link, or sit on an error window, and the pet offers to explain, translate, summarize or
+  check it. When you click, it can act too: for a copied error it opens the file and proposes the fix as a
+  diff you approve. Capped at 40 calls a day; `Alt+`` asks about the front window any time.
 - **Drag files onto it** to convert or compress: WebP / PNG / JPG / ICO / BMP, CSV / TSV / JSON,
   ZIP / TAR.XZ / TAR.GZ / GZIP, extract, SHA-256. Drag an image out of a browser to save a clean copy.
   The output folder opens behind your current window (unless it is already open).

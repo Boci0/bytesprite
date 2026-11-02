@@ -94,6 +94,30 @@ def test_lens_call_sends_no_tools(monkeypatch):
     assert "<data>" in bodies[0]["messages"][1]["content"]
 
 
+def test_clicked_lens_can_use_pc_tools(monkeypatch):
+    class Host:
+        specs = [{"type": "function", "function": {"name": "read_file", "description": "", "parameters": {}}}]
+        ran = []
+
+        def run(self, name, args):
+            self.ran.append(name)
+            return "line 3: x = 1 / 0"
+
+    replies = iter([
+        {"choices": [{"message": {"content": "", "tool_calls": [{"id": "1", "type": "function", "function": {
+            "name": "read_file", "arguments": "{\"path\": \"x.py\"}"}}]}, "finish_reason": "tool_calls"}]},
+        {"choices": [{"message": {"content": "Divides by zero on line 3."}, "finish_reason": "stop"}]}])
+    bodies = []
+    monkeypatch.setattr(ai_assist, "_request", lambda url, key, path, body, *a: bodies.append(body) or next(replies))
+    host = Host()
+    reply = watch.run_lens("error", "ZeroDivisionError: division by zero", "https://api.example/v1", "k", "m", host=host)
+    assert host.ran == ["read_file"] and reply.text == "Divides by zero on line 3."
+    assert [t["function"]["name"] for t in bodies[0]["tools"]] == ["read_file"]  # PC tools only, no web search
+    assert "relative paths start in the home folder" in bodies[0]["messages"][0]["content"]
+    msgs = watch.lens_messages("error", "boom", act=True, project="C:/code/shop")
+    assert "Project Folder, C:/code/shop" in msgs[0]["content"] and "edit_file" in msgs[0]["content"]
+
+
 def test_claude_lens_call_sends_no_tools(monkeypatch):
     bodies = []
     monkeypatch.setattr(ai_assist, "_request", lambda url, key, path, body, *a: bodies.append(body) or {

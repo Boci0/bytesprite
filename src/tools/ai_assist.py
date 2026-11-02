@@ -13,9 +13,10 @@ Security:
 - Thinking levels map to DeepSeek's `thinking` toggle plus `reasoning_effort`, or OpenAI-style
   `reasoning_effort` elsewhere. The reply's served model, reasoning and token split are kept for display.
 - Attached images go to the model as images; a model that refuses them gets the OCR text only.
-- The reply is shown as plain text. The model's own tool calls are limited to src/tools/ai_tools.py (read-only
-  files in the Project Folder, clipboard, screen text, an allowlist of pet actions). Once it has read local data,
-  fetch_page only opens links already in the chat, so a hostile page cannot have that data sent to its server.
+- The reply is shown as plain text. The model's own tool calls are the ones in src/tools/ai_tools.py (files
+  anywhere, clipboard, screen, pet actions; changes need the user's OK). Once it has read local data, a link not
+  already in the chat opens only after the user allows that exact URL, so a hostile page cannot quietly have that
+  data sent to its server.
 """
 
 from __future__ import annotations
@@ -117,8 +118,9 @@ SYSTEM_PROMPT = (
     "Answer completely and accurately; stay short only when the question is simple. Use plain text "
     "without markdown. Search the web for anything recent, factual or that you are unsure of, and read a "
     "result's page when its snippet is not enough. "
-    "When PC tools are offered, use them to look at the user's Project Folder, clipboard or screen yourself "
-    "instead of asking them to paste things. "
+    "When PC tools are offered, use them to look at the user's files (anywhere on the PC, by absolute path; "
+    "relative paths start in the Project Folder), clipboard or screen yourself instead of asking them to "
+    "paste things. "
     "For code changes, read the file, change it with edit_file (edit_files for one change across several "
     "files), then check it with run_command (tests, a build or a quick run) and fix what fails. Servers and "
     "watchers go through start_background, not run_command. For a job with several steps, keep a short "
@@ -433,19 +435,19 @@ def ask(base_url: str, key: str, model: str, messages: list[dict[str, Any]], *,
     may call web_search and fetch_page (run here, up to MAX_TOOL_ROUNDS times); one that refuses tools or
     images (400/422) gets the request again without them, and later requests to it skip them. Both also get
     `host`'s local PC tools when one is given. `steer` returns what the user typed while it worked; that text
-    rides along with the next tool result. `web=False` with no host sends no tools at all (Watch mode). `progress` (called on the worker thread) gets a short status
+    rides along with the next tool result. `web=False` drops web_search and fetch_page, so with no host no tools are sent (a Watch pre-fetch). `progress` (called on the worker thread) gets a short status
     such as "Writing 840 chars" while an OpenAI-style answer streams in or a tool runs.
     """
     thinking = fit_thinking(base_url, thinking, model)
     if is_anthropic(base_url):
         return _post_anthropic(base_url, key, model, messages, thinking, timeout, host, progress, web, steer)
     while True:
-        tools = web and (base_url, model) not in _NO_TOOLS
+        tools = (web or host is not None) and (base_url, model) not in _NO_TOOLS
         if (base_url, model) in _NO_VISION:
             messages = _text_only(messages)
         level = "default" if (base_url, model) in _NO_THINK else thinking
         try:
-            return _post(base_url, key, model, messages, level, timeout, tools, host, progress, steer)
+            return _post(base_url, key, model, messages, level, timeout, tools, host, progress, steer, web)
         except ValueError as exc:
             if str(exc) != "bad request":
                 raise
@@ -879,7 +881,7 @@ def _post_anthropic(base_url: str, key: str, model: str, messages: list[dict[str
 def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], thinking: str,
           timeout: float | None, tools: bool = False, host: ToolHost | None = None,
           progress: Callable[[str], None] | None = None,
-          steer: Callable[[], list[str]] | None = None) -> AiReply:
+          steer: Callable[[], list[str]] | None = None, web: bool = True) -> AiReply:
     thinks = thinking in THINKING_LEVELS and thinking != "off"
     messages = list(messages)
     read_local = any(read_local_data(m) for m in messages)  # set once a tool has returned the user's own data
@@ -894,7 +896,7 @@ def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], t
                                 "max_tokens": MAX_THINKING_TOKENS if thinks else MAX_REPLY_TOKENS,
                                 **thinking_params(base_url, thinking)}
         if tools and round_ < MAX_TOOL_ROUNDS and not _stuck(fails) and paid < MAX_ANSWER_TOKENS:
-            body["tools"] = [SEARCH_TOOL, FETCH_TOOL, *(host.specs if host else [])]
+            body["tools"] = [*((SEARCH_TOOL, FETCH_TOOL) if web else ()), *(host.specs if host else [])]
         streams = progress is not None and (base_url, model) not in _NO_STREAM
         wait = timeout or (THINKING_TIMEOUT_S if thinks else TIMEOUT_S)
         try:
@@ -1094,8 +1096,9 @@ def _run_tool_raw(name: str, arguments: Any, host: ToolHost | None = None, seen:
     """Tool output goes back to the model as text; failures are reported to it, never raised.
 
     `arguments` is a JSON string (chat completions) or a dict (Claude). With `seen` set (local data was read
-    in this answer or an earlier one still in the chat), fetch_page and open_link only open a link that already
-    appears in that chat text: a URL the model builds itself could carry the user's files to someone else's server.
+    in this answer or an earlier one still in the chat), a fetch_page or open_link URL not already in that chat text
+    could carry the user's files to someone else's server: a host with `allow_link` asks the user (showing the full
+    URL), any other host refuses it.
     """
     try:
         args = arguments if isinstance(arguments, dict) else json.loads(arguments)
@@ -1103,20 +1106,30 @@ def _run_tool_raw(name: str, arguments: Any, host: ToolHost | None = None, seen:
         args = None
     if not isinstance(args, dict):
         return "error: bad arguments"
-    if name == "open_link" and seen is not None and str(args.get("url", "")).strip() not in seen:
-        return "error: after reading local data, open_link only opens links already in this chat"
+    if name == "open_link" and seen is not None and (refused := _new_link(name, str(args.get("url", "")).strip(), host, seen)):
+        return refused
     if host is not None and name not in ("web_search", "fetch_page") and any(
             s["function"]["name"] == name for s in host.specs):
         return host.run(name, args)
     value = args.get({"web_search": "query", "fetch_page": "url"}.get(name, ""))
     if not isinstance(value, str) or not value.strip():
         return "error: unknown tool or bad arguments"
-    if name == "fetch_page" and seen is not None and value.strip() not in seen:
-        return "error: after reading local data, fetch_page only opens links already in this chat"
+    if name == "fetch_page" and seen is not None and (refused := _new_link(name, value.strip(), host, seen)):
+        return refused
     try:
         return web_search(value.strip()[:300]) if name == "web_search" else fetch_page(value.strip()[:2000])
     except ValueError as exc:
         return f"error: {name} failed ({exc})"
+
+
+def _new_link(name: str, url: str, host: ToolHost | None, seen: str) -> str:
+    """'' when `url` may open after a local read: already in the chat, or the user allowed it; else the error."""
+    if url in seen:
+        return ""
+    ask = getattr(host, "allow_link", None)
+    if ask is None:
+        return f"error: after reading local data, {name} only opens links already in this chat"
+    return "" if ask(name, url) else "error: the user did not allow this link"
 
 
 _STRIP_TAGS = re.compile(r"<[^>]+>")

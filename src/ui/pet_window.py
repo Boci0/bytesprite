@@ -754,10 +754,15 @@ class PetWindow(QWidget):
         url, key, model, thinking = ai.base_url, load_key(ai.base_url), ai.model, fit_thinking(ai.base_url, hints.watch_thinking, ai.model)
         image = data if not isinstance(data, str) else None
         hints.record_ai(0)  # counted at the start, so a failing provider cannot loop past the budget
+        if self._watch_open and self._ai_chat is None:
+            self._make_ai_chat(ai)  # the host's approval cards live in the chat
+        # Tools only after a click: a pre-fetch must never pop approvals the user did not ask for
+        host = self._ai_chat._tool_host if self._watch_open and self._ai_chat is not None else None
+        project = str(getattr(self._state_machine.registry.get_plugin("project"), "repo", None) or "")
 
         def run() -> AiReply:
             text = AiToolHost._ocr(image) if image is not None else data
-            reply = run_lens(lens, text, url, key, model, thinking=thinking)
+            reply = run_lens(lens, text, url, key, model, thinking=thinking, host=host, project=project)
             reply.tools = [*reply.tools, (WATCH_SOURCES.get(lens, "read_clipboard()"), text)]
             return reply
 

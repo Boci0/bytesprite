@@ -1,12 +1,14 @@
-"""PC tools the AI chat model may call: file access inside the Project Folder plus a few pet actions.
+"""PC tools the AI chat model may call: file access anywhere on the PC plus a few pet actions.
 
 File tools are plain Python and run on the chat's worker thread. Pet tools need the Qt thread and are run
 by src/ui/ai_tool_host.py. Nothing here deletes files; save_file only writes where the user picks in a Save
 dialog, and edit_file and run_command only act after the user allows them in the chat.
 
 Security:
-- Paths resolve inside the Project Folder only (`..`, absolute paths and links out of it are refused).
-- Likely secret files (.env, keys, certificates, credential stores) are never read or edited, nor is .git.
+- Reads reach any path the user's account can: absolute paths anywhere, relative ones in the Project Folder
+  (the home folder when none is set). Reach is the model's to use; consent gates are the limit.
+- Likely secret files (.env, keys, certificates, credential stores) are read only after the user allows that
+  file (the host asks, every time) and are skipped by search_text.
 - save_file takes a bare file name (no folders) and at most MAX_SAVE_CHARS of text.
 - edit_file and edit_files show their diffs first and refuse to write if a file changed while the user was
   deciding; edit_files writes all of its files or none.
@@ -76,15 +78,19 @@ def _fn(name: str, description: str, props: dict[str, Any] | None = None, requir
         "type": "object", "properties": props or {}, "required": list(required)}}}
 
 
-_PATH = {"type": "string", "description": "Path relative to the Project Folder; empty for the folder itself"}
+_PATH = {"type": "string", "description": "Any absolute path on the PC, or a path relative to the Project Folder "
+         "(the home folder when none is set); empty for that folder itself. ~ is the home folder."}
 TOOL_SPECS: list[dict[str, Any]] = [
-    _fn("list_files", "List a folder inside the user's Project Folder (folders end with /).", {"path": _PATH}),
-    _fn("read_file", "Read a text file inside the Project Folder, with line numbers.",
+    _fn("list_files", "List a folder anywhere on the user's PC (folders end with /).", {"path": _PATH}),
+    _fn("read_file", "Read a text file anywhere on the PC, with line numbers. Secret-looking files (.env, keys) "
+        "ask the user first.",
         {"path": _PATH, "start_line": {"type": "integer", "description": "First line to show, default 1"}}, ("path",)),
-    _fn("find_files", "Find files in the Project Folder by name pattern, e.g. *.py or *config*.",
-        {"pattern": {"type": "string"}}, ("pattern",)),
-    _fn("search_text", "Find lines containing some text in the Project Folder's files (case-insensitive).",
-        {"text": {"type": "string"}, "pattern": {"type": "string", "description": "Optional file name pattern"}},
+    _fn("find_files", "Find files by name pattern, e.g. *.py or *config*, under a folder (default the Project "
+        "Folder or home).", {"pattern": {"type": "string"}, "path": _PATH}, ("pattern",)),
+    _fn("search_text", "Find lines containing some text in the files under a folder (case-insensitive; default the "
+        "Project Folder or home).",
+        {"text": {"type": "string"}, "pattern": {"type": "string", "description": "Optional file name pattern"},
+         "path": _PATH},
         ("text",)),
     _fn("read_clipboard", "Read the text currently on the user's clipboard."),
     _fn("copy_text", "Put text on the user's clipboard.", {"text": {"type": "string"}}, ("text",)),
@@ -113,7 +119,7 @@ TOOL_SPECS: list[dict[str, Any]] = [
         "Save dialog, or cancel.", {"name": {"type": "string", "description": "Suggested file name, e.g. report.md"},
                                     "content": {"type": "string", "description": "The whole file's text"}},
         ("name", "content")),
-    _fn("open_link", "Open an https link in the user's browser.", {"url": {"type": "string"}}, ("url",)),
+    _fn("open_link", "Open a web link (http or https) in the user's browser.", {"url": {"type": "string"}}, ("url",)),
     _fn("load_skill", "Load one of the user's skills (listed in the system prompt) and follow its instructions.",
         {"name": {"type": "string"}}, ("name",)),
     _fn("edit_file", "Change a text file in the Project Folder by replacing old_text, which must appear exactly once "
@@ -182,8 +188,6 @@ TOOL_SPECS: list[dict[str, Any]] = [
 COMPUTER_TOOLS = {"mouse_click", "type_text", "press_key", "scroll"}
 APPROVED_TOOLS = COMPUTER_TOOLS | {"edit_file", "edit_files", "run_command", "start_background", "add_mcp_server", "add_skill", "update_skill", "remember", "forget"}
 FILE_TOOLS = {"list_files", "read_file", "find_files", "search_text"}
-NO_FOLDER = ("error: no Project Folder chosen. Ask the user to pick one: right-click the pet, Project, "
-             "Choose Project Folder.")
 
 
 def save_args(args: dict[str, Any]) -> tuple[str, str]:
@@ -199,19 +203,19 @@ def save_args(args: dict[str, Any]) -> tuple[str, str]:
 
 
 def resolve(root: Path | None, rel: Any) -> Path:
-    """`rel` inside `root`, or ValueError. Symlinks are resolved first, so a link out of the folder is refused."""
-    if root is None:
-        raise ValueError(NO_FOLDER.removeprefix("error: "))
-    base = root.resolve()
+    """`rel` against `root` (the home folder when None); an absolute or ~ path is taken as is."""
+    base = (root or Path.home()).resolve()
     rel = rel.strip() if isinstance(rel, str) else ""
-    target = (base / rel).resolve() if rel else base
-    if not target.is_relative_to(base):
-        raise ValueError("that path is outside the Project Folder")
-    return target
+    return (base / Path(rel).expanduser()).resolve() if rel else base
 
 
 def _rel(base: Path, path: Path) -> str:
-    return path.relative_to(base).as_posix() or "."
+    """Relative to `base` when inside it, else the absolute path."""
+    return path.relative_to(base).as_posix() or "." if path.is_relative_to(base) else str(path)
+
+
+def is_secret(path: Path) -> bool:
+    return bool(_SECRET.search(path.name))
 
 
 def _walk(base: Path):
@@ -234,8 +238,9 @@ def _text(path: Path) -> str | None:
     return None if b"\0" in raw[:8192] else raw.decode("utf-8", "replace")
 
 
-def run_file_tool(root: Path | None, name: str, args: dict[str, Any]) -> str:
-    """One file tool's output for the model; every failure is a short `error: ...` line, never raised."""
+def run_file_tool(root: Path | None, name: str, args: dict[str, Any], secrets: bool = False) -> str:
+    """One file tool's output for the model; every failure is a short `error: ...` line, never raised.
+    `secrets` True: the user allowed reading a secret-looking file."""
     try:
         base = resolve(root, "")
         if name == "list_files":
@@ -249,8 +254,8 @@ def run_file_tool(root: Path | None, name: str, args: dict[str, Any]) -> str:
             path = resolve(root, args.get("path"))
             if not path.is_file():
                 return "error: not a file"
-            if _SECRET.search(path.name):
-                return "error: that looks like a secrets file, so it is not read"
+            if is_secret(path) and not secrets:
+                return "error: that looks like a secrets file and the user did not allow reading it"
             text = _text(path)
             if text is None:
                 return "error: binary or larger than 2 MB"
@@ -267,6 +272,10 @@ def run_file_tool(root: Path | None, name: str, args: dict[str, Any]) -> str:
                 size += len(row) + 1
             return "\n".join(out) or "(empty file)"
         pattern = args.get("pattern") if isinstance(args.get("pattern"), str) and args["pattern"].strip() else "*"
+        if name in ("find_files", "search_text"):
+            base = resolve(root, args.get("path"))
+            if not base.is_dir():
+                return "error: not a folder"
         if name == "find_files":
             found = [_rel(base, p) for p in _walk(base) if fnmatch.fnmatch(p.name.lower(), pattern.strip().lower())]
             return "\n".join(found[:MAX_FOUND]) + (f"\n... {len(found) - MAX_FOUND} more" if len(found) > MAX_FOUND
@@ -311,10 +320,7 @@ def plan_edit(root: Path | None, args: dict[str, Any]) -> Edit:
     if not isinstance(rel_arg, str) or not rel_arg.strip() or not isinstance(old, str) or not isinstance(new, str):
         raise ValueError("give path, old_text and new_text")
     path = resolve(root, rel_arg)
-    base = resolve(root, "")
-    rel = _rel(base, path)
-    if _SECRET.search(path.name) or ".git" in path.relative_to(base).parts:
-        raise ValueError("that file is not edited (secrets or .git)")
+    rel = _rel(resolve(root, ""), path) if root else str(path)  # no folder: show the full path in the approval
     if len(new) > MAX_SAVE_CHARS:
         raise ValueError(f"new_text is longer than {MAX_SAVE_CHARS} characters")
     if not old:
