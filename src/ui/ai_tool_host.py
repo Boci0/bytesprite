@@ -40,11 +40,17 @@ MAX_SCREEN_CHARS = 8000
 
 
 def _strings(value: Any) -> list[str]:
-    """Every string value inside nested JSON (keys left out)."""
-    if isinstance(value, str):
-        return [value]
-    items = value.values() if isinstance(value, dict) else value if isinstance(value, list) else ()
-    return [text for item in items for text in _strings(item)]
+    """Every string value inside nested JSON (keys left out); a loop, so deep nesting cannot overflow the stack."""
+    found, todo = [], [value]
+    while todo:
+        item = todo.pop()
+        if isinstance(item, str):
+            found.append(item)
+        elif isinstance(item, dict):
+            todo.extend(item.values())
+        elif isinstance(item, list):
+            todo.extend(item)
+    return found
 
 
 class AiToolHost(QObject):

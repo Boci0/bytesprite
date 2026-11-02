@@ -48,12 +48,18 @@ _ENV_KEEP = {"PATH", "PATHEXT", "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC"
              "OS", "LANG", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR",
              "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS"}
 _ENV_KEEP_PREFIXES = ("NPM_CONFIG_", "UV_", "PIP_")
+# A prefixed name with one of these words may hold a credential (NPM_CONFIG__AUTH, UV_PUBLISH_TOKEN, ...)
+_SECRET_WORDS = ("AUTH", "TOKEN", "PASSWORD", "PASSWD", "SECRET", "CERT", "KEY", "USER")
+_USERINFO = re.compile(r"(://)[^/@\s]*@")  # user:pass@ inside a URL (an index or proxy address)
 
 
 def child_env(extra: dict[str, str], base: dict[str, str] | None = None) -> dict[str, str]:
     """The environment for an MCP server: the allowed part of `base` (default: ours) plus the configured `extra`."""
-    kept = {k: v for k, v in (os.environ if base is None else base).items()
-            if k.upper() in _ENV_KEEP or k.upper().startswith(_ENV_KEEP_PREFIXES)}
+    kept = {}
+    for key, value in (os.environ if base is None else base).items():
+        name = key.upper()
+        if name in _ENV_KEEP or (name.startswith(_ENV_KEEP_PREFIXES) and not any(w in name for w in _SECRET_WORDS)):
+            kept[key] = _USERINFO.sub(r"\1", value)  # credentials in an address stay out; mcp.json "env" can add them
     return {**kept, **extra}
 
 
