@@ -918,7 +918,22 @@ def test_chat_auto_compacts_long_history(monkeypatch: pytest.MonkeyPatch, api: s
 
 
 def test_steer_after_three_failures_in_a_row() -> None:
-    fails = [0]
-    notes = [ai_assist._steer(r, fails) for r in ("error: x", "exit code 1\nboom", "stopped after 120 s")]
+    state: list = [0, 0, None]
+    notes = [ai_assist._steer(f"c{i}", r, state) for i, r in enumerate(("error: x", "exit code 1\nboom", "stopped after 120 s"))]
     assert notes[:2] == ["", ""] and "3 tool calls in a row failed" in notes[2]
-    assert ai_assist._steer("exit code 0\nok", fails) == "" and fails == [0]  # one success resets the streak
+    assert ai_assist._steer("c", "exit code 0\nok", state) == "" and state[0] == 0  # a success resets the streak
+
+
+def test_steer_on_the_same_call_with_the_same_result() -> None:
+    state: list = [0, 0, None]
+    notes = [ai_assist._steer("read_file(a)", "same text", state) for _ in range(3)]
+    assert notes[:2] == ["", ""] and "same result 3 times" in notes[2]
+    assert ai_assist._steer("read_file(a)", "new text", state) == ""  # new output (a polled process) is progress
+
+
+def test_ignored_note_turns_tools_off() -> None:
+    state: list = [0, 0, None]
+    for i in range(ai_assist.STEER_STOP):
+        note = ai_assist._steer(f"c{i}", "error: x", state)
+    assert ai_assist._stuck(state) and "tools are off" in note
+    assert not ai_assist._stuck([2, 2, None])

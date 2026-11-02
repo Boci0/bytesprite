@@ -12,7 +12,7 @@ import pytest
 from src.tools import ai_assist, ai_tools
 from src.tools.ai_assist import chat_messages
 from src.tools.ai_tools import (MAX_SKILL_CHARS, MAX_SKILL_DESC, MAX_SKILLS, TOOL_SPECS, list_skills, load_skill,
-                                parse_skill, run_file_tool, skills_dir, skills_prompt)
+                                parse_skill, run_command, run_file_tool, skills_dir, skills_prompt)
 
 
 @pytest.fixture()
@@ -435,6 +435,8 @@ def test_host_runs_commands_in_home_without_a_project_folder(monkeypatch: pytest
 
 def test_both_loops_end_with_an_answer_when_the_tool_budget_runs_out(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ai_assist, "MAX_TOOL_ROUNDS", 3)
+    monkeypatch.setattr(ai_assist, "STEER_AFTER", 99)  # this fake model repeats one call on purpose
+    monkeypatch.setattr(ai_assist, "STEER_STOP", 99)
     assert "100 rounds of tool calls" in ai_assist.SYSTEM_PROMPT and "100 tool rounds" in ai_assist.BUDGET_NOTE
 
     def claude(body):  # always wants another tool, unless tool_choice forbids it
@@ -645,3 +647,30 @@ def test_global_rules_reach_every_system_prompt_ahead_of_memory(tmp_path: Path, 
     (tmp_path / "memory.md").write_text("- Tests run with pytest\n", encoding="utf-8")
     system = ai_assist.chat_messages([{"role": "user", "content": "hi"}])[0]["content"]
     assert system.index("global rules") < system.index("Your memory")
+
+
+def test_run_command_notes_a_launch(tmp_path) -> None:
+    out = run_command(tmp_path, 'start "" cmd /c exit')
+    assert out.startswith("exit code 0") and "read_screen" in out
+    assert "read_screen" not in run_command(tmp_path, "echo hi")
+
+
+def test_a_model_that_ignores_the_steer_note_loses_its_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Failing(_Host):
+        def run(self, name: str, args: dict) -> str:
+            self.calls.append((name, args))
+            return "error: nope"
+
+    def openai(body):
+        if "tools" not in body:
+            return {"choices": [{"message": {"role": "assistant", "content": "It keeps failing; I need X."}}]}
+        return {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+            {"id": f"c{len(sent)}", "function": {"name": "list_files", "arguments": json.dumps({"p": len(sent)})}}]}}]}
+
+    sent: list[dict] = []
+    monkeypatch.setattr(ai_assist, "_request", lambda *a: sent.append(json.loads(json.dumps(a[3]))) or openai(a[3]))
+    host = Failing()
+    reply = ai_assist._post("https://api.example/v1", "k", "m", [{"role": "user", "content": "go"}], "off", 5, True, host)
+    assert reply.text == "It keeps failing; I need X." and len(host.calls) == ai_assist.STEER_STOP
+    tool_msgs = [m["content"] for m in sent[-1]["messages"] if m["role"] == "tool"]
+    assert "3 tool calls in a row failed" in tool_msgs[2] and "tools are off" in tool_msgs[-1] and "tools" not in sent[-1]

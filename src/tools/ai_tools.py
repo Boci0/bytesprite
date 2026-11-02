@@ -527,6 +527,8 @@ def run_command(root: Path | None, command: Any) -> str:
     if len(out) > MAX_COMMAND_CHARS:  # the end usually holds the verdict (test summary, error)
         half = MAX_COMMAND_CHARS // 2
         out = f"{out[:half]}\n... {len(out) - MAX_COMMAND_CHARS} characters cut ...\n{out[-half:]}"
+    if re.match(r"\s*start\b", command, re.I) and proc.returncode == 0:  # exit 0 only says the shell handed it off
+        out += "\n(launched; the app may still show an error dialog, so check with read_screen)"
     return f"{head}\n{out or '(no output)'}"
 
 

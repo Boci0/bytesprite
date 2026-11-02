@@ -76,9 +76,14 @@ MAX_NATIVE_ROUNDS = 5  # pause_turn continuations of one Claude answer
 # Added to the last tool output before the answer-only round, so a long job ends with a report, not an error
 BUDGET_NOTE = (f"\n\n[ByteSprite: that was the last of this message's {MAX_TOOL_ROUNDS} tool rounds. Answer now "
                "without tools: say what is done and what is left; the user can send another message to continue.]")
+STEER_STOP = 6  # in a row: the model ignored the note, so tools go off for the rest of the answer
 STEER_AFTER = 3  # failed tool results in a row before the model is told to change course
 STEER_NOTE = ("\n\n[ByteSprite: {n} tool calls in a row failed. Do not repeat them: try a different approach, or stop "
               "and tell the user what is blocking you and what you need.]")
+REPEAT_NOTE = ("\n\n[ByteSprite: the same call gave the same result {n} times in a row. It is not getting anywhere: try "
+               "something different, or tell the user what is blocking you.]")
+STUCK_NOTE = ("\n\n[ByteSprite: that is {n} in a row, so tools are off for the rest of this answer. Tell the user what "
+              "failed and what you need.]")
 # Claude's own server-side tools, run by Anthropic (web search is billed per search, fetch is free)
 CLAUDE_TOOLS = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 5},
                 {"type": "web_fetch_20250910", "name": "web_fetch", "max_uses": 5}]
@@ -458,13 +463,13 @@ def _post_anthropic(base_url: str, key: str, model: str, messages: list[dict[str
     reasoning: list[str] = []
     used: list[tuple[str, str]] = []
     tool_rounds = 0
-    fails = [0]
+    fails: list[Any] = [0, 0, None]
     for _ in range(MAX_NATIVE_ROUNDS + MAX_TOOL_ROUNDS + 1):
         body: dict[str, Any] = {"model": model, "system": system, "messages": turns, "tools": tools,
                                 "max_tokens": MAX_THINKING_TOKENS if effort else MAX_REPLY_TOKENS,
                                 **({"thinking": {"type": "adaptive", "display": "summarized"}, "output_config": {"effort": effort}}
                                    if effort else {})}
-        if tool_rounds >= MAX_TOOL_ROUNDS:  # same tool list (thinking is bound to it), but answer-only
+        if tool_rounds >= MAX_TOOL_ROUNDS or _stuck(fails):  # same tool list (thinking is bound to it), but answer-only
             body["tool_choice"] = {"type": "none"}
         data = _request(base_url, key, "/messages", body, timeout or THINKING_TIMEOUT_S)
         try:
@@ -486,7 +491,7 @@ def _post_anthropic(base_url: str, key: str, model: str, messages: list[dict[str
                 for b in (b for b in blocks if b.get("type") == "tool_use"):
                     out = _run_tool(b["name"], b.get("input"), host)
                     shot = _take_shot(host)
-                    sent = out + _steer(out, fails)
+                    sent = out + _steer(f"{b['name']}{json.dumps(b.get('input'), sort_keys=True)}", out, fails)
                     content: Any = sent if not shot else [{"type": "text", "text": sent}, {"type": "image", "source": {
                         "type": "base64", "media_type": "image/png", "data": shot.split(",", 1)[1]}}]
                     results.append({"type": "tool_result", "tool_use_id": b["id"], "content": content})
@@ -530,13 +535,13 @@ def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], t
     spent = [0, 0, 0, 0]  # prompt, completion, reasoning, total tokens over every round
     used: list[tuple[str, str]] = []
     shot_at: int | None = None  # index in `messages` of the screenshot message
-    fails = [0]
+    fails: list[Any] = [0, 0, None]
     for round_ in range(MAX_TOOL_ROUNDS + 1):
         shots: list[str] = []
         body: dict[str, Any] = {"model": model, "messages": messages,
                                 "max_tokens": MAX_THINKING_TOKENS if thinks else MAX_REPLY_TOKENS,
                                 **thinking_params(base_url, thinking)}
-        if tools and round_ < MAX_TOOL_ROUNDS:
+        if tools and round_ < MAX_TOOL_ROUNDS and not _stuck(fails):
             body["tools"] = [SEARCH_TOOL, FETCH_TOOL, *(host.specs if host else [])]
         try:
             data = _request(base_url, key, "/chat/completions", body,
@@ -572,7 +577,7 @@ def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], t
                     result = _run_tool(fn["name"], fn.get("arguments"), host, seen)
                     last = round_ == MAX_TOOL_ROUNDS - 1 and call is calls[-1]  # the next round sends no tools
                     messages.append({"role": "tool", "tool_call_id": call["id"],
-                                     "content": result + _steer(result, fails) + (BUDGET_NOTE if last else "")})
+                                     "content": result + _steer(fn["name"] + str(fn.get("arguments")), result, fails) + (BUDGET_NOTE if last else "")})
                     read_local = read_local or fn["name"] in LOCAL_DATA_TOOLS or MCP_SEP in fn["name"]
                     used.append((tool_note(fn["name"], fn.get("arguments")), result))
                     shot = _take_shot(host)
@@ -601,12 +606,23 @@ def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], t
     raise ValueError("bad reply")
 
 
-def _steer(result: str, fails: list[int]) -> str:
-    """The note to add to a tool result once STEER_AFTER results in a row failed; `fails` holds the streak."""
+def _stuck(state: list[Any]) -> bool:
+    return max(state[0], state[1]) >= STEER_STOP
+
+
+def _steer(call: str, result: str, state: list[Any]) -> str:
+    """The note to add to a tool result once STEER_AFTER results in a row failed, or the same call gave the same
+    result that often; `state` is [failure streak, repeat streak, last (call, result)] and lives for one answer."""
     head = result.lstrip()[:60]
     bad = head.startswith(("error", "stopped after")) or (head.startswith("exit code") and not head.startswith("exit code 0"))
-    fails[0] = fails[0] + 1 if bad else 0
-    return STEER_NOTE.format(n=fails[0]) if fails[0] >= STEER_AFTER else ""
+    state[0] = state[0] + 1 if bad else 0
+    state[1] = state[1] + 1 if state[2] == (call, result) else 1
+    state[2] = (call, result)
+    if _stuck(state):
+        return STUCK_NOTE.format(n=max(state[0], state[1]))
+    if state[0] >= STEER_AFTER:
+        return STEER_NOTE.format(n=state[0])
+    return REPEAT_NOTE.format(n=state[1]) if state[1] >= STEER_AFTER else ""
 
 
 def _take_shot(host: ToolHost | None) -> str:
