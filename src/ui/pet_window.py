@@ -852,6 +852,11 @@ class PetWindow(QWidget):
                              QColor("#38B764" if status == "current" else "#E05A47"))
             if refused and self._on_notification is not None:
                 self._on_notification(f"Update refused ({tag}): it is not a release signed by the ByteSprite key")
+            if tag == "needs installer":
+                self._show_toast("RUN INSTALLER", QColor("#FFCD75"))
+                if self._on_notification is not None:
+                    self._on_notification("This update changes libraries: run install.ps1 from the releases page")
+                QDesktopServices.openUrl(QUrl(RELEASES_URL))
 
     def restart(self) -> None:
         self.trigger_quit()  # saves state.json before the new copy loads it

@@ -222,3 +222,15 @@ def test_install_ps1_pins_release_key_and_verifier() -> None:
     served = (root / "src" / "signing.py").read_bytes().replace(b"\r\n", b"\n")
     assert bytes.fromhex(key) == RELEASE_PUBLIC_KEY
     assert hashlib.sha256(served).hexdigest().upper() == pinned
+
+
+def test_changed_library_pins_need_the_installer(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    (app / "requirements.txt").write_text("PyQt6==6.12.0 \\n    --hash=sha256:aa\nPyQt6_sip==13.13.0\n")
+    same_new_hashes = "pyqt6==6.12.0 \\n    --hash=sha256:bb\nPyQt6-sip==13.13.0\n"  # case, _ vs - and hashes do not count
+    install_source_zip(_zipball({"src/main.py": "new", "requirements.txt": same_new_hashes}), app)
+    assert (app / "src" / "main.py").read_text() == "new" and "bb" in (app / "requirements.txt").read_text()
+    with pytest.raises(ValueError, match="needs installer"):
+        install_source_zip(_zipball({"src/main.py": "newer", "requirements.txt": "PyQt6==6.13.0\n"}), app)
+    assert (app / "src" / "main.py").read_text() == "new" and not (app / "src.new").exists()
+    install_source_zip(_zipball({"src/main.py": "no reqs file in bundle"}), app)  # nothing to compare: allowed

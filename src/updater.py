@@ -94,11 +94,27 @@ def verified_bundle(data: bytes, sig_text: bytes, tag: str, public: bytes | None
     return data
 
 
+def _bundle_requirements(data: bytes) -> str | None:
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        for name in zf.namelist():
+            if len(Path(name).parts) == 2 and Path(name).name == "requirements.txt":
+                return zf.read(name).decode("utf-8", "replace")
+    return None
+
+
+def _pins(text: str) -> set[str]:
+    """The `name==version` pins of a requirements file (hash lines and comments ignored, names case-folded)."""
+    found = (re.match(r"\s*([A-Za-z0-9_.\-\[\]]+==[^\s\;]+)", line) for line in text.splitlines())
+    return {m[1].lower().replace("_", "-") for m in found if m}
+
+
 def install_source_zip(data: bytes, app_dir: Path = APP_DIR) -> None:
     """Swap `app_dir/src` for the `src/` folder inside a verified release bundle.
 
     The new tree is fully extracted next to the old one before a rename swap, so a bad zip
-    leaves the running install untouched.
+    leaves the running install untouched. A bundle whose pinned libraries differ from the installed
+    ones is refused ("needs installer"): new code on old libraries can crash at start, and the running
+    app cannot safely replace its own libraries, so the user re-runs install.ps1 for that release.
     """
     new_dir, old_dir = app_dir / "src.new", app_dir / "src.old"
     shutil.rmtree(new_dir, ignore_errors=True)
@@ -118,6 +134,11 @@ def install_source_zip(data: bytes, app_dir: Path = APP_DIR) -> None:
     if not (new_dir / "main.py").is_file():
         shutil.rmtree(new_dir, ignore_errors=True)
         raise ValueError("update has no src/main.py")
+    wanted = _bundle_requirements(data)
+    have = app_dir / "requirements.txt"
+    if wanted is not None and have.is_file() and _pins(wanted) != _pins(have.read_text(encoding="utf-8", errors="replace")):
+        shutil.rmtree(new_dir, ignore_errors=True)
+        raise ValueError("needs installer")
     (app_dir / "src").rename(old_dir)
     try:
         new_dir.rename(app_dir / "src")
@@ -125,6 +146,8 @@ def install_source_zip(data: bytes, app_dir: Path = APP_DIR) -> None:
         old_dir.rename(app_dir / "src")  # e.g. antivirus still scanning src.new: keep the old code, not none
         raise
     shutil.rmtree(old_dir, ignore_errors=True)
+    if wanted is not None:
+        have.write_text(wanted, encoding="utf-8", newline="")  # same pins, maybe new hashes: keep the file current
 
 
 class UpdateJob(QObject):
