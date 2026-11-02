@@ -24,10 +24,12 @@ import ctypes
 import ctypes.wintypes as wintypes
 import http.client
 import json
+import logging
 import os
 import re
 import sys
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
@@ -45,6 +47,8 @@ from src.engine.models import CompanionState, HudBar, HudData, ToolMenuItem
 from src.tools.ai_tools import (MEMORY_HEADER, LOCAL_DATA_TOOLS, RULES_HEADER, memory_path, memory_prompt, rules_path,
                                 rules_prompt, skills_dir, skills_prompt)
 from src.tools.mcp_client import SEP as MCP_SEP, ensure_config
+
+logger = logging.getLogger(__name__)
 
 # key: (menu label, base URL, default model; '' means the user must pick one)
 PRESETS: dict[str, tuple[str, str, str]] = {
@@ -76,6 +80,11 @@ MAX_NATIVE_ROUNDS = 5  # pause_turn continuations of one Claude answer
 # Added to the last tool output before the answer-only round, so a long job ends with a report, not an error
 BUDGET_NOTE = (f"\n\n[ByteSprite: that was the last of this message's {MAX_TOOL_ROUNDS} tool rounds. Answer now "
                "without tools: say what is done and what is left; the user can send another message to continue.]")
+MAX_ANSWER_TOKENS = 1_500_000  # input + output over every round of one answer; then tools go off
+OVER_NOTE = ("\n\n[ByteSprite: this answer has used its token budget, so tools are off now. Say what is done and "
+             "what is left; the user can send another message to continue.]")
+RETRY_DELAYS = (1.0, 3.0)  # waits before the 2nd and 3rd try of a call that hit a rate limit, a 5xx or a dropped connection
+_RETRY_CODES = {429, 500, 502, 503, 504, 529}
 STEER_STOP = 6  # in a row: the model ignored the note, so tools go off for the rest of the answer
 STEER_AFTER = 3  # failed tool results in a row before the model is told to change course
 STEER_NOTE = ("\n\n[ByteSprite: {n} tool calls in a row failed. Do not repeat them: try a different approach, or stop "
@@ -376,7 +385,28 @@ def ask(base_url: str, key: str, model: str, messages: list[dict[str, Any]], *,
                 raise
 
 
+class _Transient(ValueError):
+    """A failure worth another try: rate limit, server error, dropped connection."""
+
+
 def _request(base_url: str, key: str, path: str, body: dict[str, Any] | None, timeout: float) -> Any:
+    """`_request_once` with up to len(RETRY_DELAYS) more tries when the failure is transient."""
+    for attempt in range(len(RETRY_DELAYS) + 1):
+        try:
+            return _request_once(base_url, key, path, body, timeout)
+        except _Transient as exc:
+            if attempt == len(RETRY_DELAYS):
+                logger.warning("request %s failed after %d tries: %s", path.split("?")[0], attempt + 1, exc)
+                raise
+            logger.info("request %s: %s, retrying in %.0f s", path.split("?")[0], exc, RETRY_DELAYS[attempt])
+            time.sleep(RETRY_DELAYS[attempt])
+        except ValueError as exc:
+            logger.warning("request %s failed: %s", path.split("?")[0], exc)
+            raise
+    raise AssertionError("unreachable")
+
+
+def _request_once(base_url: str, key: str, path: str, body: dict[str, Any] | None, timeout: float) -> Any:
     """One JSON call through the no-redirect opener; errors are short and never echo the key or body."""
     req = urllib.request.Request(
         validate_base_url(base_url) + path, data=None if body is None else json.dumps(body).encode("utf-8"),
@@ -391,9 +421,11 @@ def _request(base_url: str, key: str, path: str, body: dict[str, Any] | None, ti
     except urllib.error.HTTPError as exc:  # its body may echo the request, so it is never shown
         if is_anthropic(base_url) and exc.code in (400, 422):  # ...except Anthropic's own error text, which names the cause
             raise ValueError(_anthropic_error(exc)) from None
-        raise ValueError(_HTTP_ERRORS.get(exc.code, f"http {exc.code}")) from None
-    except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException):  # e.g. BadStatusLine
-        raise ValueError("network") from None
+        message = _HTTP_ERRORS.get(exc.code, f"http {exc.code}")
+        raise (_Transient if exc.code in _RETRY_CODES else ValueError)(message) from None
+    except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:  # e.g. BadStatusLine
+        slow = isinstance(exc, TimeoutError) or isinstance(getattr(exc, "reason", None), TimeoutError)
+        raise (ValueError if slow else _Transient)("network") from None  # a timeout already cost the full wait
     if len(raw) > MAX_RESPONSE_BYTES:
         raise ValueError("reply too large")
     try:
@@ -469,7 +501,7 @@ def _post_anthropic(base_url: str, key: str, model: str, messages: list[dict[str
                                 "max_tokens": MAX_THINKING_TOKENS if effort else MAX_REPLY_TOKENS,
                                 **({"thinking": {"type": "adaptive", "display": "summarized"}, "output_config": {"effort": effort}}
                                    if effort else {})}
-        if tool_rounds >= MAX_TOOL_ROUNDS or _stuck(fails):  # same tool list (thinking is bound to it), but answer-only
+        if tool_rounds >= MAX_TOOL_ROUNDS or _stuck(fails) or spent[0] + spent[1] >= MAX_ANSWER_TOKENS:  # same tool list (thinking is bound to it), but answer-only
             body["tool_choice"] = {"type": "none"}
         data = _request(base_url, key, "/messages", body, timeout or THINKING_TIMEOUT_S)
         try:
@@ -491,7 +523,8 @@ def _post_anthropic(base_url: str, key: str, model: str, messages: list[dict[str
                 for b in (b for b in blocks if b.get("type") == "tool_use"):
                     out = _run_tool(b["name"], b.get("input"), host)
                     shot = _take_shot(host)
-                    sent = out + _steer(f"{b['name']}{json.dumps(b.get('input'), sort_keys=True)}", out, fails)
+                    sent = out + _steer(b["name"], f"{b['name']}{json.dumps(b.get('input'), sort_keys=True)}", out, fails,
+                                        spent[0] + spent[1])
                     content: Any = sent if not shot else [{"type": "text", "text": sent}, {"type": "image", "source": {
                         "type": "base64", "media_type": "image/png", "data": shot.split(",", 1)[1]}}]
                     results.append({"type": "tool_result", "tool_use_id": b["id"], "content": content})
@@ -541,7 +574,7 @@ def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], t
         body: dict[str, Any] = {"model": model, "messages": messages,
                                 "max_tokens": MAX_THINKING_TOKENS if thinks else MAX_REPLY_TOKENS,
                                 **thinking_params(base_url, thinking)}
-        if tools and round_ < MAX_TOOL_ROUNDS and not _stuck(fails):
+        if tools and round_ < MAX_TOOL_ROUNDS and not _stuck(fails) and spent[3] < MAX_ANSWER_TOKENS:
             body["tools"] = [SEARCH_TOOL, FETCH_TOOL, *(host.specs if host else [])]
         try:
             data = _request(base_url, key, "/chat/completions", body,
@@ -577,7 +610,8 @@ def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], t
                     result = _run_tool(fn["name"], fn.get("arguments"), host, seen)
                     last = round_ == MAX_TOOL_ROUNDS - 1 and call is calls[-1]  # the next round sends no tools
                     messages.append({"role": "tool", "tool_call_id": call["id"],
-                                     "content": result + _steer(fn["name"] + str(fn.get("arguments")), result, fails) + (BUDGET_NOTE if last else "")})
+                                     "content": result + _steer(fn["name"], fn["name"] + str(fn.get("arguments")), result, fails, spent[3])
+                                     + (BUDGET_NOTE if last else "")})
                     read_local = read_local or fn["name"] in LOCAL_DATA_TOOLS or MCP_SEP in fn["name"]
                     used.append((tool_note(fn["name"], fn.get("arguments")), result))
                     shot = _take_shot(host)
@@ -610,14 +644,22 @@ def _stuck(state: list[Any]) -> bool:
     return max(state[0], state[1]) >= STEER_STOP
 
 
-def _steer(call: str, result: str, state: list[Any]) -> str:
-    """The note to add to a tool result once STEER_AFTER results in a row failed, or the same call gave the same
-    result that often; `state` is [failure streak, repeat streak, last (call, result)] and lives for one answer."""
+def _failed(result: str) -> bool:
     head = result.lstrip()[:60]
-    bad = head.startswith(("error", "stopped after")) or (head.startswith("exit code") and not head.startswith("exit code 0"))
+    return head.startswith(("error", "stopped after")) or (head.startswith("exit code") and not head.startswith("exit code 0"))
+
+
+def _steer(name: str, call: str, result: str, state: list[Any], tokens: int = 0) -> str:
+    """The note to add to a tool result once STEER_AFTER results in a row failed, the same call gave the same
+    result that often, or the answer used MAX_ANSWER_TOKENS; `state` is [failure streak, repeat streak, last
+    (call, result)] and lives for one answer. Also logs the call (name and outcome only: never arguments or output)."""
+    bad = _failed(result)
+    logger.info("tool %s: %s", name, "failed" if bad else "ok")
     state[0] = state[0] + 1 if bad else 0
     state[1] = state[1] + 1 if state[2] == (call, result) else 1
     state[2] = (call, result)
+    if tokens >= MAX_ANSWER_TOKENS:
+        return OVER_NOTE
     if _stuck(state):
         return STUCK_NOTE.format(n=max(state[0], state[1]))
     if state[0] >= STEER_AFTER:

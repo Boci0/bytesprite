@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import ctypes
+import logging
+import logging.handlers
+import os
 import signal
 import sys
 from pathlib import Path
@@ -226,6 +229,21 @@ def _detach_console_if_present() -> None:
             pass
 
 
+def setup_logging() -> Path | None:
+    """Send the app's log lines to a small rotating file (calls and errors only, never keys or message text)."""
+    path = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "ByteSprite" / "bytesprite.log"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handler = logging.handlers.RotatingFileHandler(path, maxBytes=512 * 1024, backupCount=1, encoding="utf-8")
+    except OSError:
+        return None  # no log is better than no app
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    root = logging.getLogger("src")
+    root.setLevel(logging.INFO)
+    root.addHandler(handler)
+    return path
+
+
 def main(argv: list[str] | None = None) -> int:
     """Launch ByteSprite on the Windows desktop."""
     if argv is None:
@@ -233,6 +251,7 @@ def main(argv: list[str] | None = None) -> int:
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
+    setup_logging()
     args = argv if argv is not None else sys.argv
     app = QApplication(args)
     app.setApplicationName("ByteSprite")

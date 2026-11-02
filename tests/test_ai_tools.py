@@ -674,3 +674,20 @@ def test_a_model_that_ignores_the_steer_note_loses_its_tools(monkeypatch: pytest
     assert reply.text == "It keeps failing; I need X." and len(host.calls) == ai_assist.STEER_STOP
     tool_msgs = [m["content"] for m in sent[-1]["messages"] if m["role"] == "tool"]
     assert "3 tool calls in a row failed" in tool_msgs[2] and "tools are off" in tool_msgs[-1] and "tools" not in sent[-1]
+
+
+def test_token_budget_turns_tools_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ai_assist, "MAX_ANSWER_TOKENS", 100)
+
+    def openai(body):
+        if "tools" not in body:
+            return {"choices": [{"message": {"role": "assistant", "content": "Out of budget."}}]}
+        return {"usage": {"total_tokens": 150}, "choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "c1", "function": {"name": "list_files", "arguments": "{}"}}]}}]}
+
+    sent: list[dict] = []
+    monkeypatch.setattr(ai_assist, "_request", lambda *a: sent.append(json.loads(json.dumps(a[3]))) or openai(a[3]))
+    host = _Host()
+    reply = ai_assist._post("https://api.example/v1", "k", "m", [{"role": "user", "content": "go"}], "off", 5, True, host)
+    assert reply.text == "Out of budget." and len(host.calls) == 1 and "tools" not in sent[1]
+    assert "token budget" in sent[1]["messages"][-1]["content"]

@@ -919,21 +919,47 @@ def test_chat_auto_compacts_long_history(monkeypatch: pytest.MonkeyPatch, api: s
 
 def test_steer_after_three_failures_in_a_row() -> None:
     state: list = [0, 0, None]
-    notes = [ai_assist._steer(f"c{i}", r, state) for i, r in enumerate(("error: x", "exit code 1\nboom", "stopped after 120 s"))]
+    notes = [ai_assist._steer("t", f"c{i}", r, state) for i, r in enumerate(("error: x", "exit code 1\nboom", "stopped after 120 s"))]
     assert notes[:2] == ["", ""] and "3 tool calls in a row failed" in notes[2]
-    assert ai_assist._steer("c", "exit code 0\nok", state) == "" and state[0] == 0  # a success resets the streak
+    assert ai_assist._steer("t", "c", "exit code 0\nok", state) == "" and state[0] == 0  # a success resets the streak
 
 
 def test_steer_on_the_same_call_with_the_same_result() -> None:
     state: list = [0, 0, None]
-    notes = [ai_assist._steer("read_file(a)", "same text", state) for _ in range(3)]
+    notes = [ai_assist._steer("read_file", "read_file(a)", "same text", state) for _ in range(3)]
     assert notes[:2] == ["", ""] and "same result 3 times" in notes[2]
-    assert ai_assist._steer("read_file(a)", "new text", state) == ""  # new output (a polled process) is progress
+    assert ai_assist._steer("read_file", "read_file(a)", "new text", state) == ""  # new output (a polled process) is progress
 
 
 def test_ignored_note_turns_tools_off() -> None:
     state: list = [0, 0, None]
     for i in range(ai_assist.STEER_STOP):
-        note = ai_assist._steer(f"c{i}", "error: x", state)
+        note = ai_assist._steer("t", f"c{i}", "error: x", state)
     assert ai_assist._stuck(state) and "tools are off" in note
     assert not ai_assist._stuck([2, 2, None])
+
+
+def test_request_retries_transient_failures_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ai_assist, "RETRY_DELAYS", (0.0, 0.0))
+    replies = iter([ai_assist._Transient("rate limited"), ai_assist._Transient("network"), {"ok": 1}])
+
+    def once(*_a):
+        got = next(replies)
+        if isinstance(got, Exception):
+            raise got
+        return got
+
+    monkeypatch.setattr(ai_assist, "_request_once", once)
+    assert ai_assist._request("https://api.example/v1", "k", "/x", {}, 5) == {"ok": 1}
+
+    calls = []
+    monkeypatch.setattr(ai_assist, "_request_once", lambda *a: calls.append(a) or (_ for _ in ()).throw(ValueError("bad key")))
+    with pytest.raises(ValueError, match="bad key"):
+        ai_assist._request("https://api.example/v1", "k", "/x", {}, 5)
+    assert len(calls) == 1  # a bad key is not retried
+
+    calls.clear()
+    monkeypatch.setattr(ai_assist, "_request_once", lambda *a: calls.append(a) or (_ for _ in ()).throw(ai_assist._Transient("network")))
+    with pytest.raises(ValueError, match="network"):
+        ai_assist._request("https://api.example/v1", "k", "/x", {}, 5)
+    assert len(calls) == 3  # first try plus both retries
