@@ -80,7 +80,7 @@ MAX_NATIVE_ROUNDS = 5  # pause_turn continuations of one Claude answer
 # Added to the last tool output before the answer-only round, so a long job ends with a report, not an error
 BUDGET_NOTE = (f"\n\n[ByteSprite: that was the last of this message's {MAX_TOOL_ROUNDS} tool rounds. Answer now "
                "without tools: say what is done and what is left; the user can send another message to continue.]")
-MAX_ANSWER_TOKENS = 1_500_000  # input + output over every round of one answer; then tools go off
+MAX_ANSWER_TOKENS = 3_000_000  # billable tokens (cached prompt counts a tenth) over every round of one answer; then tools go off
 OVER_NOTE = ("\n\n[ByteSprite: this answer has used its token budget, so tools are off now. Say what is done and "
              "what is left; the user can send another message to continue.]")
 RETRY_DELAYS = (1.0, 3.0)  # waits before the 2nd and 3rd try of a call that hit a rate limit, a 5xx or a dropped connection
@@ -702,6 +702,12 @@ def _read_anthropic_stream(resp: Any, progress: Callable[[str], None]) -> dict[s
             "stop_reason": stop}
 
 
+def _billable(fresh: int, cached: int, completion: int) -> int:
+    """What a round costs against MAX_ANSWER_TOKENS: providers bill a cached prompt at about a tenth, and a long
+    tool job re-sends its whole chat every round."""
+    return fresh + cached // 10 + completion
+
+
 def _int(value: Any) -> int:
     return value if isinstance(value, int) and value >= 0 else 0
 
@@ -761,6 +767,7 @@ def _post_anthropic(base_url: str, key: str, model: str, messages: list[dict[str
         turns = [*turns[:-1], {**last, "content": blocks}]
     effort = CLAUDE_EFFORT.get(thinking)
     spent = [0, 0, 0]  # input, output, thinking tokens over every round
+    paid = 0  # the same, billable (see _billable)
     reasoning: list[str] = []
     used: list[tuple[str, str]] = []
     tool_rounds = 0
@@ -771,7 +778,7 @@ def _post_anthropic(base_url: str, key: str, model: str, messages: list[dict[str
                                 "max_tokens": MAX_THINKING_TOKENS if effort else MAX_REPLY_TOKENS,
                                 **({"thinking": {"type": "adaptive", "display": "summarized"}, "output_config": {"effort": effort}}
                                    if effort else {})}
-        if tools and (tool_rounds >= MAX_TOOL_ROUNDS or _stuck(fails) or spent[0] + spent[1] >= MAX_ANSWER_TOKENS):  # same tool list (thinking is bound to it), but answer-only
+        if tools and (tool_rounds >= MAX_TOOL_ROUNDS or _stuck(fails) or paid >= MAX_ANSWER_TOKENS):  # same tool list (thinking is bound to it), but answer-only
             body["tool_choice"] = {"type": "none"}
         data = _request(base_url, key, "/messages", body, timeout or THINKING_TIMEOUT_S, progress)
         try:
@@ -779,6 +786,8 @@ def _post_anthropic(base_url: str, key: str, model: str, messages: list[dict[str
             usage = data.get("usage") or {}
             cached = _int(usage.get("cache_read_input_tokens")) + _int(usage.get("cache_creation_input_tokens"))
             spent[0] += cached  # input_tokens alone leaves out the cached part of the prompt
+            paid += _billable(_int(usage.get("input_tokens")) + _int(usage.get("cache_creation_input_tokens")),
+                              _int(usage.get("cache_read_input_tokens")), _int(usage.get("output_tokens")))
             for i, got in enumerate((usage.get("input_tokens"), usage.get("output_tokens"),
                                      (usage.get("output_tokens_details") or {}).get("thinking_tokens"))):
                 spent[i] += _int(got)
@@ -797,7 +806,7 @@ def _post_anthropic(base_url: str, key: str, model: str, messages: list[dict[str
                     read_local = read_local or b["name"] in LOCAL_DATA_TOOLS or MCP_SEP in b["name"]
                     shot = _take_shot(host)
                     sent = out + _steer(b["name"], f"{b['name']}{json.dumps(b.get('input'), sort_keys=True)}", out, fails,
-                                        spent[0] + spent[1])
+                                        paid)
                     content: Any = sent if not shot else [{"type": "text", "text": sent}, {"type": "image", "source": {
                         "type": "base64", "media_type": "image/png", "data": shot.split(",", 1)[1]}}]
                     results.append({"type": "tool_result", "tool_use_id": b["id"], "content": content})
@@ -841,6 +850,7 @@ def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], t
     messages = list(messages)
     read_local = any(read_local_data(m) for m in messages)  # set once a tool has returned the user's own data
     spent = [0, 0, 0, 0]  # prompt, completion, reasoning, total tokens over every round
+    paid = 0  # billable tokens (see _billable)
     used: list[tuple[str, str]] = []
     shot_at: int | None = None  # index in `messages` of the screenshot message
     fails: list[Any] = [0, 0, None]
@@ -849,7 +859,7 @@ def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], t
         body: dict[str, Any] = {"model": model, "messages": messages,
                                 "max_tokens": MAX_THINKING_TOKENS if thinks else MAX_REPLY_TOKENS,
                                 **thinking_params(base_url, thinking)}
-        if tools and round_ < MAX_TOOL_ROUNDS and not _stuck(fails) and spent[3] < MAX_ANSWER_TOKENS:
+        if tools and round_ < MAX_TOOL_ROUNDS and not _stuck(fails) and paid < MAX_ANSWER_TOKENS:
             body["tools"] = [SEARCH_TOOL, FETCH_TOOL, *(host.specs if host else [])]
         streams = progress is not None and (base_url, model) not in _NO_STREAM
         wait = timeout or (THINKING_TIMEOUT_S if thinks else TIMEOUT_S)
@@ -883,6 +893,10 @@ def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], t
                 spent[i] += _int(got)
             if not _int(usage.get("total_tokens")):  # no total: still count what was used toward the budget
                 spent[3] += _int(usage.get("prompt_tokens")) + _int(usage.get("completion_tokens"))
+            hit = _int(usage.get("prompt_cache_hit_tokens")) or _int((usage.get("prompt_tokens_details") or {}).get("cached_tokens"))
+            hit = min(hit, _int(usage.get("prompt_tokens")))
+            paid += (_billable(_int(usage.get("prompt_tokens")) - hit, hit, _int(usage.get("completion_tokens")))
+                     if usage.get("prompt_tokens") or usage.get("completion_tokens") else _int(usage.get("total_tokens")))
             calls = message.get("tool_calls") or []
             if calls and tools:
                 # echo the model's own turn (DeepSeek also wants its reasoning back), then answer each call
@@ -898,7 +912,7 @@ def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], t
                     result = _run_tool(fn["name"], fn.get("arguments"), host, seen)
                     last = round_ == MAX_TOOL_ROUNDS - 1 and call is calls[-1]  # the next round sends no tools
                     messages.append({"role": "tool", "tool_call_id": call["id"],
-                                     "content": result + _steer(fn["name"], fn["name"] + str(fn.get("arguments")), result, fails, spent[3])
+                                     "content": result + _steer(fn["name"], fn["name"] + str(fn.get("arguments")), result, fails, paid)
                                      + (BUDGET_NOTE if last else "")})
                     read_local = read_local or fn["name"] in LOCAL_DATA_TOOLS or MCP_SEP in fn["name"]
                     used.append((tool_note(fn["name"], fn.get("arguments")), result))

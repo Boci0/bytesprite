@@ -757,3 +757,10 @@ def test_models_that_always_think_have_no_off_and_old_shots_go_in_batches() -> N
     result = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "1",
                                            "content": [{"type": "text", "text": "t"}, image]}]}
     assert _shot_count([result] * KEEP_SHOTS) == KEEP_SHOTS and _shot_count(_drop_old_shots([result, result, {"role": "user", "content": "x"}])) == 0
+
+
+def test_cached_prompt_tokens_cost_a_tenth_of_the_answer_budget() -> None:
+    from src.tools.ai_assist import _billable
+
+    assert _billable(1_000, 0, 500) == 1_500
+    assert _billable(1_000, 40_000, 500) == 1_000 + 4_000 + 500  # a long tool job re-sends its chat each round
