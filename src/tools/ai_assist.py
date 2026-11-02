@@ -350,12 +350,12 @@ _ALWAYS_THINKS = re.compile(r"^(o\d|gpt-5(\.\d+)?-pro|deepseek-reasoner|gemini-(
 
 
 def thinking_levels(base_url: str, model: str = "") -> tuple[str, ...]:
-    """The levels a provider (and model) really has. DeepSeek only knows high and max; Gemini has no max above
+    """The levels a provider (and model) really has. DeepSeek has no medium; Gemini has no max above
     high; reasoning-only models (o-series, Gemini Pro) cannot turn thinking off."""
     host = urlsplit(base_url).hostname
     levels = THINKING_LEVELS
     if host == "api.deepseek.com":
-        levels = ("off", "high", "max")
+        levels = ("off", "low", "high", "max")
     elif host == "generativelanguage.googleapis.com":
         levels = ("off", "low", "medium", "high")
     if _ALWAYS_THINKS.match(model.lower().rsplit("/", 1)[-1]):

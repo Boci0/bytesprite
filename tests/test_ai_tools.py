@@ -739,11 +739,11 @@ def test_thinking_levels_follow_the_provider() -> None:
     from src.tools.ai_assist import fit_thinking, thinking_levels, thinking_params
 
     ds, gem, oai = "https://api.deepseek.com/v1", "https://generativelanguage.googleapis.com/v1beta/openai", "https://api.openai.com/v1"
-    assert thinking_levels(ds) == ("off", "high", "max") and "max" not in thinking_levels(gem)
+    assert thinking_levels(ds) == ("off", "low", "high", "max") and "max" not in thinking_levels(gem)
     assert "medium" in thinking_levels(oai)
-    assert fit_thinking(ds, "low") == "high" and fit_thinking(ds, "medium") == "high" and fit_thinking(gem, "max") == "high"
+    assert fit_thinking(ds, "low") == "low" and fit_thinking(ds, "medium") == "high" and fit_thinking(gem, "max") == "high"
     assert fit_thinking(oai, "medium") == "medium"
-    assert thinking_params(ds, "low")["reasoning_effort"] == "high"
+    assert thinking_params(ds, "medium")["reasoning_effort"] == "high"
 
 
 def test_models_that_always_think_have_no_off_and_old_shots_go_in_batches() -> None:
