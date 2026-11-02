@@ -915,3 +915,10 @@ def test_chat_auto_compacts_long_history(monkeypatch: pytest.MonkeyPatch, api: s
         assert [t for t in chat.findChildren(ChatText) if t.toPlainText().startswith("Compacted 4 earlier")]
     finally:
         chat.close()
+
+
+def test_steer_after_three_failures_in_a_row() -> None:
+    fails = [0]
+    notes = [ai_assist._steer(r, fails) for r in ("error: x", "exit code 1\nboom", "stopped after 120 s")]
+    assert notes[:2] == ["", ""] and "3 tool calls in a row failed" in notes[2]
+    assert ai_assist._steer("exit code 0\nok", fails) == "" and fails == [0]  # one success resets the streak
