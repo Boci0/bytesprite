@@ -1098,7 +1098,8 @@ class AiChat(QWidget):
         host = None if self._testing else self._tool_host
 
         def note(text: str) -> None:
-            self._progress = text
+            if self._job is job:  # a stopped answer's worker may still be talking
+                self._progress = text
 
         def run() -> AiReply:
             if history is None:

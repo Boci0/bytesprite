@@ -237,8 +237,11 @@ def setup_logging() -> Path | None:
         handler = logging.handlers.RotatingFileHandler(path, maxBytes=512 * 1024, backupCount=1, encoding="utf-8")
     except OSError:
         return None  # no log is better than no app
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     root = logging.getLogger("src")
+    if any(isinstance(h, logging.handlers.RotatingFileHandler) for h in root.handlers):
+        handler.close()
+        return path  # already set up: a second call must not write every line twice
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     root.setLevel(logging.INFO)
     root.addHandler(handler)
     return path

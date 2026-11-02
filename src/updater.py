@@ -98,14 +98,16 @@ def _bundle_requirements(data: bytes) -> str | None:
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         for name in zf.namelist():
             if len(Path(name).parts) == 2 and Path(name).name == "requirements.txt":
-                return zf.read(name).decode("utf-8", "replace")
+                return zf.read(name).decode("utf-8-sig", "replace")
     return None
 
 
 def _pins(text: str) -> set[str]:
-    """The `name==version` pins of a requirements file (hash lines and comments ignored, names case-folded)."""
-    found = (re.match(r"\s*([A-Za-z0-9_.\-\[\]]+==[^\s\\;]+)", line) for line in text.splitlines())
-    return {m[1].lower().replace("_", "-") for m in found if m}
+    """The `name==version` pins of a requirements file: hash lines, comments, extras and markers ignored,
+    names normalised the way pip does (case-folded, runs of `-` `_` `.` as one `-`)."""
+    found = (re.match(r"\s*([A-Za-z0-9][A-Za-z0-9_.\-]*)\s*(?:\[[^\]]*\])?\s*==\s*([^\s\\;]+)", line)
+             for line in text.splitlines())
+    return {f"{re.sub(r'[-_.]+', '-', m[1]).lower()}=={m[2]}" for m in found if m}
 
 
 def install_source_zip(data: bytes, app_dir: Path = APP_DIR) -> None:
@@ -119,6 +121,15 @@ def install_source_zip(data: bytes, app_dir: Path = APP_DIR) -> None:
     new_dir, old_dir = app_dir / "src.new", app_dir / "src.old"
     shutil.rmtree(new_dir, ignore_errors=True)
     shutil.rmtree(old_dir, ignore_errors=True)
+    wanted = _bundle_requirements(data)
+    have = app_dir / "requirements.txt"
+    if wanted is not None and have.is_file():  # checked before extracting, so a refusal leaves nothing behind
+        try:
+            installed = have.read_text(encoding="utf-8-sig", errors="replace")
+        except OSError:
+            raise ValueError("needs installer") from None  # cannot tell what is installed: do not guess
+        if _pins(wanted) != _pins(installed):
+            raise ValueError("needs installer")
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         for info in zf.infolist():
             parts = Path(info.filename).parts
@@ -134,11 +145,6 @@ def install_source_zip(data: bytes, app_dir: Path = APP_DIR) -> None:
     if not (new_dir / "main.py").is_file():
         shutil.rmtree(new_dir, ignore_errors=True)
         raise ValueError("update has no src/main.py")
-    wanted = _bundle_requirements(data)
-    have = app_dir / "requirements.txt"
-    if wanted is not None and have.is_file() and _pins(wanted) != _pins(have.read_text(encoding="utf-8", errors="replace")):
-        shutil.rmtree(new_dir, ignore_errors=True)
-        raise ValueError("needs installer")
     (app_dir / "src").rename(old_dir)
     try:
         new_dir.rename(app_dir / "src")
@@ -147,7 +153,10 @@ def install_source_zip(data: bytes, app_dir: Path = APP_DIR) -> None:
         raise
     shutil.rmtree(old_dir, ignore_errors=True)
     if wanted is not None:
-        have.write_text(wanted, encoding="utf-8", newline="")  # same pins, maybe new hashes: keep the file current
+        try:
+            have.write_text(wanted, encoding="utf-8", newline="")  # same pins, maybe new hashes: keep the file current
+        except OSError:
+            pass  # the new src is already in place; a stale copy only costs a later comparison
 
 
 class UpdateJob(QObject):

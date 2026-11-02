@@ -39,6 +39,14 @@ MAX_CLIP_CHARS = 12000
 MAX_SCREEN_CHARS = 8000
 
 
+def _strings(value: Any) -> list[str]:
+    """Every string value inside nested JSON (keys left out)."""
+    if isinstance(value, str):
+        return [value]
+    items = value.values() if isinstance(value, dict) else value if isinstance(value, list) else ()
+    return [text for item in items for text in _strings(item)]
+
+
 class AiToolHost(QObject):
     """The ToolHost the chat hands to ask(); `window` is the PetWindow."""
 
@@ -67,7 +75,8 @@ class AiToolHost(QObject):
         if server is not None:
             chat = self._win._ai_chat
             shown = json.dumps(args, ensure_ascii=False)
-            risk = "destructive tool" if self.mcp.is_destructive(name) else destructive_reason(shown)
+            # Values only: an argument named "format" or "truncate" is not a destructive command
+            risk = "destructive tool" if self.mcp.is_destructive(name) else destructive_reason("\n".join(_strings(args)))
             allowed = self._on_gui(lambda done: chat.confirm_mcp(server, name, done, shown[:600], risk), APPROVE_TIMEOUT_S)
             return self.mcp.call(name, args) if allowed is True else "error: the user did not allow this MCP server"
         if name in FILE_TOOLS:
