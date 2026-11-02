@@ -230,6 +230,23 @@ def test_chat_shows_the_task_list_and_running_processes_and_new_chat_clears_them
         assert not chat._task_list.isHidden() and not chat._panel.isHidden() and chat._task_list.height() == 4 * 17 + 6
         chat._task_list.resize(340, chat._task_list.height())
         chat._task_list.grab()  # paints without error
+        from PyQt6.QtCore import QEvent, QPointF, Qt
+        from PyQt6.QtGui import QMouseEvent
+
+        def click(y: float) -> None:
+            pos = QPointF(20, y)
+            chat._task_list.mousePressEvent(QMouseEvent(QEvent.Type.MouseButtonPress, pos, Qt.MouseButton.LeftButton,
+                                                        Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+
+        click(60)  # a task row does nothing
+        assert chat._task_list.height() == 4 * 17 + 6
+        click(8)  # the header folds the list to one row, again unfolds it
+        assert chat._task_list.height() == 17 + 6
+        chat._task_list.grab()
+        chat.set_tasks([("read", "done"), ("fix", "done")])  # new tasks keep the fold
+        assert chat._task_list.height() == 17 + 6
+        click(8)
+        assert chat._task_list.height() == 3 * 17 + 6
         started = procs.start(Path.home(), _py("import time;time.sleep(60)"))
         assert started.startswith("started")
         chat.watch_procs()

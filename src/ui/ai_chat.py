@@ -509,19 +509,29 @@ class _ClickLabel(QLabel):
 
 class _TaskList(QWidget):
     """The model's checklist (plan_tasks): one dim header, then a pixel marker and a line per task. A marker is hollow
-    for pending, ice-blue for in progress and dim for done (that line is struck through)."""
+    for pending, ice-blue for in progress and dim for done (that line is struck through). Clicking the header
+    folds the list down to that header."""
 
     ROW = 17
+    resized = pyqtSignal()
 
     def __init__(self) -> None:
         super().__init__()
         self._tasks: list[tuple[str, str]] = []
+        self._collapsed = False
         self.setFont(ui_font(8.5))
 
     def set_tasks(self, tasks: list[tuple[str, str]]) -> None:
         self._tasks = list(tasks)
-        self.setFixedHeight((len(tasks) + 1) * self.ROW + 6 if tasks else 0)
+        rows = 1 if self._collapsed else len(tasks) + 1
+        self.setFixedHeight(rows * self.ROW + 6 if tasks else 0)
         self.update()
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if event is not None and event.button() == Qt.MouseButton.LeftButton and event.position().y() < self.ROW + 2:
+            self._collapsed = not self._collapsed
+            self.set_tasks(self._tasks)
+            self.resized.emit()
 
     def paintEvent(self, _event) -> None:  # type: ignore[override]
         painter = QPainter(self)
@@ -531,8 +541,8 @@ class _TaskList(QWidget):
         painter.setPen(dim)
         done = sum(1 for _t, status in self._tasks if status == "done")
         painter.drawText(QRect(12, 2, self.width() - 16, self.ROW), Qt.AlignmentFlag.AlignVCenter,
-                         f"Tasks  {done} of {len(self._tasks)} done")
-        for n, (label, status) in enumerate(self._tasks, 1):
+                         f"{'+' if self._collapsed else '-'} Tasks  {done} of {len(self._tasks)} done")
+        for n, (label, status) in enumerate([] if self._collapsed else self._tasks, 1):
             top = 2 + n * self.ROW
             box = QRect(12, top + self.ROW // 2 - 3, 6, 6)
             if status == "pending":
@@ -720,6 +730,8 @@ class AiChat(QWidget):
         panel_layout.addWidget(self._status_line)
         self._task_list = _TaskList()
         self._task_list.hide()
+        self._task_list.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._task_list.resized.connect(self._relayout)
         self._proc_list = _ProcList(self._stop_proc)
         self._proc_list.hide()
         panel_layout.addWidget(self._task_list)
