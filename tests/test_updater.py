@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import shutil
 import zipfile
 from pathlib import Path
 
@@ -236,3 +237,80 @@ def test_changed_library_pins_need_the_installer(tmp_path: Path) -> None:
         install_source_zip(_zipball({"src/main.py": "newer", "requirements.txt": "PyQt6==6.13.0\n"}), app)
     assert (app / "src" / "main.py").read_text() == "new" and not (app / "src.new").exists()
     install_source_zip(_zipball({"src/main.py": "no reqs file in bundle"}), app)  # nothing to compare: allowed
+
+
+def _frozen_zip(files: dict[str, str]) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name, text in files.items():
+            zf.writestr(f"ByteSprite/{name}", text)
+    return buf.getvalue()
+
+
+def _frozen_app(tmp_path: Path) -> Path:
+    app = tmp_path / "app"
+    (app / "_internal").mkdir(parents=True)
+    (app / "ByteSprite.exe").write_text("old")
+    (app / ".installed").write_text("marker")
+    return app
+
+
+def test_frozen_update_swaps_the_whole_folder(tmp_path: Path) -> None:
+    from src.updater import install_frozen_zip, remove_old_build, zip_version
+
+    app = _frozen_app(tmp_path)
+    data = _frozen_zip({"ByteSprite.exe": "new", "_internal/x.dll": "x", "VERSION": "2.0.0\n"})
+    assert zip_version(data) == "2.0.0"
+    install_frozen_zip(data, app)
+    assert (app / "ByteSprite.exe").read_text() == "new" and (app / "_internal" / "x.dll").exists()
+    assert is_installed(app)  # the marker is not in the signed bundle; it follows the install
+    assert (tmp_path / "app.old" / "ByteSprite.exe").read_text() == "old"  # the running copy's files stay put
+    remove_old_build(app)
+    assert not (tmp_path / "app.old").exists() and not (tmp_path / "app.new").exists()
+
+
+def test_bad_frozen_update_keeps_running_install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.updater import install_frozen_zip
+
+    app = _frozen_app(tmp_path)
+    with pytest.raises(ValueError):
+        install_frozen_zip(_frozen_zip({"_internal/x.dll": "no exe"}), app)
+    with pytest.raises(ValueError):
+        install_frozen_zip(_frozen_zip({"../evil.dll": "x", "ByteSprite.exe": "new"}), app)
+    real_rename = Path.rename
+
+    def locked(self: Path, target: Path) -> Path:
+        if self.name == "app.new":
+            raise PermissionError("antivirus")
+        return real_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", locked)
+    with pytest.raises(PermissionError):
+        install_frozen_zip(_frozen_zip({"ByteSprite.exe": "new"}), app)
+    assert (app / "ByteSprite.exe").read_text() == "old" and not (tmp_path / "app.old").exists()
+    assert not (tmp_path / "evil.dll").exists()
+
+
+@pytest.mark.skipif(shutil.which("powershell.exe") is None, reason="needs Windows PowerShell")
+def test_install_ps1_verifier_matches_python_signer(tmp_path: Path) -> None:
+    """The standalone install checks signatures in PowerShell; it must agree with src/signing.py."""
+    import re
+    import subprocess
+
+    from src.signing import public_key, sign
+
+    script = (Path(__file__).resolve().parents[1] / "install.ps1").read_text(encoding="utf-8")
+    verifier = re.search(r"Add-Type -AssemblyName System\.Numerics\n.*?\n}\n", script, re.S).group(0)
+    secret = bytes(range(32))
+    message = tmp_path / "bundle.zip"
+    message.write_bytes(b"release bytes" * 1000)
+    good = sign(secret, message.read_bytes())
+    forged = good[:40] + bytes([good[40] ^ 1]) + good[41:]
+    other_key = public_key(bytes(32))
+    cases = [(public_key(secret), good), (public_key(secret), forged), (other_key, good)]
+    lines = [verifier] + [f"Test-Ed25519Signature ([byte[]]@({','.join(map(str, key))})) '{message}' "
+                          f"([byte[]]@({','.join(map(str, sig))}))" for key, sig in cases]
+    (tmp_path / "check.ps1").write_text("\n".join(lines), encoding="utf-8")
+    out = subprocess.run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(tmp_path / "check.ps1")],
+                         capture_output=True, text=True, timeout=120)
+    assert out.stdout.split() == ["True", "False", "False"], out.stderr

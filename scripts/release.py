@@ -1,8 +1,12 @@
 """Build, sign and publish a ByteSprite release.
 
     python scripts/release.py keygen            create the signing key (once) and print its public key
-    python scripts/release.py build vX.Y.Z      dist/bytesprite.zip + .sig from a clean git HEAD
+    python scripts/release.py build vX.Y.Z      from a clean git HEAD: dist/bytesprite.zip (source) and
+                                                dist/bytesprite-win64.zip (PyInstaller build, launched once
+                                                as a smoke test), each with a .sig
     python scripts/release.py publish vX.Y.Z    build, tag HEAD, push branch + tag, then `gh release create`
+
+The standalone build bundles the Python that runs this script, so run it with Python 3.12 (the app's runtime).
 
 The private key lives at ~/.bytesprite-signing/release_ed25519.key, outside the repo, and must
 never be committed or uploaded. Back it up offline: losing it means installed copies can only be
@@ -11,16 +15,22 @@ updated by re-running install.ps1 after a new key is shipped.
 
 from __future__ import annotations
 
+import ctypes
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
+import time
+import zipfile
+from ctypes import wintypes
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src.signing import public_key, sign, verify  # noqa: E402
-from src.updater import ASSET_NAME, RELEASE_PUBLIC_KEY, SIG_NAME, parse_version, zip_version  # noqa: E402
+from src.updater import FROZEN_ASSET, FROZEN_EXE, RELEASE_PUBLIC_KEY, SOURCE_ASSET, parse_version, zip_version  # noqa: E402
 
 KEY_FILE = Path.home() / ".bytesprite-signing" / "release_ed25519.key"
 DIST = ROOT / "dist"
@@ -52,28 +62,94 @@ def keygen() -> None:
     print(f"Public key for RELEASE_PUBLIC_KEY in src/updater.py:\n{public_key(secret).hex()}")
 
 
-def build(tag: str) -> tuple[Path, Path]:
+def sign_bundle(secret: bytes, zip_path: Path, tag: str) -> Path:
+    data = zip_path.read_bytes()
+    if parse_version(zip_version(data)) != parse_version(tag):
+        sys.exit(f"{zip_path.name} declares version {zip_version(data)!r}, not {tag}")
+    signature = sign(secret, data)
+    if not verify(RELEASE_PUBLIC_KEY, data, signature):
+        sys.exit("Signature self-check failed")
+    sig_path = zip_path.with_name(zip_path.name + ".sig")
+    sig_path.write_text(signature.hex() + "\n", encoding="ascii")
+    print(f"Built {zip_path} ({len(data)} bytes) and {sig_path}")
+    return sig_path
+
+
+def _shows_window(pid: int) -> bool:
+    user32, found = ctypes.windll.user32, []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def check(hwnd, _param):
+        owner = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+        if owner.value == pid and user32.IsWindowVisible(hwnd):
+            found.append(hwnd)
+        return True
+
+    user32.EnumWindows(check, 0)
+    return bool(found)
+
+
+def smoke_test(exe: Path, work: Path) -> None:
+    """Launch the standalone app on a throwaway state file: it must show the pet and close cleanly."""
+    proc = subprocess.Popen([str(exe), "--state-file", str(work / "smoke_state.json")], cwd=work)
+    deadline = time.monotonic() + 30
+    while proc.poll() is None and not _shows_window(proc.pid) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    shown = proc.poll() is None and _shows_window(proc.pid)
+    time.sleep(3)  # let sound and hotkey setup run: a crash there must stop the release too
+    subprocess.run(["taskkill", "/PID", str(proc.pid)], capture_output=True)  # graceful: WM_CLOSE -> quit()
+    try:
+        code = proc.wait(15)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        code = None
+    if not shown or code != 0:
+        sys.exit(f"Smoke test failed: window shown={shown}, exit code={code}")
+    print("Smoke test passed: pet shown, clean exit")
+
+
+def build_frozen(tag: str, secret: bytes) -> tuple[Path, Path]:
+    """PyInstaller build of HEAD in a fresh hash-checked venv, zipped as ByteSprite/ plus a VERSION file."""
+    with tempfile.TemporaryDirectory(prefix="bytesprite_build_") as tmp:
+        work = Path(tmp)
+        tree = work / "tree"
+        git("archive", "--format=zip", "-o", str(work / "head.zip"), "HEAD")  # committed files only
+        with zipfile.ZipFile(work / "head.zip") as zf:
+            zf.extractall(tree)
+        venv_py = work / "venv" / "Scripts" / "python.exe"
+        subprocess.run([sys.executable, "-m", "venv", str(work / "venv")], check=True)
+        subprocess.run([str(venv_py), "-m", "pip", "install", "--disable-pip-version-check", "-q",
+                        "-r", str(tree / "requirements-build.txt")], check=True)
+        dist = work / "dist"
+        subprocess.run([str(venv_py), "-m", "PyInstaller", "bytesprite.spec", "--noconfirm",
+                        "--distpath", str(dist), "--workpath", str(work / "build")], cwd=tree, check=True)
+        app = dist / "ByteSprite"
+        (app / "VERSION").write_text(tag.lstrip("v") + "\n", encoding="ascii")
+        shutil.copy2(tree / "uninstall.ps1", app)  # an update replaces the whole folder, so it ships inside
+        smoke_test(app / FROZEN_EXE, work)
+        zip_path = DIST / FROZEN_ASSET
+        zip_path.unlink(missing_ok=True)
+        shutil.make_archive(str(zip_path.with_suffix("")), "zip", dist, "ByteSprite")
+    return zip_path, sign_bundle(secret, zip_path, tag)
+
+
+def build(tag: str) -> list[Path]:
     if not re.fullmatch(r"v\d+\.\d+\.\d+", tag):
         sys.exit("Tag must look like v1.2.3")
     if git("status", "--porcelain").strip():
         sys.exit("Working tree is not clean; commit first so the release matches a commit")
     secret = load_secret()
     DIST.mkdir(exist_ok=True)
-    zip_path, sig_path = DIST / ASSET_NAME, DIST / SIG_NAME
+    zip_path = DIST / SOURCE_ASSET
     git("archive", "--format=zip", "--prefix=bytesprite/", "-o", str(zip_path), "HEAD", *BUNDLE_PATHS)
-    data = zip_path.read_bytes()
-    if parse_version(zip_version(data)) != parse_version(tag):
-        sys.exit(f"src/__init__.__version__ is {zip_version(data)!r}, not {tag}")
-    signature = sign(secret, data)
-    if not verify(RELEASE_PUBLIC_KEY, data, signature):
-        sys.exit("Signature self-check failed")
-    sig_path.write_text(signature.hex() + "\n", encoding="ascii")
-    print(f"Built {zip_path} ({len(data)} bytes) and {sig_path}")
-    return zip_path, sig_path
+    sig_path = sign_bundle(secret, zip_path, tag)
+    print(f"Building the standalone app with Python {sys.version.split()[0]}...")
+    return [zip_path, sig_path, *build_frozen(tag, secret)]
 
 
 def publish(tag: str) -> None:
-    zip_path, sig_path = build(tag)
+    assets = build(tag)
     head = git("rev-parse", "HEAD").strip()
     tagged = subprocess.run(["git", "rev-parse", "-q", "--verify", f"refs/tags/{tag}^{{commit}}"],
                             cwd=ROOT, capture_output=True, text=True).stdout.strip()
@@ -86,7 +162,7 @@ def publish(tag: str) -> None:
                             cwd=ROOT, capture_output=True, text=True)
     if pushed.returncode != 0:
         sys.exit(f"git push failed, nothing published:\n{pushed.stderr}")
-    subprocess.run(["gh", "release", "create", tag, "--verify-tag", "--generate-notes", str(zip_path), str(sig_path)],
+    subprocess.run(["gh", "release", "create", tag, "--verify-tag", "--generate-notes", *map(str, assets)],
                    cwd=ROOT, check=True)
 
 

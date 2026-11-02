@@ -6,7 +6,7 @@ param([switch]$Purge)
 $Root = Join-Path $env:LOCALAPPDATA "ByteSprite"
 
 # Stop running copies from this install (graceful close first so state.json is saved)
-$procs = Get-CimInstance Win32_Process -Filter "Name='pythonw.exe' OR Name='python.exe'" |
+$procs = Get-CimInstance Win32_Process -Filter "Name='pythonw.exe' OR Name='python.exe' OR Name='ByteSprite.exe'" |
     Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($Root, [StringComparison]::OrdinalIgnoreCase) }
 foreach ($p in $procs) { taskkill /PID $p.ProcessId 2>$null | Out-Null }
 Start-Sleep -Seconds 2

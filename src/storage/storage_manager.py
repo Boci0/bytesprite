@@ -19,7 +19,8 @@ logger = logging.getLogger(__name__)
 
 _RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 _RUN_VALUE = "ByteSprite"
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_FROZEN = bool(getattr(sys, "frozen", False))
+_PROJECT_ROOT = Path(sys.executable).parent if _FROZEN else Path(__file__).resolve().parents[2]
 
 
 def log_path() -> Path:
@@ -44,6 +45,8 @@ def autostart_command() -> str:
     Run values are capped at 260 characters, so no inline -c code here. The launcher sits in src/ because in-place
     updates replace src/ only: a root-level file never reached updated copies, so the Run value pointed at nothing.
     """
+    if _FROZEN:
+        return f'"{sys.executable}"'  # ByteSprite.exe moves to its install root itself
     exe = Path(sys.executable)
     gui_exe = exe.with_name("pythonw.exe")
     launcher = gui_exe if gui_exe.exists() else exe

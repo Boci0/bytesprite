@@ -5,6 +5,10 @@ signature made with the maintainer's offline key (scripts/release.py). HTTPS onl
 came from GitHub; the signature proves it came from the key holder, so a hijacked GitHub account
 or an intercepted download cannot ship code. The version inside the zip must match the tag and be
 newer, so an old signed release cannot be replayed under a new tag to downgrade an install.
+
+A frozen (PyInstaller) build updates from `bytesprite-win64.zip` instead: the whole app folder, runtime
+included, swapped by renames while the app runs (Windows allows renaming the folder of a running exe as
+long as it is not the process's working directory; `main` moves there first).
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ import json
 import logging
 import re
 import shutil
+import sys
 import threading
 import urllib.request
 import zipfile
@@ -30,11 +35,16 @@ logger = logging.getLogger(__name__)
 REPO = "Boci0/bytesprite"
 LATEST_API = f"https://api.github.com/repos/{REPO}/releases/latest"
 RELEASES_URL = f"https://github.com/{REPO}/releases"
-APP_DIR = Path(__file__).resolve().parents[1]
+FROZEN = bool(getattr(sys, "frozen", False))
+# Frozen: the folder holding ByteSprite.exe (`<root>/app`); source: the folder holding src/
+APP_DIR = Path(sys.executable).parent if FROZEN else Path(__file__).resolve().parents[1]
 # install.ps1 writes this marker; a git checkout has none, so the updater never overwrites dev work
 INSTALL_MARKER = ".installed"
-_MAX_ZIP_BYTES = 20 * 1024 * 1024
-ASSET_NAME = "bytesprite.zip"
+SOURCE_ASSET = "bytesprite.zip"
+FROZEN_ASSET = "bytesprite-win64.zip"
+FROZEN_EXE = "ByteSprite.exe"
+_MAX_ZIP_BYTES = (80 if FROZEN else 20) * 1024 * 1024
+ASSET_NAME = FROZEN_ASSET if FROZEN else SOURCE_ASSET
 SIG_NAME = ASSET_NAME + ".sig"
 # Public half of the release signing key; the private half never leaves the maintainer's PC
 RELEASE_PUBLIC_KEY = bytes.fromhex("f0cc212a80d53fe877827253c020e2c01d023c4280eebf47423c6032a0259316")
@@ -72,10 +82,12 @@ def latest_release() -> tuple[str, str, str]:
 
 
 def zip_version(data: bytes) -> str:
-    """`__version__` declared in the bundle's src/__init__.py ('' if missing)."""
+    """`__version__` declared in the bundle's src/__init__.py, or a frozen bundle's top-level VERSION ('' if missing)."""
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         for name in zf.namelist():
             parts = Path(name).parts
+            if len(parts) == 2 and parts[1] == "VERSION":
+                return zf.read(name).decode("ascii", "replace").strip()
             if len(parts) == 3 and parts[1:] == ("src", "__init__.py"):
                 match = re.search(r"__version__\s*=\s*[\"']([^\"']+)", zf.read(name).decode("utf-8", "replace"))
                 return match.group(1) if match else ""
@@ -162,6 +174,45 @@ def install_source_zip(data: bytes, app_dir: Path = APP_DIR) -> None:
             pass  # the new src is already in place; a stale copy only costs a later comparison
 
 
+def install_frozen_zip(data: bytes, app_dir: Path = APP_DIR) -> None:
+    """Swap the frozen app folder for the `ByteSprite/` folder inside a verified bundle.
+
+    Extracted next to the old folder first, then two renames, rolled back if the second fails. The old
+    folder holds the running process's DLLs, so it is left as `app.old` for `remove_old_build` at the next
+    start. No library check: a frozen bundle carries its own runtime.
+    """
+    new_dir, old_dir = app_dir.with_name(app_dir.name + ".new"), app_dir.with_name(app_dir.name + ".old")
+    shutil.rmtree(new_dir, ignore_errors=True)
+    shutil.rmtree(old_dir, ignore_errors=True)  # shortcut: a copy updated but never restarted runs from here
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        for info in zf.infolist():
+            parts = Path(info.filename).parts
+            if len(parts) < 2 or info.is_dir():
+                continue
+            rel = Path(*parts[1:])
+            if rel.is_absolute() or rel.drive or ".." in rel.parts:
+                raise ValueError(f"unsafe path in update: {info.filename}")
+            dest = new_dir / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(zf.read(info))
+    if not (new_dir / FROZEN_EXE).is_file():
+        shutil.rmtree(new_dir, ignore_errors=True)
+        raise ValueError(f"update has no {FROZEN_EXE}")
+    if is_installed(app_dir):
+        (new_dir / INSTALL_MARKER).write_bytes((app_dir / INSTALL_MARKER).read_bytes())
+    app_dir.rename(old_dir)
+    try:
+        new_dir.rename(app_dir)
+    except OSError:
+        old_dir.rename(app_dir)
+        raise
+
+
+def remove_old_build(app_dir: Path = APP_DIR) -> None:
+    """Delete the folder a frozen update replaced; its files are free once the old process has exited."""
+    shutil.rmtree(app_dir.with_name(app_dir.name + ".old"), ignore_errors=True)
+
+
 class UpdateJob(QObject):
     """Checks GitHub (and, when `install`, applies the update) on a worker thread.
 
@@ -186,7 +237,8 @@ class UpdateJob(QObject):
                 return
             if not zip_url or not sig_url:
                 raise ValueError("unsigned release")
-            install_source_zip(verified_bundle(_get(zip_url, _MAX_ZIP_BYTES), _get(sig_url, 1024), tag))
+            apply = install_frozen_zip if FROZEN else install_source_zip
+            apply(verified_bundle(_get(zip_url, _MAX_ZIP_BYTES), _get(sig_url, 1024), tag))
         except (OSError, ValueError, KeyError, zipfile.BadZipFile, http.client.HTTPException) as exc:
             logger.warning("update %s failed: %s: %s", tag or "check", type(exc).__name__, exc)
             self.finished.emit("error", str(exc) or tag)

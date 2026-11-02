@@ -117,6 +117,9 @@ class PetContextMenu(QMenu):
         wheel_custom: Sequence[str] = (),
         macros: Sequence[str] = (),
         double_click_macro: str = "",
+        pet_scale: int = 4,
+        hotkeys: Sequence[tuple[str, str, str]] = (),
+        pet_scales: dict[int, str] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -314,6 +317,30 @@ class PetContextMenu(QMenu):
             lambda _checked=False: on_reset_position()
         )
         self.settings_menu.addAction(self.reset_position_action)
+
+        if pet_scales and on_tool_action is not None:
+            self.size_menu = style_menu(QMenu("Pet Size", self.settings_menu))
+            for scale, label in pet_scales.items():
+                act = QAction(label, self.size_menu)
+                act.setCheckable(True)
+                act.setChecked(scale == pet_scale)
+                act.triggered.connect(lambda _checked=False, c=f"size:{scale}": on_tool_action(c))
+                self.size_menu.addAction(act)
+            self.settings_menu.addMenu(self.size_menu)
+
+        # Shortcut hints elsewhere in the menu follow rebound hotkeys (snip:<mode>, and the AI chat's ai:chat)
+        for _label, combo, mode in hotkeys:
+            act = self.plugin_actions.get("ai:chat" if mode == "ai" else f"snip:{mode}")
+            if act is not None:
+                act.setText(f"{act.text().split(chr(9))[0]}\t{combo}")
+
+        if hotkeys and on_tool_action is not None:
+            self.hotkey_menu = style_menu(QMenu("Hotkeys", self.settings_menu))
+            for label, combo, mode in hotkeys:
+                act = QAction(f"{label}\t{combo}", self.hotkey_menu)
+                act.triggered.connect(lambda _checked=False, c=f"hotkey:{mode}": on_tool_action(c))
+                self.hotkey_menu.addAction(act)
+            self.settings_menu.addMenu(self.hotkey_menu)
 
         if wheel_slices and on_tool_action is not None:
             self.wheel_menu = style_menu(QMenu("Customize Wheel", self.settings_menu))

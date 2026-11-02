@@ -275,3 +275,28 @@ def test_stopped_background_process_reads_as_stopped_not_failed(tmp_path) -> Non
     assert procs.stop("bg1") == "stopped bg1"
     assert procs.read("bg1").startswith("stopped as asked") and "bg1: stopped" in procs.read(None)
     procs.stop_all()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows job objects")
+def test_stop_kills_children_that_left_the_tree(tmp_path: Path) -> None:
+    import subprocess
+
+    pid_file = tmp_path / "pid"
+    child = f'"{sys.executable}" -c "import os,time;open(r\'{pid_file}\',\'w\').write(str(os.getpid()));time.sleep(60)"'
+    procs = ai_tools.BackgroundProcs()
+    try:
+        assert procs.start(tmp_path, f'start "" /b {child}').startswith("started bg1")
+        assert procs._procs["bg1"].job is not None  # started suspended, joined, resumed
+        assert _until(lambda: pid_file.exists() and pid_file.read_text() != "")
+        assert _until(lambda: not procs._procs["bg1"].running)  # cmd.exe exited; the child lives on, orphaned
+
+        def alive() -> bool:
+            out = subprocess.run(["tasklist", "/FI", f"PID eq {pid_file.read_text()}", "/NH"],
+                                 capture_output=True, text=True).stdout
+            return pid_file.read_text() in out
+
+        assert alive()
+        assert procs.stop("bg1").endswith("already exited")
+        assert _until(lambda: not alive())
+    finally:
+        procs.stop_all()

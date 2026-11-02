@@ -97,6 +97,32 @@ def foreground_app() -> str:
     return process_name(pid.value)
 
 
+class _LastInputInfo(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.UINT), ("dwTime", wintypes.DWORD)]
+
+
+def idle_seconds() -> float:
+    """Seconds since the last keyboard or mouse input anywhere (0.0 off Windows or on failure)."""
+    if sys.platform != "win32":
+        return 0.0
+    info = _LastInputInfo(ctypes.sizeof(_LastInputInfo), 0)
+    if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
+        return 0.0
+    # Both are 32-bit millisecond tick counts; the mask keeps the difference right across the 49.7-day wrap
+    return ((ctypes.windll.kernel32.GetTickCount() - info.dwTime) & 0xFFFFFFFF) / 1000.0
+
+
+def display_kept_on() -> bool:
+    """True while any app asks Windows to keep the display on (video players, presentations, calls)."""
+    if sys.platform != "win32":
+        return False
+    state = ctypes.c_ulong(0)
+    # 16 = SystemExecutionState: the system-wide OR of every process's SetThreadExecutionState request
+    if ctypes.WinDLL("powrprof").CallNtPowerInformation(16, None, 0, ctypes.byref(state), ctypes.sizeof(state)):
+        return False
+    return bool(state.value & 0x2)  # ES_DISPLAY_REQUIRED
+
+
 def foreground_title() -> str:
     """Title of the foreground window ('' off Windows)."""
     if sys.platform != "win32":

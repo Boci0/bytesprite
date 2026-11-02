@@ -22,6 +22,7 @@ Security:
 from __future__ import annotations
 
 import codecs
+import ctypes
 import difflib
 import fnmatch
 import os
@@ -433,7 +434,12 @@ _DESTRUCTIVE = re.compile(
     r"(?<![\w-])(del|erase|rd|rmdir|rm|remove-item|ri|format|diskpart|shutdown|restart-computer|stop-computer|"
     r"taskkill|stop-process|cipher|takeown|icacls|sdelete|truncate|clear-content)(?![\w-])"
     r"|git\s+(reset\s+--hard|clean|push\s+.*(--force|-f\b)|checkout\s+--|restore\b|branch\s+-D)"
-    r"|reg(\.exe)?\s+delete|(?<![\w-])(move|mv)\b.*(-force|/y)\b",
+    r"|reg(\.exe)?\s+delete|(?<![\w-])(move|mv)\b.*(-force|/y)\b"
+    # Hidden or downloaded code: the approval cannot show what it does. PowerShell takes any prefix of
+    # -EncodedCommand (-e, -ec, -enc...), while -ex is -ExecutionPolicy.
+    r"|(powershell|pwsh)(\.exe)?\b.*\s[-/](e|ec|en|enc\w*)\b|(?<![\w-])(iex|invoke-expression)(?![\w-])"
+    r"|(iwr|irm|invoke-webrequest|invoke-restmethod|curl|wget)\b[^|]*\|\s*(sh|bash|cmd|powershell|pwsh|python)\b"
+    r"|certutil\b.*-urlcache|(?<![\w-])mshta(?![\w-])",
     re.IGNORECASE)
 
 
@@ -546,11 +552,74 @@ def _kill_tree(pid: int) -> None:
                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
 
+class _JobLimits(ctypes.Structure):
+    """JOBOBJECT_EXTENDED_LIMIT_INFORMATION (basic limits, IO counters, memory fields)."""
+    _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64), ("PerJobUserTimeLimit", ctypes.c_int64),
+                ("LimitFlags", ctypes.c_uint32), ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", ctypes.c_uint32),
+                ("Affinity", ctypes.c_size_t), ("PriorityClass", ctypes.c_uint32), ("SchedulingClass", ctypes.c_uint32),
+                ("IoCounters", ctypes.c_uint64 * 6), ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t), ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+
+def _kill_on_close_job(pid: int) -> int | None:
+    """Put `pid` in a new job that kills every process in it when its handle closes (stop, quit or crash).
+    Children started with `start` stay in the job, so they no longer outlive the command as they did with taskkill /T.
+    The caller starts `pid` suspended and resumes it after this, so nothing can spawn before it is in the job.
+    Returns the job handle, or None when Windows refuses (the caller falls back to taskkill /T)."""
+    if os.name != "nt":
+        return None
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateJobObjectW.restype = k32.OpenProcess.restype = ctypes.c_void_p
+    k32.SetInformationJobObject.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+    k32.AssignProcessToJobObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    k32.CloseHandle.argtypes = [ctypes.c_void_p]
+    job = k32.CreateJobObjectW(None, None)
+    if not job:
+        return None
+    limits = _JobLimits(LimitFlags=0x2000)  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    proc = k32.OpenProcess(0x0100 | 0x0001, False, pid)  # PROCESS_SET_QUOTA | PROCESS_TERMINATE
+    ok = bool(proc) and k32.SetInformationJobObject(job, 9, ctypes.byref(limits), ctypes.sizeof(limits)) \
+        and k32.AssignProcessToJobObject(job, proc)  # 9 = JobObjectExtendedLimitInformation
+    if proc:
+        k32.CloseHandle(proc)
+    if not ok:
+        k32.CloseHandle(job)
+        return None
+    return job
+
+
+def _resume_process(pid: int) -> bool:
+    """Resume a process started with CREATE_SUSPENDED (Popen keeps no thread handle to ResumeThread)."""
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenProcess.restype = ctypes.c_void_p
+    k32.CloseHandle.argtypes = [ctypes.c_void_p]
+    ntdll = ctypes.WinDLL("ntdll")
+    ntdll.NtResumeProcess.argtypes = [ctypes.c_void_p]
+    proc = k32.OpenProcess(0x0800, False, pid)  # PROCESS_SUSPEND_RESUME
+    if not proc:
+        return False
+    try:
+        return ntdll.NtResumeProcess(proc) == 0  # STATUS_SUCCESS
+    finally:
+        k32.CloseHandle(proc)
+
+
+def _end_job(job: int) -> None:
+    """Kill everything in the job and release it."""
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.TerminateJobObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    k32.CloseHandle.argtypes = [ctypes.c_void_p]
+    k32.TerminateJobObject(job, 1)
+    k32.CloseHandle(job)
+
+
 class _Background:
     """One background process: a reader thread keeps the newest MAX_BACKGROUND_CHARS of its output."""
 
-    def __init__(self, pid_name: str, command: str, proc: subprocess.Popen) -> None:
-        self.name, self.command, self.proc = pid_name, command, proc
+    def __init__(self, pid_name: str, command: str, proc: subprocess.Popen, job: int | None) -> None:
+        self.name, self.command, self.proc, self.job = pid_name, command, proc, job
         self.text, self.dropped, self.read_to = "", 0, 0  # kept output, characters dropped before it, read so far
         self.lock = threading.Lock()
         threading.Thread(target=self._pump, daemon=True).start()
@@ -577,6 +646,14 @@ class _Background:
 
     stopped = False  # set when the model or the user stopped it, so its exit code is not read as a failure
 
+    def kill(self) -> None:
+        self.stopped = True
+        if self.job is not None:
+            job, self.job = self.job, None
+            _end_job(job)  # also ends children that left the tree, even after cmd.exe itself exited
+        elif self.running:
+            _kill_tree(self.proc.pid)
+
 
 class BackgroundProcs:
     """Background commands for the chat model: start, read what is new, stop. At most MAX_BACKGROUND run at once;
@@ -596,14 +673,22 @@ class BackgroundProcs:
             for old in [n for n, p in self._procs.items() if not p.running][:max(0, len(self._procs) - 2 * MAX_BACKGROUND + 1)]:
                 del self._procs[old]  # finished ones nobody read pile up otherwise
             flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            if os.name == "nt":
+                flags |= 0x4  # CREATE_SUSPENDED: joins its job before it can start anything
             try:
                 proc = subprocess.Popen(command, shell=True, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                         stderr=subprocess.STDOUT, creationflags=flags)
             except OSError as exc:
                 return f"error: could not start ({exc.strerror or 'failed'})"
+            job = _kill_on_close_job(proc.pid)
+            if os.name == "nt" and not _resume_process(proc.pid):
+                proc.kill()  # never leave a frozen cmd.exe behind
+                if job is not None:
+                    _end_job(job)
+                return "error: could not start (resume failed)"
             self._count += 1
             name = f"bg{self._count}"
-            self._procs[name] = _Background(name, command.strip(), proc)
+            self._procs[name] = _Background(name, command.strip(), proc, job)
         return f"started {name}; read its output with read_background"
 
     def read(self, name: Any) -> str:
@@ -640,9 +725,9 @@ class BackgroundProcs:
         if proc is None:
             return "error: no such background process"
         if not proc.running:
+            proc.kill()  # cmd.exe is gone, but a server it started with `start` may still run in the job
             return f"{proc.name} had already exited"
-        proc.stopped = True
-        _kill_tree(proc.proc.pid)
+        proc.kill()
         try:
             proc.proc.wait(5)
         except subprocess.TimeoutExpired:
@@ -654,9 +739,7 @@ class BackgroundProcs:
             procs = list(self._procs.values())
             self._procs.clear()
         for proc in procs:
-            proc.stopped = True
-            if proc.running:
-                _kill_tree(proc.proc.pid)
+            proc.kill()
 
 
 # ---------------------------------------------------------------------- skills
