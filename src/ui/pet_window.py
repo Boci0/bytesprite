@@ -678,8 +678,8 @@ class PetWindow(QWidget):
         if self._hint is not None:
             if time.monotonic() >= self._hint_until and not self._watch_open:
                 hints = self._hints_plugin()
-                if self._watch_reply is not None and hints is not None:
-                    hints.ignored_ready()
+                if (self._watch_reply is not None or self._watch_job is not None) and hints is not None:
+                    hints.ignored_ready()  # a pre-fetch the user let expire, finished or not
                 self._clear_hint()
             return
         hints = self._hints_plugin()
@@ -689,9 +689,8 @@ class PetWindow(QWidget):
         cb = QGuiApplication.clipboard()
         pomo = self._state_machine.pomodoro_plugin
         hint = hints.poll(foreground_app(), cb.text() if cb is not None else "",
-                          pomo is not None and not pomo.running, title=foreground_title())
-        if hint is not None and hint.action.startswith("watch:") and not self._watch_ready():
-            return
+                          pomo is not None and not pomo.running, title=foreground_title(),
+                          watch_ok=hints.watch and self._watch_ready())
         if hint is not None and hint.action == "watch:tidy" and not hint.data:
             self._check_folder(hint, foreground_title())  # the card shows only if the folder is messy
             return
@@ -804,7 +803,8 @@ class PetWindow(QWidget):
         if hint.data:
             self._start_watch(hint, hint.data)
         else:  # screen lenses read the screen only now, after the click
-            grab_screen(self, lambda image, h=hint: self._start_watch(h, image) if self._watch_open else None)
+            grab_screen(self, lambda image, h=hint: self._start_watch(h, image) if self._watch_open else None,
+                    window=True)
 
     def watch_now(self) -> None:
         """Hotkey or menu: read the front window now with the lens it fits (error, store, else a general read).
@@ -824,7 +824,8 @@ class PetWindow(QWidget):
         if lens == "tidy":
             self._check_folder(hint, title, min_files=2)
             return
-        grab_screen(self, lambda image, h=hint: self._start_watch(h, image) if self._watch_open else None)
+        grab_screen(self, lambda image, h=hint: self._start_watch(h, image) if self._watch_open else None,
+                    window=True)
 
     def _check_folder(self, hint: Suggestion, title: str, min_files: int | None = None) -> None:
         """Resolve the front Explorer window's folder on a worker thread (about 0.3s of PowerShell). Offered

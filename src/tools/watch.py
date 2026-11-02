@@ -53,7 +53,7 @@ WRITING_SITES = ("google docs", "notion", "word")
 _PRIVATE_TITLE = re.compile(r"password|passkey|sign[ -]?in|log[ -]?in|\bbank|incognito|inprivate|private browsing"
                             r"|checkout|payment|billing|credential", re.I)
 _ERROR_TEXT = re.compile(r"Traceback \(most recent call last\)|\b\w+(?:Error|Exception)\b[:\s]|npm ERR!"
-                         r"|\berror(?:\[E\d+\])?:|\bfatal:|Segmentation fault|\bat [\w.$<>]+\([^)]*:\d+\)")
+                         r"|\berror(?:\[E\d+\])?:|\bfatal:|Segmentation fault|\bat [\w.$<>]{1,120}\([^)\n]{0,200}:\d+\)")
 _ERROR_TITLE = re.compile(r"\b(?:error|exception|has stopped working|not responding|crash(?:ed)?|fatal)\b", re.I)
 _URL = re.compile(r"^https?://\S+$", re.I)
 
@@ -128,6 +128,11 @@ def link_warnings(url: str) -> list[str]:
     return found
 
 
+def _looks_like_code(text: str) -> bool:
+    """Source code, JSON or logs: braces, semicolons and operators make up a large share of the text."""
+    return sum(text.count(c) for c in "{}[]();=<>") / max(1, len(text)) > 0.04
+
+
 def _foreign(text: str) -> bool:
     letters = [c for c in text if c.isalpha()]
     return len(letters) >= 12 and sum(not c.isascii() for c in letters) / len(letters) > 0.5
@@ -143,7 +148,7 @@ def clipboard_gate(clip: str) -> Gate | None:
         return Gate("error", "Explain this error?", clip)
     if _foreign(clip):
         return Gate("translate", "Translate this?", clip)
-    if len(clip) >= MIN_SUMMARY_CHARS and len(clip.split()) >= MIN_SUMMARY_WORDS:
+    if len(clip) >= MIN_SUMMARY_CHARS and len(clip.split()) >= MIN_SUMMARY_WORDS and not _looks_like_code(clip):
         return Gate("summary", "Summarize this?", clip)
     return None
 
@@ -152,7 +157,8 @@ def window_gate(app: str, title: str, title_dwell_s: float) -> Gate | None:
     app, low = app.lower(), title.lower()
     if not title or low == "program manager":  # the taskbar, Start and the desktop itself
         return None
-    if title_dwell_s >= ERROR_DWELL_S and _ERROR_TITLE.search(title):
+    # Browser and chat titles quote pages and messages ("fix error 404 - Google Search"), not the app's own state
+    if title_dwell_s >= ERROR_DWELL_S and _ERROR_TITLE.search(title) and app not in BROWSERS and app not in MESSAGE_APPS:
         return Gate("error_screen", "Explain this error?")
     if app in BROWSERS and title_dwell_s >= STORE_DWELL_S and any(s in low for s in STORES):
         return Gate("compare", "Compare prices? (beta)")
@@ -343,6 +349,7 @@ def reply_draft(text: str) -> tuple[str, str]:
 
 _EXPLORER_PS = r"""
 param([string]$h)
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
 $shell = New-Object -ComObject Shell.Application
 foreach ($w in $shell.Windows()) {
   try { if ([int64]$w.HWND -eq [int64]$h) { "$($w.LocationName)`t$($w.Document.Folder.Self.Path)" } } catch {}
@@ -368,8 +375,8 @@ def explorer_folder(hwnd: int, title: str, timeout_s: float = 15.0) -> str:
         return ""
     rows = [line.split("\t", 1) for line in proc.stdout.decode("utf-8", "replace").splitlines() if "\t" in line]
     paths = [(name, path.strip()) for name, path in rows if path.strip() and os.path.isdir(path.strip())]
-    for name, path in paths:
-        if name and title.startswith(name):
+    for name, path in paths:  # the title is the tab name, or the full path when Explorer is set to show it
+        if name and (title.startswith(name) or title.lower().startswith(path.lower())):
             return path
     return paths[0][1] if paths else ""
 

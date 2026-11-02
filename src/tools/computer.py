@@ -162,6 +162,35 @@ def foreground_window() -> int:
     return int(_user32().GetForegroundWindow() or 0)
 
 
+class _MonitorInfo(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT), ("rcWork", wintypes.RECT),
+                ("dwFlags", wintypes.DWORD), ("szDevice", ctypes.c_wchar * 32)]
+
+
+def window_on_monitor(hwnd: int) -> tuple[str, tuple[int, int, int, int], tuple[int, int]] | None:
+    """(monitor device name, window rect inside that monitor, monitor size), all in physical pixels, or None.
+    Uses the DWM frame bounds, which leave out the invisible resize border and shadow."""
+    if not hwnd:
+        return None
+    user32 = _user32()
+    rect = wintypes.RECT()
+    if ctypes.windll.dwmapi.DwmGetWindowAttribute(wintypes.HWND(hwnd), 9, ctypes.byref(rect), ctypes.sizeof(rect)) != 0:
+        if not user32.GetWindowRect(wintypes.HWND(hwnd), ctypes.byref(rect)):
+            return None
+    user32.MonitorFromWindow.restype = wintypes.HMONITOR
+    mon = user32.MonitorFromWindow(wintypes.HWND(hwnd), 2)  # MONITOR_DEFAULTTONEAREST
+    info = _MonitorInfo()
+    info.cbSize = ctypes.sizeof(info)
+    if not mon or not user32.GetMonitorInfoW(mon, ctypes.byref(info)):
+        return None
+    m = info.rcMonitor
+    left, top = max(rect.left, m.left) - m.left, max(rect.top, m.top) - m.top
+    right, bottom = min(rect.right, m.right) - m.left, min(rect.bottom, m.bottom) - m.top
+    if right - left < 40 or bottom - top < 40:
+        return None
+    return info.szDevice, (left, top, right, bottom), (m.right - m.left, m.bottom - m.top)
+
+
 def ui_elements(hwnd: int, timeout_s: float = 25.0) -> str:
     """Raw `x,y,w,h<TAB>Type<TAB>Name` lines for the controls of window `hwnd`; '' on any failure."""
     import subprocess

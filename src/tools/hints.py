@@ -148,8 +148,9 @@ class HintsPlugin:
         return self._enabled
 
     def poll(self, app: str, clip: str, pomodoro_idle: bool, now: float | None = None,
-             title: str = "") -> Suggestion | None:
-        """Feed one sample; returns a hint to show now or None."""
+             title: str = "", watch_ok: bool = True) -> Suggestion | None:
+        """Feed one sample; returns a hint to show now or None. `watch_ok` False (no key, or the chat is busy)
+        holds Watch offers back without using them up, so the page is offered again once it is True."""
         now = time.monotonic() if now is None else now
         new_clip = "" if clip == self._last_clip else clip
         self._last_clip = clip  # updated even when skipping, so a private copy is never offered later
@@ -160,7 +161,7 @@ class HintsPlugin:
         if title != self._title:
             self._title, self._title_since = title, now
         hint = (suggest(app, new_clip, now - self._app_since, pomodoro_idle)
-                or self._watch_hint(app, title, new_clip, now))
+                or (self._watch_hint(app, title, new_clip, now) if watch_ok else None))
         if hint is None or hint.rule in self._muted or now < self._next_ok.get(hint.rule, 0.0):
             return None
         self._next_ok[hint.rule] = now + COOLDOWN_S.get(
@@ -174,6 +175,8 @@ class HintsPlugin:
         if not self.watch or len(clip) > MAX_CLIP_CHARS:
             return None
         gate = watch_gate(app, title, clip, now - self._title_since)
+        if gate is not None and gate.lens == "summary" and app.lower() in CODE_APPS:
+            return None  # long copies in an editor or terminal are code, not prose
         if gate is None or (not gate.data and (gate.lens, title) in self._offered):
             return None
         if not gate.data:

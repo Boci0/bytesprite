@@ -218,3 +218,33 @@ def test_tidy_lens_builds_plan_from_listing(tmp_path, monkeypatch):
     assert seen["web"] is False and "b.jpg" in seen["prompt"]
     assert reply.moves == {"Images": ["b.jpg"], "Docs": ["a.pdf"]} and reply.folder == str(tmp_path)
     assert "Nothing has moved yet" in reply.text and reply.tools[0][0].startswith("list_files(")
+
+
+def test_round2_gate_fixes():
+    import time as _t
+
+    # an error word in a browser or chat title is a page or message, not the app failing
+    assert watch.window_gate("chrome.exe", "how to fix error 404 - Google Search", 5) is None
+    assert watch.window_gate("discord.exe", "#crash-reports - Discord", 9).lens == "reply"
+    assert watch.window_gate("notepad.exe", "Fatal error", 3).lens == "error_screen"
+    # copied code is not offered for a summary; prose still is
+    code = "def f(x):\n    return {'a': (x + 1)}\n" * 60
+    assert watch.clipboard_gate(code) is None and watch.clipboard_gate(LONG).lens == "summary"
+    start = _t.perf_counter()
+    watch.clipboard_gate(("at a(" * 2000)[:8192])
+    assert _t.perf_counter() - start < 0.005  # bounded error regex (was ~13ms)
+
+
+def test_watch_offer_held_while_not_ready():
+    hints = HintsPlugin()
+    hints.execute_action("hints:watch")
+    hints.poll("WhatsApp.exe", "", True, now=0, title="WhatsApp")
+    assert hints.poll("WhatsApp.exe", "", True, now=10, title="WhatsApp", watch_ok=False) is None  # chat busy
+    assert hints.poll("WhatsApp.exe", "", True, now=13, title="WhatsApp").action == "watch:reply"  # still offered
+
+
+def test_no_summary_offer_in_code_apps():
+    hints = HintsPlugin()
+    hints.execute_action("hints:watch")
+    assert hints.poll("Code.exe", LONG, True, now=0) is None
+    assert hints.poll("chrome.exe", LONG + " more", True, now=1).action == "watch:summary"

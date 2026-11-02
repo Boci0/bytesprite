@@ -53,17 +53,33 @@ def _strings(value: Any) -> list[str]:
     return found
 
 
-def grab_screen(win: Any, done: Callable[[Any], None], primary: bool = False) -> None:
-    """Grab the screen under the cursor (or the primary one, with the front window's handle) on the Qt thread,
-    with the pet `win` and its chat hidden for the shot."""
+def _front_window_shot() -> QImage | None:
+    """Only the front window, cut from a grab of the monitor it is on (None when that fails)."""
+    found = computer.window_on_monitor(computer.foreground_window())
+    if found is None:
+        return None
+    device, (left, top, right, bottom), (mon_w, mon_h) = found
+    screen = next((s for s in QGuiApplication.screens() if s.name() == device), None)
+    image = screen.grabWindow(0).toImage() if screen is not None else None
+    if image is None or image.isNull() or not mon_w or not mon_h:
+        return None
+    sx, sy = image.width() / mon_w, image.height() / mon_h  # the grab may be in logical, not physical, pixels
+    return image.copy(round(left * sx), round(top * sy), round((right - left) * sx), round((bottom - top) * sy))
+
+
+def grab_screen(win: Any, done: Callable[[Any], None], primary: bool = False, window: bool = False) -> None:
+    """Grab the screen under the cursor (or the primary one, with the front window's handle; or with `window`,
+    just the front window) on the Qt thread, with the pet `win` and its chat hidden for the shot."""
     chat = win._ai_chat
     shown = [w for w in (win, chat) if w is not None and w.isVisible()]
     for w in shown:  # keep the pet and the chat out of the grab
         w.hide()
 
     def grab() -> None:
-        screen = (None if primary else QGuiApplication.screenAt(QCursor.pos())) or QGuiApplication.primaryScreen()
-        image = screen.grabWindow(0).toImage() if screen is not None else None
+        image = _front_window_shot() if window else None
+        if image is None:
+            screen = (None if primary else QGuiApplication.screenAt(QCursor.pos())) or QGuiApplication.primaryScreen()
+            image = screen.grabWindow(0).toImage() if screen is not None else None
         hwnd = computer.foreground_window()  # the app under the hidden pet and chat
         for w in shown:
             w.show()
