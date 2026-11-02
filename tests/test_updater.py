@@ -182,7 +182,8 @@ def test_update_job_installs_only_signed_releases(case: str, tmp_path: Path, mon
     assert (app / "src" / "main.py").read_text() == ("v99.0.0" if case == "signed" else "old")
 
 
-def test_update_job_reports_a_broken_http_reply(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_update_job_reports_a_broken_http_reply(monkeypatch: pytest.MonkeyPatch,
+                                                 caplog: pytest.LogCaptureFixture) -> None:
     """http.client.HTTPException killed the worker before `finished`: CHECKING, then silence."""
     import socket
 
@@ -206,6 +207,7 @@ def test_update_job_reports_a_broken_http_reply(monkeypatch: pytest.MonkeyPatch)
     finally:
         server.close()
     assert [status for status, _tag in results] == ["error"]
+    assert "update check failed" in caplog.text  # the reason reaches the log, not just "UPDATE ERR"
 
 
 def test_install_ps1_pins_release_key_and_verifier() -> None:

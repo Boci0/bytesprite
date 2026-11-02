@@ -12,6 +12,7 @@ from __future__ import annotations
 import http.client
 import io
 import json
+import logging
 import re
 import shutil
 import threading
@@ -23,6 +24,8 @@ from PyQt6.QtCore import QObject, pyqtSignal
 
 from src import __version__
 from src.signing import verify
+
+logger = logging.getLogger(__name__)
 
 REPO = "Boci0/bytesprite"
 LATEST_API = f"https://api.github.com/repos/{REPO}/releases/latest"
@@ -185,6 +188,7 @@ class UpdateJob(QObject):
                 raise ValueError("unsigned release")
             install_source_zip(verified_bundle(_get(zip_url, _MAX_ZIP_BYTES), _get(sig_url, 1024), tag))
         except (OSError, ValueError, KeyError, zipfile.BadZipFile, http.client.HTTPException) as exc:
+            logger.warning("update %s failed: %s: %s", tag or "check", type(exc).__name__, exc)
             self.finished.emit("error", str(exc) or tag)
             return
         self.finished.emit("installed", tag)
