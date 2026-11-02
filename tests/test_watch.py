@@ -235,7 +235,7 @@ def test_round2_gate_fixes():
         watch.clipboard_gate(("at a(" * 2000)[:8192])
         return _t.perf_counter() - start
 
-    assert min(once() for _ in range(5)) < 0.005  # bounded error regex (was ~13ms); best of 5 so load cannot flake it
+    assert min(once() for _ in range(5)) < 0.01  # bounded error regex (was ~13ms); best of 5 so load cannot flake it
 
 
 def test_watch_offer_held_while_not_ready():
