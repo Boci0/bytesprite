@@ -501,9 +501,78 @@ def test_drag_dangles_then_lands(qapp: QApplication) -> None:
         win.mouseMoveEvent(_mouse(QEvent.Type.MouseMove, win, start + QPoint(40, 0), Qt.MouseButton.LeftButton))
         assert win._anim.base_state == "dangle"
         win.mouseReleaseEvent(_mouse(QEvent.Type.MouseButtonRelease, win, start + QPoint(40, 0), Qt.MouseButton.NoButton))
-        assert win._anim.base_state == "idle"
+        # Back on the state's own clip (idle, or hungry if a busy test run tipped CPU over 90%), not "dangle"
+        assert win._anim.base_state == win._base_clip(sm.state) != "dangle"
         assert win._anim.active_clip_name == "land"
         assert not win._click_timer.isActive()  # a drag never also cycles the HUD
     finally:
         win.shutdown()
         win.close()
+
+
+def test_first_run_tips_show_in_order_and_right_click_stops_them(qapp: QApplication) -> None:
+    sm = PetStateMachine(PetStats())
+    win = PetWindow(state_machine=sm, animation_controller=AnimationController(size=32), auto_wander=False)
+    try:
+        win._tip_due = 0.0
+        win._poll_hint()
+        assert win._hint is not None and win._hint.text == win.TIPS[0][0] and win.tips_seen == 1
+        win._run_hint()  # a click only closes a tip
+        assert win._hint is None
+        win._tip_due = 0.0
+        win._poll_hint()
+        assert win._hint is not None and win._hint.text == win.TIPS[1][0]
+        win._dismiss_hint()  # right-click: no more tips
+        assert win.tips_seen == len(win.TIPS)
+        win._tip_due = 0.0
+        win._poll_hint()
+        assert win._hint is None or win._hint.rule != "tip"
+    finally:
+        win.shutdown()
+        win.close()
+
+
+def test_tips_are_skipped_for_installs_from_before_tips(qapp: QApplication, tmp_path) -> None:
+    from src.main import ByteSpriteApp
+    from src.storage.storage_manager import StorageManager
+
+    old = tmp_path / "old.json"
+    StorageManager(old).save(stats=PetStats(), state=PetState.IDLE, position=(100, 100), always_on_top=False,
+                             auto_wander=False, active_tool="sysmon", tools_data={"macros": {}})
+    for path, seen in ((old, len(PetWindow.TIPS)), (tmp_path / "new.json", 0)):
+        app = ByteSpriteApp(app=qapp, storage=StorageManager(path), enable_tray=False)
+        try:
+            assert app.window.tips_seen == seen
+        finally:
+            app.shutdown()
+
+
+def test_pet_size_keeps_feet_in_place_and_persists(qapp: QApplication, tmp_path) -> None:
+    from src.main import ByteSpriteApp
+    from src.storage.storage_manager import StorageManager
+
+    path = tmp_path / "s.json"
+    app = ByteSpriteApp(app=qapp, storage=StorageManager(path), enable_tray=False)
+    try:
+        win = app.window
+        win.move_clamped(300, 300)
+        feet = win.mapToGlobal(win._sprite_rect.bottomLeft()).y()
+        win.trigger_tool_action("size:2")
+        assert win.pet_scale == 2 and win._sprite_rect.width() == 64
+        assert win.height() == PetWindow.WINDOW_HEIGHT - 64
+        assert win.mapToGlobal(win._sprite_rect.bottomLeft()).y() == feet
+        on_wire = win._sprite_rect.topLeft() + QPoint(13 * 2 + 1, 20 * 2 + 1)  # first wire cell, scaled 2x
+        assert win.hit_test_point(on_wire) and not win.hit_test_point(win._sprite_rect.topLeft())
+        win.trigger_tool_action("size:9")  # unknown sizes are ignored
+        assert win.pet_scale == 2
+        menu = win.build_context_menu()
+        assert [a.text() for a in menu.size_menu.actions() if a.isChecked()] == ["Small"]
+        menu.deleteLater()
+        app.save_state()
+    finally:
+        app.shutdown()
+    app = ByteSpriteApp(app=qapp, storage=StorageManager(path), enable_tray=False)
+    try:
+        assert app.window.pet_scale == 2
+    finally:
+        app.shutdown()

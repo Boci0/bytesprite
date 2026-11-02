@@ -341,6 +341,44 @@ HOTKEY_MODES.update({10 + n: (str(n), f"macrokey:{n}") for n in range(1, 10)})
 # Two-key combos (id: modifiers, virtual key, mode). Alt+` (VK_OEM_3) has no Windows or app-menu meaning
 SHORT_HOTKEYS: dict[int, tuple[int, int, str]] = {30: (_MOD_ALT, 0xC0, "watch")}
 WATCH_SHORT_LABEL = "Alt+`"
+_MOD_WIN = 0x8
+# Rebindable actions (Settings > Hotkeys), in menu order; macro digits stay on Ctrl+Shift+Alt+1..9
+HOTKEY_ACTIONS: dict[str, str] = {"image": "Snip Image", "text": "Snip Text", "color": "Pick Color",
+                                  "ai": "AI Chat", "watch": "Watch Now"}
+_MOD_NAMES = {"ctrl": _MOD_CONTROL, "control": _MOD_CONTROL, "shift": _MOD_SHIFT, "alt": _MOD_ALT,
+              "win": _MOD_WIN, "meta": _MOD_WIN}
+
+
+def parse_hotkey(text: str) -> tuple[int, int]:
+    """`Ctrl+Alt+K` -> (RegisterHotKey modifiers, virtual key). Keys: A-Z, 0-9, F1-F24 and `; at least one of
+    Ctrl, Alt or Win, so a rebind can never swallow plain typing. ValueError says what is wrong."""
+    *mod_parts, key = [part.strip().lower() for part in text.split("+")] if text.strip() else [""]
+    mods = 0
+    for part in mod_parts:
+        if part not in _MOD_NAMES:
+            raise ValueError(f"unknown modifier {part!r}: use Ctrl, Shift, Alt or Win")
+        mods |= _MOD_NAMES[part]
+    if not mods & (_MOD_CONTROL | _MOD_ALT | _MOD_WIN):
+        raise ValueError("add Ctrl, Alt or Win")
+    if len(key) == 1 and (key.isascii() and key.isalnum()):
+        return mods, ord(key.upper())
+    if key == "`":
+        return mods, 0xC0
+    if key[:1] == "f" and key[1:].isdigit() and 1 <= int(key[1:]) <= 24:
+        return mods, 0x6F + int(key[1:])  # VK_F1 is 0x70
+    raise ValueError(f"unsupported key {key!r}: use A-Z, 0-9, F1-F24 or `")
+
+
+def hotkey_label(mods: int, vk: int) -> str:
+    """(modifiers, virtual key) -> `Ctrl+Shift+Alt+S`, the same spelling parse_hotkey reads."""
+    names = [n for n, m in (("Ctrl", _MOD_CONTROL), ("Shift", _MOD_SHIFT), ("Alt", _MOD_ALT), ("Win", _MOD_WIN)) if mods & m]
+    key = "`" if vk == 0xC0 else f"F{vk - 0x6F}" if 0x70 <= vk <= 0x87 else chr(vk)
+    return "+".join([*names, key])
+
+
+def default_hotkey(mode: str) -> str:
+    key = next(k for k, m in HOTKEY_MODES.values() if m == mode)
+    return hotkey_label(_MOD_CONTROL | _MOD_SHIFT | _MOD_ALT, ord(key))
 
 
 class GlobalHotkeys(QObject):
@@ -353,16 +391,26 @@ class GlobalHotkeys(QObject):
 
     triggered = pyqtSignal(str)
 
-    def __init__(self) -> None:
+    def __init__(self, overrides: dict[str, str] | None = None) -> None:
+        """`overrides`: mode -> combo text (parse_hotkey) replacing that action's Ctrl+Shift+Alt default."""
         super().__init__()
         self._thread_id = 0
+        self._thread: threading.Thread | None = None
         self._ready = threading.Event()
         self.registered: list[str] = []
+        self.failed: list[str] = []  # combo labels another app (or Windows) already holds
+        self._combos: dict[int, tuple[int, int]] = {}
+        for hk_id, (key, mode) in HOTKEY_MODES.items():
+            try:
+                self._combos[hk_id] = parse_hotkey((overrides or {}).get(mode, ""))
+            except ValueError:  # none set, or a saved one this version cannot read: the default
+                self._combos[hk_id] = (_MOD_CONTROL | _MOD_SHIFT | _MOD_ALT, ord(key))
 
     def start(self) -> None:
         if sys.platform != "win32":
             return
-        threading.Thread(target=self._run, daemon=True).start()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
         self._ready.wait(2.0)
 
     def _run(self) -> None:
@@ -370,13 +418,14 @@ class GlobalHotkeys(QObject):
         msg = wintypes.MSG()
         user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 0)  # create the queue before close() can post
         self._thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
-        mods = _MOD_CONTROL | _MOD_SHIFT | _MOD_ALT | _MOD_NOREPEAT
-        combos = [(hk_id, mods, ord(key), mode) for hk_id, (key, mode) in HOTKEY_MODES.items()]
+        combos = [(hk_id, m | _MOD_NOREPEAT, vk, HOTKEY_MODES[hk_id][1]) for hk_id, (m, vk) in self._combos.items()]
         combos += [(hk_id, m | _MOD_NOREPEAT, vk, mode) for hk_id, (m, vk, mode) in SHORT_HOTKEYS.items()]
         for hk_id, combo_mods, vk, mode in combos:
             # Combos already owned by another app fail here and are skipped
             if user32.RegisterHotKey(None, hk_id, combo_mods, vk):
                 self.registered.append(mode)
+            else:
+                self.failed.append(hotkey_label(combo_mods & ~_MOD_NOREPEAT, vk))
         self._ready.set()
         try:
             while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
@@ -392,4 +441,5 @@ class GlobalHotkeys(QObject):
         if self._thread_id:
             ctypes.windll.user32.PostThreadMessageW(self._thread_id, _WM_QUIT, 0, 0)
             self._thread_id = 0
+            self._thread.join(2.0)  # it unregisters on exit: a replacement can only claim the combos after that
 

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import ctypes
+import faulthandler
 import logging
 import logging.handlers
 import os
 import signal
 import sys
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 from PyQt6.QtCore import QPoint, Qt, QTimer
@@ -27,6 +29,9 @@ from src.updater import is_installed
 RECENT_FILES_KEY = "recent"
 WHEEL_KEY = "wheel"
 MACROS_KEY = "macros"
+TIPS_KEY = "tips"
+SIZE_KEY = "size"
+HOTKEYS_KEY = "hotkeys"
 
 SIMULATION_TICK_INTERVAL_MS: int = 2_000
 AUTO_SAVE_INTERVAL_MS: int = 60_000
@@ -81,6 +86,17 @@ class ByteSpriteApp:
         self.window.recent.load_dict(saved.tools_data.get(RECENT_FILES_KEY))
         self.window.wheel.load_dict(saved.tools_data.get(WHEEL_KEY))
         self.window.macros.load_dict(saved.tools_data.get(MACROS_KEY))
+        tips = saved.tools_data.get(TIPS_KEY)
+        # No tips entry but saved tools: an install from before tips, whose user already knows the pet
+        seen = tips.get("seen") if isinstance(tips, dict) else (len(PetWindow.TIPS) if saved.tools_data else 0)
+        self.window.tips_seen = seen if isinstance(seen, int) and not isinstance(seen, bool) and seen >= 0 else 0
+
+        keys = saved.tools_data.get(HOTKEYS_KEY)
+        if isinstance(keys, dict):  # GlobalHotkeys falls back to the default for anything it cannot parse
+            self.window.hotkeys = {m: c for m, c in keys.items() if isinstance(m, str) and isinstance(c, str)}
+        size = saved.tools_data.get(SIZE_KEY)
+        if isinstance(size, dict) and isinstance(size.get("scale"), int):
+            self.window.set_pet_scale(size["scale"])  # unknown scales are ignored
 
         if saved.position is not None:
             self.window.move_clamped(saved.position[0], saved.position[1])
@@ -116,10 +132,8 @@ class ByteSpriteApp:
         # headless tests never grab real key combos
         self.hotkeys: GlobalHotkeys | None = None
         if enable_tray:
-            self.hotkeys = GlobalHotkeys()
-            self.hotkeys.triggered.connect(
-                lambda m: self.window.trigger_tool_action(m if m.startswith("macrokey:") else f"snip:{m}"))
-            self.hotkeys.start()
+            self._start_hotkeys()
+            self.window.on_hotkeys_changed = self._start_hotkeys
             repair_autostart()  # copies updated in place may hold a Run value for a launcher they never received
             if is_installed():
                 # One quiet check per launch; installing waits for Settings > Check for Updates
@@ -165,6 +179,18 @@ class ByteSpriteApp:
             self.window.activateWindow()
             self.window._show_toast("READY", QColor("#73EFF7"))
 
+    def _start_hotkeys(self) -> None:
+        """(Re)register the system-wide hotkeys with the user's combos; say which ones another app holds."""
+        if self.hotkeys is not None:
+            self.hotkeys.close()
+        self.hotkeys = GlobalHotkeys(self.window.hotkeys)
+        self.hotkeys.triggered.connect(
+            lambda m: self.window.trigger_tool_action(m if m.startswith("macrokey:") else f"snip:{m}"))
+        self.hotkeys.start()
+        if self.hotkeys.failed:
+            self._show_tray_message(f"Taken by another app: {', '.join(self.hotkeys.failed)}. "
+                                    "Change them in Settings > Hotkeys")
+
     def save_state(self) -> bool:
         pos: QPoint = self.window.pos()
         tools_payload: dict[str, dict[str, Any]] = {}
@@ -173,6 +199,9 @@ class ByteSpriteApp:
         tools_payload[RECENT_FILES_KEY] = self.window.recent.to_dict()
         tools_payload[WHEEL_KEY] = self.window.wheel.to_dict()
         tools_payload[MACROS_KEY] = self.window.macros.to_dict()
+        tools_payload[TIPS_KEY] = {"seen": self.window.tips_seen}
+        tools_payload[SIZE_KEY] = {"scale": self.window.pet_scale}
+        tools_payload[HOTKEYS_KEY] = dict(self.window.hotkeys)
         return self._storage.save(
             stats=self.state_machine.stats,
             state=self.state_machine.state,
@@ -247,6 +276,40 @@ def setup_logging() -> Path | None:
     return path
 
 
+MAX_LOGGED_ERRORS = 20  # an error in a paint or timer handler repeats every frame; the first ones say enough
+_crash_file = None  # faulthandler writes to this file on a native crash, so it must stay open
+
+
+def install_crash_guard(on_error: Callable[[], None] | None = None) -> Callable[..., None]:
+    """Keep running after an unhandled Python error: with the default hook PyQt6 aborts the whole app
+    (0xC0000409) for any exception raised in a Qt slot or event handler. Errors go to the log (Settings > Copy
+    Log) and `on_error` runs (a toast). Native crashes cannot be survived, but leave a stack in crash.log."""
+    global _crash_file
+    log, seen = logging.getLogger("src.main"), [0]
+
+    def hook(kind: type[BaseException], value: BaseException, tb: Any) -> None:
+        if issubclass(kind, KeyboardInterrupt):
+            sys.__excepthook__(kind, value, tb)
+            return
+        seen[0] += 1
+        if seen[0] <= MAX_LOGGED_ERRORS:
+            log.error("unhandled error (kept running)", exc_info=(kind, value, tb))
+        if on_error is not None:
+            try:
+                on_error()
+            except Exception:  # noqa: BLE001 - the error report must never raise again
+                pass
+
+    sys.excepthook = hook
+    if _crash_file is None:
+        try:
+            _crash_file = open(log_path().with_name("crash.log"), "a", encoding="utf-8")  # noqa: SIM115
+            faulthandler.enable(_crash_file)
+        except (OSError, RuntimeError):
+            _crash_file = None
+    return hook
+
+
 def main(argv: list[str] | None = None) -> int:
     """Launch ByteSprite on the Windows desktop."""
     if argv is None:
@@ -255,6 +318,7 @@ def main(argv: list[str] | None = None) -> int:
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
     setup_logging()
+    install_crash_guard()  # startup errors are logged too
     args = argv if argv is not None else sys.argv
     app = QApplication(args)
     app.setApplicationName("ByteSprite")
@@ -268,6 +332,7 @@ def main(argv: list[str] | None = None) -> int:
             storage_override = StorageManager(Path(args[idx + 1]))
 
     controller = ByteSpriteApp(app=app, storage=storage_override)
+    install_crash_guard(lambda: controller.window._show_toast("OOPS", QColor("#E05A47")))
 
     # Allow graceful Ctrl+C exit when launched from a terminal
     signal.signal(signal.SIGINT, lambda *_sig: controller.quit())

@@ -149,3 +149,69 @@ def test_global_hotkeys_start_and_close_cleanly(qapp: QApplication) -> None:
     again.start()
     assert set(again.registered) >= set(hotkeys.registered)
     again.close()
+
+
+def test_parse_hotkey_reads_combos_and_refuses_unsafe_ones() -> None:
+    from src.ui.quick_tools import default_hotkey, hotkey_label, parse_hotkey
+
+    for text in ("Ctrl+Alt+K", "Ctrl+Shift+Alt+S", "Win+F12", "Alt+`", "ctrl + alt + 7"):
+        assert parse_hotkey(hotkey_label(*parse_hotkey(text))) == parse_hotkey(text)
+    assert hotkey_label(*parse_hotkey("alt+ctrl+k")) == "Ctrl+Alt+K"
+    assert default_hotkey("image") == "Ctrl+Shift+Alt+S"
+    for bad in ("", "K", "Shift+K", "Ctrl+Hyper+K", "Ctrl+Alt+Enter", "Ctrl+Alt+F25", "Ctrl+Alt+é"):
+        with pytest.raises(ValueError):
+            parse_hotkey(bad)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="RegisterHotKey")
+def test_global_hotkeys_use_overrides_and_report_taken_combos(qapp: QApplication) -> None:
+    combo = "Ctrl+Alt+Win+F24"  # unlikely to be held by anything, the dev pet included
+    first = GlobalHotkeys({"color": combo})
+    first.start()
+    try:
+        assert "color" in first.registered and combo not in first.failed
+        second = GlobalHotkeys({"color": combo})
+        second.start()
+        try:
+            assert combo in second.failed and "color" not in second.registered
+        finally:
+            second.close()
+    finally:
+        first.close()
+    again = GlobalHotkeys({"color": combo})  # close() waited for the unregister, so it is free at once
+    again.start()
+    try:
+        assert "color" in again.registered
+    finally:
+        again.close()
+
+
+def test_hotkey_menu_edits_and_resets(qapp: QApplication, monkeypatch: pytest.MonkeyPatch) -> None:
+    from PyQt6.QtWidgets import QInputDialog
+
+    from src.engine.models import PetStats
+    from src.engine.pet_state import PetStateMachine
+    from src.ui.pet_window import PetWindow
+
+    win = PetWindow(state_machine=PetStateMachine(PetStats()), auto_wander=False)
+    changed: list[dict[str, str]] = []
+    win.on_hotkeys_changed = lambda: changed.append(dict(win.hotkeys))
+    answers = iter([("ctrl+alt+k", True), ("Ctrl+Shift+Alt+S", True), ("nope", True), ("", True)])
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: next(answers))
+    try:
+        win.trigger_tool_action("hotkey:color")
+        assert win.hotkeys == {"color": "Ctrl+Alt+K"}
+        win.trigger_tool_action("hotkey:ai")  # already Snip Image's combo
+        win.trigger_tool_action("hotkey:ai")  # not a combo
+        assert win.hotkeys == {"color": "Ctrl+Alt+K"} and len(changed) == 1
+        menu = win.build_context_menu()
+        assert menu.plugin_actions["snip:color"].text() == "Pick Screen Color -> Copy HEX\tCtrl+Alt+K"
+        menu.deleteLater()
+        win.trigger_tool_action("hotkey:color")  # empty resets
+        assert win.hotkeys == {} and changed[-1] == {}
+        menu = win.build_context_menu()
+        assert "Pick Color\tCtrl+Shift+Alt+C" in [a.text() for a in menu.hotkey_menu.actions()]
+        menu.deleteLater()
+    finally:
+        win.shutdown()
+        win.close()

@@ -63,7 +63,8 @@ from src.ui.context_menu import PetContextMenu, style_menu
 from src.ui.drop_wheel import RadialDropWheel
 from src.ui.macro_editor import MacroEditor
 from src.ui.macro_runner import MacroRunner
-from src.ui.quick_tools import OcrJob, SnipSession, open_folder_in_background
+from src.ui.quick_tools import (HOTKEY_ACTIONS, OcrJob, SnipSession, default_hotkey, hotkey_label, open_folder_in_background,
+                                 parse_hotkey)
 from src.ui.sfx import play_cue, preload_tick_sounds, prewarm as prewarm_ticks
 from src.ui.tool_wheel import WEB_SHORTCUTS, ToolWheel, ToolWheelOption, WheelLayout, google_search_url
 from src.updater import APP_DIR, RELEASES_URL, UpdateJob, is_installed
@@ -272,9 +273,18 @@ class PetWindow(QWidget):
 
     WINDOW_WIDTH: int = 176
     WINDOW_HEIGHT: int = 222
-    SPRITE_SCALE: int = 4  # 32x32 * 4 = 128x128 crisp integer scaling
+    SPRITE_SCALE: int = 4  # default: 32x32 * 4 = 128x128 crisp integer scaling
+    PET_SCALES: dict[int, str] = {2: "Small", 3: "Medium", 4: "Large"}  # whole numbers keep the pixels crisp
     DRAG_THRESHOLD_PX: int = 5
     HOLD_TO_WHEEL_MS: int = 450
+    # First-run tips on the hint card: (title, how-to line), one at a time, TIP_GAP_S apart
+    TIPS: tuple[tuple[str, str], ...] = (
+        ("Hold me for tools", "Press, wait, slide, release"),
+        ("Drop files on me", "Convert, zip or extract them"),
+        ("Right-click for more", "Settings, macros, AI chat"),
+    )
+    TIP_FIRST_S: float = 8.0
+    TIP_GAP_S: float = 30.0
     AWAY_AFTER_S: float = 300.0  # no keyboard or mouse input this long: the idle clip becomes a nap
     PREWARM_DELAY_MS: int = 150  # a drag has usually passed DRAG_THRESHOLD_PX by now; still before the wheel opens
 
@@ -297,10 +307,8 @@ class PetWindow(QWidget):
         self._on_quit_requested = on_quit_requested
         self._on_notification = on_notification
 
-        self._sprite_size_px = 128
-        sprite_x = (self.WINDOW_WIDTH - self._sprite_size_px) // 2
-        sprite_y = self.WINDOW_HEIGHT - self._sprite_size_px - 6
-        self._sprite_rect = QRect(sprite_x, sprite_y, self._sprite_size_px, self._sprite_size_px)
+        self.pet_scale = self.SPRITE_SCALE  # Settings > Pet Size; persisted by ByteSpriteApp
+        self._layout_sprite()
         self._hud_rect = QRect(8, 4, self.WINDOW_WIDTH - 16, 72)
 
         # Cached QImages keyed by (clip_name, frame_index, facing_left)
@@ -405,6 +413,10 @@ class PetWindow(QWidget):
         # Offline context hints (Hints tool): a clickable card over the sprite, polled every 3s
         self._hint: Suggestion | None = None
         self._hint_until: float = 0.0
+        self.hotkeys: dict[str, str] = {}  # mode -> combo text overriding a default; persisted by ByteSpriteApp
+        self.on_hotkeys_changed: Callable[[], None] | None = None  # set by ByteSpriteApp: re-register them
+        self.tips_seen: int = 0  # persisted by ByteSpriteApp; a tip counts as seen once shown
+        self._tip_due: float = time.monotonic() + self.TIP_FIRST_S
         self._hint_rect = QRect(8, 4, self.WINDOW_WIDTH - 16, 40)
         self._hint_timer = QTimer(self)
         self._hint_timer.setInterval(3000)
@@ -420,7 +432,6 @@ class PetWindow(QWidget):
     def _configure_window(self) -> None:
         self.setWindowTitle("ByteSprite")
         self.setWindowIcon(build_app_icon(64))
-        self.setFixedSize(self.WINDOW_WIDTH, self.WINDOW_HEIGHT)
 
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
@@ -494,6 +505,51 @@ class PetWindow(QWidget):
             self._walk_steps_remaining = 0
             self._sync_animation_to_pet_state(self._state_machine.state)
             self.update()
+
+    def _layout_sprite(self) -> None:
+        """Size the window to the sprite: same width (HUD and cards keep their size), shorter for smaller pets."""
+        size = 32 * self.pet_scale
+        height = self.WINDOW_HEIGHT - 32 * self.SPRITE_SCALE + size
+        self._sprite_size_px = size
+        self._sprite_rect = QRect((self.WINDOW_WIDTH - size) // 2, height - size - 6, size, size)
+        self.setFixedSize(self.WINDOW_WIDTH, height)
+
+    def _edit_hotkey(self, mode: str) -> None:
+        if mode not in HOTKEY_ACTIONS:
+            return
+        current = self.hotkeys.get(mode) or default_hotkey(mode)
+        text, ok = QInputDialog.getText(
+            self, f"ByteSprite - {HOTKEY_ACTIONS[mode]} Hotkey",
+            f"Type a combo like Ctrl+Alt+K (A-Z, 0-9, F1-F24).\nEmpty resets to {default_hotkey(mode)}.", text=current)
+        if not ok:
+            return
+        if not text.strip():
+            self.hotkeys.pop(mode, None)
+        else:
+            try:
+                label = hotkey_label(*parse_hotkey(text))
+            except ValueError as exc:
+                self._show_toast("BAD KEYS", QColor("#E05A47"))
+                if self._on_notification is not None:
+                    self._on_notification(f"Hotkey not changed: {exc}")
+                return
+            if label in (self.hotkeys.get(m) or default_hotkey(m) for m in HOTKEY_ACTIONS if m != mode):
+                self._show_toast("IN USE", QColor("#E05A47"))
+                return
+            self.hotkeys[mode] = label
+        self._show_toast("HOTKEY SET", QColor("#38B764"))
+        if self.on_hotkeys_changed is not None:
+            self.on_hotkeys_changed()
+
+    def set_pet_scale(self, scale: int) -> None:
+        if scale not in self.PET_SCALES or scale == self.pet_scale:
+            return
+        old_height = self.height()
+        self.pet_scale = scale
+        self._layout_sprite()
+        # Keep the pet standing on the same spot: the window grows or shrinks upward
+        self.move_clamped(self.x(), self.y() + old_height - self.height())
+        self.update()
 
     def sprite_center_point(self) -> QPoint:
         return self._sprite_rect.center()
@@ -710,9 +766,20 @@ class PetWindow(QWidget):
                     hints.ignored_ready()  # a pre-fetch the user let expire, finished or not
                 self._clear_hint()
             return
+        if (self._state_machine.state == PetState.SLEEPING or self._open_wheels()
+                or self._press_global_pos is not None or self._snip_session is not None):
+            return
+        if self.tips_seen < len(self.TIPS) and time.monotonic() >= self._tip_due:
+            text, how = self.TIPS[self.tips_seen]
+            self.tips_seen += 1
+            self._hint, self._hint_until = Suggestion("tip", text, "", how), time.monotonic() + 12.0
+            self._tip_due = self._hint_until + self.TIP_GAP_S
+            self._anim.play_oneshot("spin")
+            self._schedule_next_anim_tick()
+            self.update()
+            return
         hints = self._hints_plugin()
-        if (hints is None or not hints.enabled or self._state_machine.state == PetState.SLEEPING
-                or self._open_wheels() or self._press_global_pos is not None or self._snip_session is not None):
+        if hints is None or not hints.enabled:
             return
         cb = QGuiApplication.clipboard()
         pomo = self._state_machine.pomodoro_plugin
@@ -739,7 +806,7 @@ class PetWindow(QWidget):
         hint, hints = self._hint, self._hints_plugin()
         self._hint = None  # not _clear_hint: a running Watch answer is kept for the click
         self.update()
-        if hint is None:
+        if hint is None or hint.rule == "tip":  # a tip's click just closes it
             return
         if hints is not None:
             hints.mark_used()
@@ -985,6 +1052,10 @@ class PetWindow(QWidget):
     def _dismiss_hint(self) -> None:
         hint, hints = self._hint, self._hints_plugin()
         self._clear_hint()
+        if hint is not None and hint.rule == "tip":
+            self.tips_seen = len(self.TIPS)
+            self._show_toast("TIPS OFF", QColor("#8A9AF2"))
+            return
         if hint is not None and hints is not None:
             hints.dismiss(hint.rule)
         self._show_toast("MUTED", QColor("#8A9AF2"))
@@ -1547,6 +1618,12 @@ class PetWindow(QWidget):
         if callback_id == "watch:undo_tidy":
             self._undo_tidy()
             return
+        if callback_id.startswith("hotkey:"):
+            self._edit_hotkey(callback_id.removeprefix("hotkey:"))
+            return
+        if callback_id.startswith("size:"):
+            self.set_pet_scale(int(callback_id[5:]) if callback_id[5:].isdigit() else 0)
+            return
         if callback_id.startswith("snip:"):
             self.trigger_snip(callback_id.split(":", 1)[1])
             return
@@ -1700,8 +1777,8 @@ class PetWindow(QWidget):
         if w == 0 or h == 0:
             return False
 
-        sx = (local_pos.x() - self._sprite_rect.left()) // self.SPRITE_SCALE
-        sy = (local_pos.y() - self._sprite_rect.top()) // self.SPRITE_SCALE
+        sx = (local_pos.x() - self._sprite_rect.left()) // self.pet_scale
+        sy = (local_pos.y() - self._sprite_rect.top()) // self.pet_scale
         for ny in range(max(0, sy - 1), min(h, sy + 2)):
             for nx in range(max(0, sx - 1), min(w, sx + 2)):
                 if frame[ny][nx][3] > 0:
@@ -1953,6 +2030,10 @@ class PetWindow(QWidget):
             wheel_custom=[label for label, _target in self.wheel.custom],
             macros=[m.name for m in self.macros.macros],
             double_click_macro=self.macros.double_click,
+            pet_scale=self.pet_scale,
+            hotkeys=[(label, self.hotkeys.get(mode) or default_hotkey(mode), mode)
+                     for mode, label in HOTKEY_ACTIONS.items()],
+            pet_scales=self.PET_SCALES,
             parent=self,
         )
 
@@ -2236,7 +2317,7 @@ class PetWindow(QWidget):
         painter.setFont(ui_font(6.5))
         painter.setPen(QColor(TEXT_DIM_HEX))
         painter.drawText(QRect(r.left() + 8, r.top() + 22, r.width() - 16, 12), center,
-                         "Click: do it   Right-click: mute")
+                         self._hint.data if self._hint.rule == "tip" else "Click: do it   Right-click: mute")
         painter.restore()
 
     def _paint_toast(self, painter: QPainter) -> None:
