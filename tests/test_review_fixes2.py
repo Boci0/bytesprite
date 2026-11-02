@@ -149,4 +149,4 @@ def test_empty_content_deltas_do_not_hide_a_tool_being_prepared() -> None:
     lines = [_data({"choices": [{"delta": {"content": ""}}]}),
              *_call_events({"index": 0, "id": "a", "function": {"name": "list_files", "arguments": "{}"}})]
     ai_assist._read_stream(lines, seen.append)
-    assert seen == ["Preparing list_files", "Preparing list_files"]
+    assert seen == ["Preparing list_files"]  # nothing for the empty delta, never "Writing, 0 characters"
