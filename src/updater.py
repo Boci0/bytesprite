@@ -104,7 +104,7 @@ def _bundle_requirements(data: bytes) -> str | None:
 
 def _pins(text: str) -> set[str]:
     """The `name==version` pins of a requirements file (hash lines and comments ignored, names case-folded)."""
-    found = (re.match(r"\s*([A-Za-z0-9_.\-\[\]]+==[^\s\;]+)", line) for line in text.splitlines())
+    found = (re.match(r"\s*([A-Za-z0-9_.\-\[\]]+==[^\s\\;]+)", line) for line in text.splitlines())
     return {m[1].lower().replace("_", "-") for m in found if m}
 
 
