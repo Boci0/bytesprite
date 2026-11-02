@@ -729,6 +729,15 @@ class AiChat(QWidget):
         self._chip_row.setSpacing(6)
         self._chip_row.addStretch(1)
         self._chip_box.hide()
+        # Quick actions for an ask-about-this card (Watch): one click, or Enter on an empty draft, runs the first
+        self._action_box = QWidget()
+        self._action_row = QHBoxLayout(self._action_box)
+        self._action_row.setContentsMargins(2, 2, 2, 0)
+        self._action_row.setSpacing(6)
+        self._action_box.hide()
+        self._actions: list[tuple[str, Callable[[], None]]] = []
+        self._context = ""  # app note sent once, ahead of the next typed message
+        layout.addWidget(self._action_box)
         layout.addWidget(self._chip_box)
         field = _Frosted(raised=True)
         bar = QHBoxLayout(field)
@@ -1047,8 +1056,46 @@ class AiChat(QWidget):
     def _ready(self) -> bool:
         return bool(self._plugin.model) and self._plugin.has_key()
 
+    def set_ask(self, context: str, actions: list[tuple[str, Callable[[], None]]]) -> None:
+        """Ask-about-this: `context` rides along with the next typed message; each action is a button, and Enter
+        on an empty draft runs the first. Both go away once one is used or a message is sent."""
+        self._context = context
+        self._actions = list(actions)
+        while self._action_row.count():
+            item = self._action_row.takeAt(0)
+            if item is not None and item.widget() is not None:
+                item.widget().deleteLater()
+        for i, (label, _run) in enumerate(self._actions):
+            btn = QPushButton(label + ("  ⏎" if i == 0 else ""))
+            btn.setStyleSheet(_ALLOW_CSS if i == 0 else _BUTTON_CSS)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(lambda _c=False, n=i: self._run_action(n))
+            self._action_row.addWidget(btn)
+        self._action_row.addStretch(1)
+        self._action_box.setVisible(bool(self._actions))
+        self._relayout()
+        self._draft.setFocus()
+
+    def clear_ask(self) -> None:
+        """Drop the ask-about-this state: context, buttons and the attached window shot."""
+        self._context = ""
+        self._actions = []
+        self._action_box.hide()
+        self._clear_attachments()
+        QTimer.singleShot(0, self._relayout)
+
+    def _run_action(self, n: int) -> None:
+        if self._job is not None or n >= len(self._actions):
+            return
+        _label, run = self._actions[n]
+        self.clear_ask()
+        run()
+
     def send(self) -> None:
         text = self._draft.toPlainText().strip()
+        if not text and self._actions and self._job is None:
+            self._run_action(0)  # Enter on an empty draft: the best-fit action
+            return
         usable = [a for a in self._attachments if a.text or a.image_url]
         if (not text and not usable) or self._job is not None:
             return
@@ -1058,7 +1105,9 @@ class AiChat(QWidget):
         if not self._ready():
             self.show_setup("Set up a provider, model and API key first. Nothing has been sent.")
             return
-        content = "\n\n".join([text, *(a.as_prompt() for a in usable)]).strip()[:MAX_INPUT_CHARS]
+        content = "\n\n".join([text, *(a.as_prompt() for a in usable), self._context]).strip()[:MAX_INPUT_CHARS]
+        self._context, self._actions = "", []
+        self._action_box.hide()
         self._draft.clear()
         self._history.append({"role": "user", "content": content, "images": [a.image_url for a in usable if a.image_url]})
         self._add_bubble("user", text, attachments=usable)

@@ -248,3 +248,37 @@ def test_no_summary_offer_in_code_apps():
     hints.execute_action("hints:watch")
     assert hints.poll("Code.exe", LONG, True, now=0) is None
     assert hints.poll("chrome.exe", LONG + " more", True, now=1).action == "watch:summary"
+
+
+def test_watch_thinking_is_separate_and_reaches_every_lens(monkeypatch, tmp_path):
+    hints = HintsPlugin()
+    assert hints.watch_thinking == "off"  # fast by default, whatever the chat uses
+    hints.execute_action("hints:wthink:high")
+    again = HintsPlugin()
+    again.load_dict(hints.to_dict())
+    assert again.watch_thinking == "high"
+    again.load_dict({"watch_thinking": "ultra"})
+    assert again.watch_thinking == "high"  # unknown levels ignored
+    seen = []
+    monkeypatch.setattr(watch, "ask", lambda *a, **kw: seen.append(kw["thinking"]) or AiReply(text="{}"))
+    watch.run_lens("summary", LONG, "u", "k", "m", thinking="low")
+    (tmp_path / "a.txt").write_text("x")
+    watch.run_lens("tidy", str(tmp_path), "u", "k", "m", thinking="max")
+    watch.compare("Model: AB-1234", "u", "k", "m", search=lambda q: "x\nhttps://a.shop/x\ny",
+                  fetch=lambda u: "AB-1234 $10", thinking="high")
+    assert seen == ["low", "max", "high"]
+
+
+def test_editor_workspace_and_ask_helpers(tmp_path):
+    proj = tmp_path / "my app (2)" / "my_app"
+    proj.mkdir(parents=True)
+    uri = "file:///" + str(proj).replace("\\", "/").replace(" ", "%20").replace("(", "%28").replace(")", "%29")
+    storage = '{"windowsState": {"lastActiveWindow": {"folder": "' + uri.replace(":", "%3A", 1).replace("file%3A", "file:") + '"}}}'
+    assert watch.editor_title_parts("● home.dart - my_app - Visual Studio Code") == ("home.dart", ["my_app"])
+    assert watch.editor_title_parts("my_app - Cursor") == ("", ["my_app"])
+    assert watch.editor_workspace("Code.exe", "● home.dart - my_app - Visual Studio Code", storage).lower() == str(proj).lower()
+    assert watch.editor_workspace("Code.exe", "Welcome - Visual Studio Code", storage) == ""
+    assert watch.editor_workspace("notepad.exe", "my_app", storage) == ""
+    assert watch.action_lenses("reply") == ["reply", "screen", "tldr"] and watch.action_lenses("screen") == ["screen", "tldr"]
+    ctx = watch.ask_context("Code.exe", "home.dart - my_app", str(proj), "home.dart")
+    assert "Project Folder is set to" in ctx and "home.dart" in ctx and "data, not orders" in ctx

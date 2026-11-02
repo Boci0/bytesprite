@@ -49,7 +49,8 @@ from src.tools.ai_assist import AiAssistPlugin, AiJob, AiReply, load_key
 from src.tools.ai_tools import skills_dir
 from src.tools.macros import MacroBook
 from src.tools.hints import HintsPlugin, Suggestion, foreground_app, foreground_title
-from src.tools.watch import (LABELS as WATCH_LABELS, SOURCES as WATCH_SOURCES, WatchReply, apply_moves,
+from src.tools.watch import (ACTION_LABELS, EDITORS, LABELS as WATCH_LABELS, SOURCES as WATCH_SOURCES, WatchReply,
+                              action_lenses, apply_moves, ask_context, editor_title_parts, editor_workspace,
                               folder_check, hotkey_lens, run_lens, undo_moves)
 from src.tools import computer
 from src.ui.ai_chat import AiChat
@@ -742,13 +743,13 @@ class PetWindow(QWidget):
             self._clear_hint()
             return
         lens = hint.action.removeprefix("watch:")
-        url, key, model = ai.base_url, load_key(ai.base_url), ai.model
+        url, key, model, thinking = ai.base_url, load_key(ai.base_url), ai.model, hints.watch_thinking
         image = data if not isinstance(data, str) else None
         hints.record_ai(0)  # counted at the start, so a failing provider cannot loop past the budget
 
         def run() -> AiReply:
             text = AiToolHost._ocr(image) if image is not None else data
-            reply = run_lens(lens, text, url, key, model)
+            reply = run_lens(lens, text, url, key, model, thinking=thinking)
             reply.tools = [*reply.tools, (WATCH_SOURCES.get(lens, "read_clipboard()"), text)]
             return reply
 
@@ -807,47 +808,87 @@ class PetWindow(QWidget):
                     window=True)
 
     def watch_now(self) -> None:
-        """Hotkey or menu: read the front window now with the lens it fits (error, store, else a general read).
-        Works with Watch mode off; it is an explicit ask, so it is counted but not stopped by the daily budget."""
+        """Alt+`, Ctrl+Shift+Alt+W or the menu: ask about the front window. The chat opens with that window
+        attached, the app and title as context, the Project Folder set from an editor or File Explorer window, and
+        quick actions (Enter on an empty draft runs the best fit). A typed question goes to the full agent.
+        Works with Watch mode off; actions are counted but not stopped by the daily budget (an explicit ask)."""
         if self._watch_job is not None or self._watch_open:
             self._show_toast("ALREADY ON IT", QColor("#8A9AF2"))
             return
         if not self._watch_ready():
             self.open_ai_chat()  # Setup when no key or model; a chat mid-answer is shown as is
             return
-        title = foreground_title()
-        lens = hotkey_lens(foreground_app(), title)
-        hint = Suggestion("watch_now", "Reading the folder..." if lens == "tidy" else "Reading the screen...",
-                          f"watch:{lens}")
+        app, title = foreground_app(), foreground_title()
+        lens = hotkey_lens(app, title)
+        project = editor_workspace(app, title)
+        grab_screen(self, lambda image: self._open_ask(app, title, lens, project, image), window=True)
+
+    def _open_ask(self, app: str, title: str, lens: str, project: str, image: QImage | None) -> None:
+        chat = self.ensure_ai_chat()
+        if chat is None or chat._job is not None:
+            return
+        chat.clear_ask()
+        label = EDITORS.get(app.lower(), ("", ""))[1] or app.removesuffix(".exe").removesuffix(".EXE") or "Screen"
+        if image is not None and not image.isNull():
+            chat.attach_image(image, f"{label} window")
+        if project:
+            self._use_project(project, f"from {label}")
+        file = editor_title_parts(title)[0] if project else ""
+
+        def actions(folder: str = "") -> list[tuple[str, Callable[[], None]]]:
+            out = []
+            for each in action_lenses(lens):
+                if each == "tidy" and not folder:
+                    continue  # tidy needs the folder path; offered once File Explorer answers
+                data = folder if each == "tidy" else image
+                out.append((ACTION_LABELS.get(each, each), lambda l=each, d=data: self._run_action(l, d)))
+            return out
+
+        chat.set_ask(ask_context(app, title, project, file), actions())
+        if app.lower() == "explorer.exe":  # resolve the folder (about 0.3s) for Tidy and the Project Folder
+            job = self._folder_job = AiJob(self)
+
+            def done(found: tuple[str, int] | None, _error: str) -> None:
+                job.deleteLater()
+                if job is not self._folder_job or found is None or chat._actions == []:
+                    return
+                self._folder_job = None
+                self._use_project(found[0], "from File Explorer")
+                chat.set_ask(ask_context(app, title, found[0]), actions(found[0]))
+
+            job.finished.connect(done)
+            job.start(lambda: folder_check(computer.foreground_window(), title, min_files=1))
+
+    def _use_project(self, path: str, why: str) -> None:
+        """Point the chat's file tools at `path` (the folder the user is looking at), with a visible note."""
+        project = self._state_machine.registry.get_plugin("project")
+        if project is None or str(getattr(project, "repo", "") or "") == path:
+            return
+        project.set_repo(path)
+        if self._ai_chat is not None:
+            self._ai_chat.add_note(f"Project Folder: {path} ({why}). The AI can read files there and edit them "
+                                   "only with your OK.")
+
+    def _run_action(self, lens: str, data: str | QImage | None) -> None:
+        """A quick action from the ask card: the lens answer lands in the chat like a Watch answer."""
+        hint = Suggestion("watch_now", "Working on it...", f"watch:{lens}", data if isinstance(data, str) else "")
         self._hint, self._hint_until, self._watch_open = hint, 0.0, True
         self.update()
-        if lens == "tidy":
-            self._check_folder(hint, title, min_files=2)
-            return
-        grab_screen(self, lambda image, h=hint: self._start_watch(h, image) if self._watch_open else None,
-                    window=True)
+        if self._ai_chat is not None:
+            self._ai_chat.add_note(f"Working on: {ACTION_LABELS.get(lens, lens)}...")
+        self._start_watch(hint, data)
 
-    def _check_folder(self, hint: Suggestion, title: str, min_files: int | None = None) -> None:
-        """Resolve the front Explorer window's folder on a worker thread (about 0.3s of PowerShell). Offered
-        tidy hints show only for a messy folder; the hotkey goes straight on to the model."""
+    def _check_folder(self, hint: Suggestion, title: str) -> None:
+        """Resolve the front Explorer window's folder on a worker thread (about 0.3s of PowerShell); the offered
+        tidy hint shows only for a messy folder."""
         hwnd = computer.foreground_window()
         job = self._folder_job = AiJob(self)
-        args = (hwnd, title) if min_files is None else (hwnd, title, min_files)
 
         def done(found: tuple[str, int] | None, _error: str) -> None:
             job.deleteLater()
             if job is not self._folder_job:
                 return
             self._folder_job = None
-            if hint.rule == "watch_now":
-                if not self._watch_open:
-                    return  # dismissed meanwhile
-                if found is None:
-                    self._clear_hint()
-                    self._show_toast("NOTHING TO TIDY", QColor("#8A9AF2"))
-                    return
-                self._start_watch(Suggestion(hint.rule, hint.text, hint.action, found[0]), found[0])
-                return
             if found is not None and self._hint is None and foreground_title() == title:
                 self._hint = Suggestion(hint.rule, f"Tidy this folder? ({found[1]} files)", hint.action, found[0])
                 self._hint_until = time.monotonic() + 12.0
@@ -856,7 +897,7 @@ class PetWindow(QWidget):
                 self.update()
 
         job.finished.connect(done)
-        job.start(lambda: folder_check(*args))
+        job.start(lambda: folder_check(hwnd, title))
 
     def _show_watch(self, hint: Suggestion) -> None:
         reply = self._watch_reply

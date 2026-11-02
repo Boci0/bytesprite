@@ -150,8 +150,34 @@ def test_thinking_params_per_provider() -> None:
     ds, oa = "https://api.deepseek.com/v1", "https://api.openai.com/v1"
     assert thinking_params(ds, "off") == {"thinking": {"type": "disabled"}}  # DeepSeek thinks unless told not to
     assert thinking_params(ds, "max") == {"thinking": {"type": "enabled"}, "reasoning_effort": "max"}
-    assert thinking_params(oa, "off") == {} and thinking_params(oa, "max") == {"reasoning_effort": "high"}
+    assert thinking_params(oa, "off") == {"reasoning_effort": "none"}  # GPT-5+ reason by default
+    assert thinking_params(oa, "max") == {"reasoning_effort": "xhigh"} and thinking_params(oa, "low") == {"reasoning_effort": "low"}
     assert thinking_params(oa, "bogus") == {}
+    gm, orr, local = ("https://generativelanguage.googleapis.com/v1beta/openai", "https://openrouter.ai/api/v1",
+                      "http://localhost:11434/v1")
+    assert thinking_params(gm, "off") == {"reasoning_effort": "none"} and thinking_params(gm, "max") == {"reasoning_effort": "high"}
+    assert thinking_params(orr, "off") == {"reasoning": {"enabled": False}}
+    assert thinking_params(orr, "high") == {"reasoning": {"effort": "high"}}
+    assert thinking_params(orr, "max") == {"reasoning": {"effort": "xhigh"}}
+    assert thinking_params(local, "off") == {} and thinking_params(local, "max") == {"reasoning_effort": "high"}
+
+
+def test_model_that_rejects_thinking_fields_is_retried_without_them(monkeypatch) -> None:
+    bodies = []
+
+    def fake(url, key, path, body, *a):
+        bodies.append(dict(body))
+        if "reasoning_effort" in body:
+            raise ValueError("bad request")
+        return {"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]}
+
+    monkeypatch.setattr(ai_assist, "_request", fake)
+    url = "https://api.openai.com/v1"
+    assert ai_assist.ask(url, "k", "gpt-old", [{"role": "user", "content": "hi"}], thinking="off", web=False).text == "ok"
+    assert bodies[0]["reasoning_effort"] == "none" and "reasoning_effort" not in bodies[1]
+    bodies.clear()
+    ai_assist.ask(url, "k", "gpt-old", [{"role": "user", "content": "hi"}], thinking="high", web=False)
+    assert len(bodies) == 1 and "reasoning_effort" not in bodies[0]  # remembered for the session
 
 
 def test_reply_details_show_served_model_reasoning_and_tokens(api: str) -> None:

@@ -23,6 +23,8 @@ from src.tools.clip_vault import decode_jwt
 from src.tools.ports import process_name
 from src.tools.watch import CLIPBOARD_LENSES, watch_gate
 
+WATCH_THINKING = ("off", "low", "high", "max")  # the chat's THINKING_LEVELS, kept apart so Watch can stay fast
+
 CODE_APPS = frozenset({
     "code.exe", "cursor.exe", "windsurf.exe", "devenv.exe", "pycharm64.exe", "idea64.exe",
     "webstorm64.exe", "sublime_text.exe", "windowsterminal.exe", "powershell.exe", "pwsh.exe", "cmd.exe",
@@ -121,6 +123,7 @@ class HintsPlugin:
         self._muted: set[str] = set()
         self.shown = self.used = self.skipped = 0
         self.watch = False
+        self.watch_thinking = "off"
         self.prefetch_apps: set[str] = set()
         self._title = ""
         self._title_since = 0.0
@@ -257,6 +260,9 @@ class HintsPlugin:
 
         items.append(ToolMenuItem(label=f"Help With This Screen\t{WATCH_SHORT_LABEL}", callback_id="watch:now",
                                   submenu=sub))
+        for level in WATCH_THINKING:
+            items.append(ToolMenuItem(label=f"Watch Thinking: {level.title()}", callback_id=f"hints:wthink:{level}",
+                                      checkable=True, checked=self.watch_thinking == level, submenu=sub))
         if self.last_tidy is not None:
             items.append(ToolMenuItem(label=f"Undo Last Tidy ({len(self.last_tidy[0])} files)",
                                       callback_id="watch:undo_tidy", submenu=sub))
@@ -267,6 +273,9 @@ class HintsPlugin:
         return items
 
     def execute_action(self, callback_id: str) -> tuple[bool, str, str]:
+        if callback_id.startswith("hints:wthink:") and callback_id[13:] in WATCH_THINKING:
+            self.watch_thinking = callback_id[13:]
+            return (True, f"THINK {self.watch_thinking.upper()}", "#73EFF7")
         if callback_id == "hints:watch":
             self.watch = not self.watch
             return (True, "WATCH ON" if self.watch else "WATCH OFF", "#73EFF7")
@@ -279,7 +288,8 @@ class HintsPlugin:
         return (True, "HINTS ON" if self._enabled else "HINTS OFF", "#73EFF7")
 
     def to_dict(self) -> dict[str, Any]:
-        return {"enabled": self._enabled, "watch": self.watch, "prefetch_apps": sorted(self.prefetch_apps),
+        return {"enabled": self._enabled, "watch": self.watch, "watch_thinking": self.watch_thinking,
+                "prefetch_apps": sorted(self.prefetch_apps),
                 "ai_day": self._day, "ai_calls": self.ai_calls, "ai_tokens": self.ai_tokens}
 
     def load_dict(self, data: dict[str, Any]) -> None:
@@ -288,6 +298,8 @@ class HintsPlugin:
         if data.get("enabled") is False:
             self._enabled = False
         self.watch = data.get("watch") is True
+        if data.get("watch_thinking") in WATCH_THINKING:
+            self.watch_thinking = data["watch_thinking"]
         apps = data.get("prefetch_apps")
         if isinstance(apps, list):
             self.prefetch_apps = {a.lower() for a in apps if isinstance(a, str) and a.lower().endswith(".exe")}

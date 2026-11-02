@@ -272,6 +272,7 @@ _HTTP_ERRORS = {400: "bad request", 401: "bad key", 402: "no balance", 403: "for
                 404: "bad model or url", 422: "bad request", 429: "rate limited"}
 _NO_VISION: set[tuple[str, str]] = set()  # (base_url, model) that refused images this session
 _NO_TOOLS: set[tuple[str, str]] = set()  # ... or the web_search tool
+_NO_THINK: set[tuple[str, str]] = set()  # ... or the thinking fields (such a model answers at its own default)
 _NO_STREAM: set[tuple[str, str]] = set()  # ... or streaming
 
 
@@ -346,13 +347,22 @@ def is_anthropic(base_url: str) -> bool:
 
 
 def thinking_params(base_url: str, thinking: str) -> dict[str, Any]:
-    """Request fields for a thinking level. DeepSeek thinks by default, so Off must say so; other
-    providers get only the OpenAI-style reasoning_effort, and nothing at all when Off."""
-    if thinking not in THINKING_LEVELS or thinking == "off":
-        return {"thinking": {"type": "disabled"}} if is_deepseek(base_url) else {}
+    """Request fields for a thinking level, in each provider's own terms. Off says so explicitly where the model
+    would otherwise think by default (DeepSeek, OpenAI's GPT-5 and later, Gemini 2.5, OpenRouter). Claude has its
+    own path (`CLAUDE_EFFORT`). A model that rejects these fields is retried without them (`_NO_THINK`)."""
+    if thinking not in THINKING_LEVELS:
+        return {}
+    host = urlsplit(base_url).hostname or ""
+    off = thinking == "off"
     if is_deepseek(base_url):
-        return {"thinking": {"type": "enabled"}, "reasoning_effort": thinking}
-    return {"reasoning_effort": "high" if thinking == "max" else thinking}  # OpenAI-style: low/medium/high
+        return {"thinking": {"type": "disabled"}} if off else {"thinking": {"type": "enabled"}, "reasoning_effort": thinking}
+    if host == "openrouter.ai":  # its unified reasoning object, mapped per model by OpenRouter
+        return {"reasoning": {"enabled": False} if off else {"effort": "xhigh" if thinking == "max" else thinking}}
+    if host == "generativelanguage.googleapis.com":  # Gemini maps reasoning_effort onto its thinking settings
+        return {"reasoning_effort": "none" if off else "high" if thinking == "max" else thinking}
+    if host == "api.openai.com":
+        return {"reasoning_effort": "none" if off else "xhigh" if thinking == "max" else thinking}
+    return {} if off else {"reasoning_effort": "high" if thinking == "max" else thinking}  # other OpenAI-style servers
 
 
 def _text_only(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -376,13 +386,16 @@ def ask(base_url: str, key: str, model: str, messages: list[dict[str, Any]], *,
         tools = web and (base_url, model) not in _NO_TOOLS
         if (base_url, model) in _NO_VISION:
             messages = _text_only(messages)
+        level = "default" if (base_url, model) in _NO_THINK else thinking
         try:
-            return _post(base_url, key, model, messages, thinking, timeout, tools, host, progress)
+            return _post(base_url, key, model, messages, level, timeout, tools, host, progress)
         except ValueError as exc:
             if str(exc) != "bad request":
                 raise
             if any(isinstance(m["content"], list) for m in messages):
                 _NO_VISION.add((base_url, model))
+            elif thinking_params(base_url, level):  # e.g. a model that cannot turn thinking off, or lacks xhigh
+                _NO_THINK.add((base_url, model))
             elif tools:
                 _NO_TOOLS.add((base_url, model))
             else:
