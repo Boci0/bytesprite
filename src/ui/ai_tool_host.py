@@ -359,7 +359,7 @@ class AiToolHost(QObject):
             return "copied to the clipboard"
         if name == "pet_status":
             rows = []
-            for plugin in self._win._state_machine.registry.plugins():
+            for plugin in self._win._state_machine.registry.plugins:
                 hud = plugin.get_hud_data()
                 bars = ", ".join(f"{b.label} {(b.display_text or f'{b.value:.0f}%').strip()}" for b in hud.bars)
                 rows.append(f"{hud.badge_left} [{hud.badge_right}] {bars}. {hud.detail}".strip())
