@@ -1292,6 +1292,24 @@ class AiAssistPlugin:
         self.thinking = "off"
         self.asks = 0
         self.tokens = 0
+        self._notice: tuple[str, str] | None = None
+        self._setting_up = False
+
+    def pop_notification(self) -> tuple[str, str] | None:
+        notice, self._notice = self._notice, None
+        return notice
+
+    def _run_starter_pack(self) -> None:
+        from src.tools import starter_pack
+
+        try:
+            text, ok = starter_pack.set_up()
+        except Exception:  # a background thread: report instead of dying silently
+            logger.exception("starter pack failed")
+            text, ok = "failed, see the log", False
+        logger.info("starter pack: %s", text)
+        self._notice = ("PACK READY" if ok else "NEEDS NODE", "#38B764" if ok else "#EF7D57")
+        self._setting_up = False
 
     @property
     def tool_id(self) -> str:
@@ -1352,6 +1370,8 @@ class AiAssistPlugin:
         sub = self.SUBMENU_NAME
         return [
             ToolMenuItem(label=f"Open AI Chat\t{HOTKEY_LABEL}+A", callback_id="ai:chat", submenu=sub),
+            ToolMenuItem(label="Set Up Starter Pack", callback_id="ai:starter", enabled=not self._setting_up,
+                         submenu=sub),
             ToolMenuItem(label="Open Skills Folder", callback_id="ai:skills", submenu=sub),
             ToolMenuItem(label="Edit Global Rules...", callback_id="ai:rules", submenu=sub),
             ToolMenuItem(label="Open Memory File", callback_id="ai:memory", submenu=sub),
@@ -1362,6 +1382,11 @@ class AiAssistPlugin:
         ]
 
     def execute_action(self, callback_id: str) -> tuple[bool, str, str]:
+        if callback_id == "ai:starter":  # may install Node.js, so it runs off the UI thread
+            if not self._setting_up:
+                self._setting_up = True
+                threading.Thread(target=self._run_starter_pack, daemon=True).start()
+            return (True, "SETTING UP", "#FFCD75")
         if callback_id == "ai:rules":  # the user's own rules: no tool writes this file
             path = rules_path()
             try:
