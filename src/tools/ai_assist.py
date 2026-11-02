@@ -80,6 +80,9 @@ MAX_NATIVE_ROUNDS = 5  # pause_turn continuations of one Claude answer
 # Added to the last tool output before the answer-only round, so a long job ends with a report, not an error
 BUDGET_NOTE = (f"\n\n[ByteSprite: that was the last of this message's {MAX_TOOL_ROUNDS} tool rounds. Answer now "
                "without tools: say what is done and what is left; the user can send another message to continue.]")
+PACE_AT = MAX_TOOL_ROUNDS * 7 // 10  # rounds used when the model is told to stop polishing and finish
+PACE_NOTE = (f"\n\n[ByteSprite: {PACE_AT} of this message's {MAX_TOOL_ROUNDS} tool rounds are used. Stop polishing: fix "
+             "only what is broken, verify the result, remove your scratch files, then give the final answer.]")
 MAX_ANSWER_TOKENS = 3_000_000  # billable tokens (cached prompt counts a tenth) over every round of one answer; then tools go off
 OVER_NOTE = ("\n\n[ByteSprite: this answer has used its token budget, so tools are off now. Say what is done and "
              "what is left; the user can send another message to continue.]")
@@ -131,6 +134,10 @@ SYSTEM_PROMPT = (
     "publishing). (8) Do the highest-value steps first and leave the work in a consistent state, since rounds "
     "and tokens run out. Finish with the result first, then what you changed, how you checked it, and what is "
     "left. "
+    "Driving Office through COM: put the whole job in one script, run it, then at most two refinement passes, "
+    "since every run-and-look round is slow. A drop cap is set on the Paragraph, not its Range "
+    "($p.DropCap.Enable(); $p.DropCap.Position=1; $p.DropCap.LinesToDrop=3). Never click the Office window "
+    "while a COM script may run; a COM call that hangs means a dialog is open, so press esc and look at the screen. "
     "Creative requests (a poem, a design, a document to decorate) deserve original, ambitious work, not the "
     "safest first idea. To style an open Word, Excel or PowerPoint document, drive it through its COM object "
     "with run_command (powershell -NoProfile -Command, [Runtime.InteropServices.Marshal]::GetActiveObject("
@@ -826,7 +833,7 @@ def _post_anthropic(base_url: str, key: str, model: str, messages: list[dict[str
                     used.append((tool_note(b["name"], b.get("input")), out))
                     shots = shots or bool(shot)
                 tool_rounds += 1
-                note = [{"type": "text", "text": BUDGET_NOTE.strip()}] if tool_rounds == MAX_TOOL_ROUNDS else []
+                note = [{"type": "text", "text": (BUDGET_NOTE if tool_rounds == MAX_TOOL_ROUNDS else PACE_NOTE).strip()}]                     if tool_rounds in (MAX_TOOL_ROUNDS, PACE_AT) else []
                 turns = [*turns, {"role": "assistant", "content": blocks}, {"role": "user", "content": results + note}]
                 if shots and _shot_count(turns) > KEEP_SHOTS:
                     turns = _drop_old_shots(turns)  # only the newest screenshot stays in the request
@@ -926,7 +933,7 @@ def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], t
                     last = round_ == MAX_TOOL_ROUNDS - 1 and call is calls[-1]  # the next round sends no tools
                     messages.append({"role": "tool", "tool_call_id": call["id"],
                                      "content": result + _steer(fn["name"], fn["name"] + str(fn.get("arguments")), result, fails, paid)
-                                     + (BUDGET_NOTE if last else "")})
+                                     + (BUDGET_NOTE if last else PACE_NOTE if round_ == PACE_AT - 1 and call is calls[-1] else "")})
                     read_local = read_local or fn["name"] in LOCAL_DATA_TOOLS or MCP_SEP in fn["name"]
                     used.append((tool_note(fn["name"], fn.get("arguments")), result))
                     shot = _take_shot(host)

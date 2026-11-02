@@ -764,3 +764,8 @@ def test_cached_prompt_tokens_cost_a_tenth_of_the_answer_budget() -> None:
 
     assert _billable(1_000, 0, 500) == 1_500
     assert _billable(1_000, 40_000, 500) == 1_000 + 4_000 + 500  # a long tool job re-sends its chat each round
+
+
+def test_pace_note_comes_before_the_last_round() -> None:
+    assert 0 < ai_assist.PACE_AT < ai_assist.MAX_TOOL_ROUNDS
+    assert str(ai_assist.PACE_AT) in ai_assist.PACE_NOTE and "Stop polishing" in ai_assist.PACE_NOTE

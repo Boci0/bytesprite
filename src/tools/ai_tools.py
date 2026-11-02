@@ -521,6 +521,8 @@ def run_command(root: Path | None, command: Any) -> str:
             _kill_tree(proc.pid)
             proc.wait()
             head = f"stopped after {COMMAND_TIMEOUT_S} s"
+            if re.search(r"GetActiveObject|Application|Word|Excel|PowerPoint", command, re.I):
+                head += " (an Office app is probably waiting on an open dialog: read_screen, press esc, retry)"
         sink.seek(0)
         raw = sink.read()
     out = raw.decode("utf-8", "replace").replace("\r\n", "\n").strip()
