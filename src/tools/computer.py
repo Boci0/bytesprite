@@ -165,15 +165,20 @@ def foreground_window() -> int:
 
 
 def front_state() -> tuple[str, bool]:
-    """(title, is a dialog) of the front window. Modal dialogs are owned windows, so an owner means one is open."""
+    """(title, is a dialog) of the front window."""
     user32 = _user32()
     user32.GetForegroundWindow.restype = wintypes.HWND
+    return window_state(user32.GetForegroundWindow())
+
+
+def window_state(hwnd: int | None) -> tuple[str, bool]:
+    """Modal dialogs are owned windows, so an owner means one is open."""
+    if not hwnd:
+        return "", False
+    user32 = _user32()
     user32.GetWindow.restype = wintypes.HWND
     user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
     user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
-    hwnd = user32.GetForegroundWindow()
-    if not hwnd:
-        return "", False
     buf = ctypes.create_unicode_buffer(256)
     user32.GetWindowTextW(hwnd, buf, 256)
     return buf.value, bool(user32.GetWindow(hwnd, 4))  # GW_OWNER
