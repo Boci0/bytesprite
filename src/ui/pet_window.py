@@ -45,7 +45,7 @@ from src.engine.pet_state import PetStateMachine
 from src.graphics.animation_controller import AnimationController
 from src.graphics.sprite_matrix import FrameMatrix, get_sprite_frames
 from src.tools.file_forge import ForgeMode, ForgeWheelOption, get_wheel_options_for_paths
-from src.tools.ai_assist import AiAssistPlugin, AiJob, AiReply, load_key
+from src.tools.ai_assist import AiAssistPlugin, AiJob, AiReply, fit_thinking, load_key, thinking_levels
 from src.tools.ai_tools import skills_dir
 from src.tools.macros import MacroBook
 from src.tools.hints import HintsPlugin, Suggestion, foreground_app, foreground_title
@@ -673,7 +673,12 @@ class PetWindow(QWidget):
 
     def _hints_plugin(self) -> HintsPlugin | None:
         plugin = self._state_machine.registry.get_plugin("hints")
-        return plugin if isinstance(plugin, HintsPlugin) else None
+        if not isinstance(plugin, HintsPlugin):
+            return None
+        ai = self._state_machine.registry.get_plugin("ai")
+        if isinstance(ai, AiAssistPlugin):
+            plugin.levels = lambda: thinking_levels(ai.base_url, ai.model)
+        return plugin
 
     def _poll_hint(self) -> None:
         app = foreground_app()  # ~0.03ms per 3s tick
@@ -746,7 +751,7 @@ class PetWindow(QWidget):
             self._clear_hint()
             return
         lens = hint.action.removeprefix("watch:")
-        url, key, model, thinking = ai.base_url, load_key(ai.base_url), ai.model, hints.watch_thinking
+        url, key, model, thinking = ai.base_url, load_key(ai.base_url), ai.model, fit_thinking(ai.base_url, hints.watch_thinking, ai.model)
         image = data if not isinstance(data, str) else None
         hints.record_ai(0)  # counted at the start, so a failing provider cannot loop past the budget
 

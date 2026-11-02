@@ -230,9 +230,12 @@ def test_round2_gate_fixes():
     # copied code is not offered for a summary; prose still is
     code = "def f(x):\n    return {'a': (x + 1)}\n" * 60
     assert watch.clipboard_gate(code) is None and watch.clipboard_gate(LONG).lens == "summary"
-    start = _t.perf_counter()
-    watch.clipboard_gate(("at a(" * 2000)[:8192])
-    assert _t.perf_counter() - start < 0.005  # bounded error regex (was ~13ms)
+    def once() -> float:
+        start = _t.perf_counter()
+        watch.clipboard_gate(("at a(" * 2000)[:8192])
+        return _t.perf_counter() - start
+
+    assert min(once() for _ in range(5)) < 0.005  # bounded error regex (was ~13ms); best of 5 so load cannot flake it
 
 
 def test_watch_offer_held_while_not_ready():

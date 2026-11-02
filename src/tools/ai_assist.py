@@ -97,12 +97,12 @@ STUCK_NOTE = ("\n\n[ByteSprite: that is {n} in a row, so tools are off for the r
 CLAUDE_TOOLS = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 5},
                 {"type": "web_fetch_20250910", "name": "web_fetch", "max_uses": 5}]
 # Thinking level -> adaptive thinking effort; Off sends neither, so the model's own default applies
-CLAUDE_EFFORT = {"low": "low", "high": "high", "max": "max"}
+CLAUDE_EFFORT = {"low": "low", "medium": "medium", "high": "high", "max": "max"}
 MAX_RESPONSE_BYTES = 512 * 1024
 MAX_MODELS = 200
 TIMEOUT_S = 90.0
 THINKING_TIMEOUT_S = 300.0  # bigger thinking budgets take longer
-THINKING_LEVELS = ("off", "low", "high", "max")
+THINKING_LEVELS = ("off", "low", "medium", "high", "max")  # everything any provider takes; see thinking_levels
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "[::1]", "::1"}
 _MODEL_RE = re.compile(r"^[\w.:/@+-]{1,100}$")
 _KEY_RE = re.compile(r"^[\x21-\x7e]{8,512}$")  # printable ASCII, no spaces or CR/LF (header injection)
@@ -346,12 +346,38 @@ def is_anthropic(base_url: str) -> bool:
     return urlsplit(base_url).hostname == "api.anthropic.com"
 
 
+_ALWAYS_THINKS = re.compile(r"^(o\d|gpt-5(\.\d+)?-pro|deepseek-reasoner|gemini-(2\.5|3(\.\d+)?)-pro)")  # no Off
+
+
+def thinking_levels(base_url: str, model: str = "") -> tuple[str, ...]:
+    """The levels a provider (and model) really has. DeepSeek only knows high and max; Gemini has no max above
+    high; reasoning-only models (o-series, Gemini Pro) cannot turn thinking off."""
+    host = urlsplit(base_url).hostname
+    levels = THINKING_LEVELS
+    if host == "api.deepseek.com":
+        levels = ("off", "high", "max")
+    elif host == "generativelanguage.googleapis.com":
+        levels = ("off", "low", "medium", "high")
+    if _ALWAYS_THINKS.match(model.lower().rsplit("/", 1)[-1]):
+        levels = levels[1:]
+    return levels
+
+
+def fit_thinking(base_url: str, thinking: str, model: str = "") -> str:
+    """A saved level the provider lacks (after switching provider or model) becomes the nearest one it has."""
+    levels = thinking_levels(base_url, model)
+    if thinking in levels or thinking not in THINKING_LEVELS:
+        return thinking
+    return next((l for l in levels if THINKING_LEVELS.index(l) >= THINKING_LEVELS.index(thinking)), levels[-1])
+
+
 def thinking_params(base_url: str, thinking: str) -> dict[str, Any]:
     """Request fields for a thinking level, in each provider's own terms. Off says so explicitly where the model
     would otherwise think by default (DeepSeek, OpenAI's GPT-5 and later, Gemini 2.5, OpenRouter). Claude has its
     own path (`CLAUDE_EFFORT`). A model that rejects these fields is retried without them (`_NO_THINK`)."""
     if thinking not in THINKING_LEVELS:
         return {}
+    thinking = fit_thinking(base_url, thinking)
     host = urlsplit(base_url).hostname or ""
     off = thinking == "off"
     if is_deepseek(base_url):
@@ -380,6 +406,7 @@ def ask(base_url: str, key: str, model: str, messages: list[dict[str, Any]], *,
     `host`'s local PC tools when one is given. `web=False` with no host sends no tools at all (Watch mode). `progress` (called on the worker thread) gets a short status
     such as "Writing 840 chars" while an OpenAI-style answer streams in or a tool runs.
     """
+    thinking = fit_thinking(base_url, thinking, model)
     if is_anthropic(base_url):
         return _post_anthropic(base_url, key, model, messages, thinking, timeout, host, progress, web)
     while True:
@@ -758,6 +785,7 @@ def _post_anthropic(base_url: str, key: str, model: str, messages: list[dict[str
                 continue
             if data.get("stop_reason") == "tool_use" and host is not None and tool_rounds < MAX_TOOL_ROUNDS:
                 results = []
+                shots = False
                 for b in (b for b in blocks if b.get("type") == "tool_use"):
                     seen = json.dumps([t["content"] for t in turns if t["role"] == "user"], ensure_ascii=False) if read_local else None
                     out = _run_tool(b["name"], b.get("input"), host, seen)
@@ -769,11 +797,12 @@ def _post_anthropic(base_url: str, key: str, model: str, messages: list[dict[str
                         "type": "base64", "media_type": "image/png", "data": shot.split(",", 1)[1]}}]
                     results.append({"type": "tool_result", "tool_use_id": b["id"], "content": content})
                     used.append((tool_note(b["name"], b.get("input")), out))
-                    if shot:
-                        turns = _drop_old_shots(turns)  # only the newest screenshot stays in the request
+                    shots = shots or bool(shot)
                 tool_rounds += 1
                 note = [{"type": "text", "text": BUDGET_NOTE.strip()}] if tool_rounds == MAX_TOOL_ROUNDS else []
                 turns = [*turns, {"role": "assistant", "content": blocks}, {"role": "user", "content": results + note}]
+                if shots and _shot_count(turns) > KEEP_SHOTS:
+                    turns = _drop_old_shots(turns)  # only the newest screenshot stays in the request
                 continue
             text = "".join(b["text"] for b in blocks if b.get("type") == "text" and isinstance(b.get("text"), str))
             sources: dict[str, str] = {}
@@ -927,12 +956,24 @@ def _take_shot(host: ToolHost | None) -> str:
     return take() if callable(take) else ""
 
 
+KEEP_SHOTS = 3  # old screenshots go in one batch past this, so the prompt cache holds in between
+
+
+def _shot_count(turns: list[dict[str, Any]]) -> int:
+    return sum(1 for t in turns if t["role"] == "user" and isinstance(t["content"], list)
+               for b in t["content"] if b.get("type") == "tool_result" and isinstance(b.get("content"), list))
+
+
 def _drop_old_shots(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Claude: earlier tool results keep their text but lose their screenshot (each costs tokens and request size)."""
+    """Claude: earlier tool results (all but the last turn) keep their text but lose their screenshot (each costs
+    tokens and request size). Thinking blocks are signed against the turns before them, so editing those turns
+    invalidates the signatures: the thinking blocks go too."""
     out = []
-    for turn in turns:
+    for i, turn in enumerate(turns):
         content = turn["content"]
-        if turn["role"] == "user" and isinstance(content, list):
+        if turn["role"] == "assistant" and isinstance(content, list):
+            turn = {**turn, "content": [b for b in content if b.get("type") not in ("thinking", "redacted_thinking")]}
+        elif turn["role"] == "user" and isinstance(content, list) and i < len(turns) - 1:
             content = [{**b, "content": b["content"][0]["text"]} if b.get("type") == "tool_result"
                        and isinstance(b.get("content"), list) else b for b in content]
             turn = {**turn, "content": content}

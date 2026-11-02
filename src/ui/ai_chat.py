@@ -28,7 +28,7 @@ from PyQt6.QtWidgets import (QAbstractButton, QComboBox, QFileDialog, QFormLayou
 from src.storage.recent_files import format_age
 from src.tools.ai_assist import (BRAVE_KEY_PAGE, BRAVE_URL, COMPACT_AT, COMPACT_MARK, KEY_PAGES, MAX_INPUT_CHARS, PRESETS,
                                  compact_history, history_chars, summary_turns,
-                                 THINKING_LEVELS, AiAssistPlugin, AiJob, AiReply, ModelInfo, ToolHost, ask, chat_messages, delete_key, list_models, load_key, save_key, valid_key,
+                                 THINKING_LEVELS, AiAssistPlugin, fit_thinking, thinking_levels, AiJob, AiReply, ModelInfo, ToolHost, ask, chat_messages, delete_key, list_models, load_key, save_key, valid_key,
                                  valid_model, validate_base_url)
 from src.tools.ai_sessions import delete_sessions, list_sessions, load_session, new_id, save_session
 from src.ui.context_menu import style_menu
@@ -797,8 +797,10 @@ class AiChat(QWidget):
         search_row.addWidget(get_search)
         search_row.addWidget(self._remove_search)
         self._thinking = QComboBox()
-        for level in THINKING_LEVELS:
-            self._thinking.addItem(level.title(), level)
+        self._fill_thinking(self._plugin.base_url, self._plugin.thinking, self._plugin.model)
+        for edit in (self._url, self._model):  # the level list follows the model and URL being typed
+            edit.textEdited.connect(lambda _t="": self._fill_thinking(
+                self._url.text(), self._thinking.currentData() or "off", self._model.text()))
         self._thinking.setToolTip("Think before answering: slower and more tokens, better at math and science")
         self._status = QLabel()
         self._status.setWordWrap(True)
@@ -848,6 +850,13 @@ class AiChat(QWidget):
         self._refresh_title()
         self._set_status("Search key removed." if search else "API key removed.")
 
+    def _fill_thinking(self, url: str, level: str, model: str = "") -> None:
+        """Setup's Thinking choices: only the levels this provider has, `level` (or its nearest) selected."""
+        self._thinking.clear()
+        for each in thinking_levels(url, model):
+            self._thinking.addItem(each.title(), each)
+        self._thinking.setCurrentIndex(max(0, self._thinking.findData(fit_thinking(url, level, model))))
+
     def _load_setup(self) -> None:
         p = self._plugin
         self._provider.blockSignals(True)
@@ -860,7 +869,7 @@ class AiChat(QWidget):
         self._search_key.clear()
         self._refresh_keys()
         self._get_key.setEnabled(p.provider in KEY_PAGES)
-        self._thinking.setCurrentIndex(max(0, self._thinking.findData(p.thinking)))
+        self._fill_thinking(p.base_url, p.thinking, p.model)
 
     def _on_provider_picked(self) -> None:
         key = self._provider.currentData()
@@ -870,6 +879,7 @@ class AiChat(QWidget):
             self._model.setText(model)
         self._url.setEnabled(key == "custom")
         self._get_key.setEnabled(key in KEY_PAGES)
+        self._fill_thinking(self._url.text(), self._thinking.currentData() or "off", self._model.text())
         self._refresh_keys()
 
     def _open_key_page(self) -> None:
@@ -1388,10 +1398,10 @@ class AiChat(QWidget):
         if error:
             menu.addAction(f"Could not list models ({friendly_error(error)})").setEnabled(False)
         menu.addSection("Thinking")
-        for level in THINKING_LEVELS:
+        for level in thinking_levels(p.base_url, p.model):
             action = menu.addAction(level.title())
             action.setCheckable(True)
-            action.setChecked(level == p.thinking)
+            action.setChecked(level == fit_thinking(p.base_url, p.thinking, p.model))
             action.triggered.connect(lambda _c=False, t=level: self._pick(thinking=t))
         menu.addSeparator()
         menu.addAction("Setup...").triggered.connect(lambda _c=False: self.show_setup())

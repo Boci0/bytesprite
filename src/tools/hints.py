@@ -16,14 +16,14 @@ import sys
 import time
 from dataclasses import dataclass
 from datetime import date
-from typing import Any
+from typing import Any, Callable
 
 from src.engine.models import CompanionState, HudBar, HudData, ToolMenuItem
 from src.tools.clip_vault import decode_jwt
 from src.tools.ports import process_name
 from src.tools.watch import CLIPBOARD_LENSES, watch_gate
 
-WATCH_THINKING = ("off", "low", "high", "max")  # the chat's THINKING_LEVELS, kept apart so Watch can stay fast
+from src.tools.ai_assist import THINKING_LEVELS as WATCH_THINKING  # same levels as the chat; Watch keeps its own choice so it can stay fast
 
 CODE_APPS = frozenset({
     "code.exe", "cursor.exe", "windsurf.exe", "devenv.exe", "pycharm64.exe", "idea64.exe",
@@ -124,6 +124,7 @@ class HintsPlugin:
         self.shown = self.used = self.skipped = 0
         self.watch = False
         self.watch_thinking = "off"
+        self.levels: Callable[[], tuple[str, ...]] = lambda: WATCH_THINKING  # the provider's levels, set by the pet window
         self.prefetch_apps: set[str] = set()
         self._title = ""
         self._title_since = 0.0
@@ -269,7 +270,7 @@ class HintsPlugin:
 
         items.append(ToolMenuItem(label=f"Help With This Screen\t{WATCH_SHORT_LABEL}", callback_id="watch:now",
                                   submenu=sub))
-        for level in WATCH_THINKING:
+        for level in self.levels():
             items.append(ToolMenuItem(label=f"Watch Thinking: {level.title()}", callback_id=f"hints:wthink:{level}",
                                       checkable=True, checked=self.watch_thinking == level, submenu=sub))
         if self.last_tidy is not None:
@@ -282,7 +283,7 @@ class HintsPlugin:
         return items
 
     def execute_action(self, callback_id: str) -> tuple[bool, str, str]:
-        if callback_id.startswith("hints:wthink:") and callback_id[13:] in WATCH_THINKING:
+        if callback_id.startswith("hints:wthink:") and callback_id[13:] in self.levels():
             self.watch_thinking = callback_id[13:]
             return (True, f"THINK {self.watch_thinking.upper()}", "#73EFF7")
         if callback_id == "hints:watch":

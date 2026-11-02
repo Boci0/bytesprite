@@ -625,10 +625,16 @@ def test_screenshots_ride_along_with_tool_results_and_only_the_newest_stays() ->
     turns = [{"role": "user", "content": "hi"},
              {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "1",
                                            "content": [{"type": "text", "text": "map"}, image]},
-                                          {"type": "tool_result", "tool_use_id": "2", "content": "plain"}]}]
+                                          {"type": "tool_result", "tool_use_id": "2", "content": "plain"}]},
+             {"role": "assistant", "content": [{"type": "thinking", "thinking": "t", "signature": "s"},
+                                               {"type": "tool_use", "id": "3", "name": "x", "input": {}}]},
+             {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "3",
+                                           "content": [{"type": "text", "text": "new"}, image]}]}]
     kept = _drop_old_shots(turns)
     assert kept[1]["content"][0]["content"] == "map" and kept[1]["content"][1]["content"] == "plain"
-    assert kept[0] == turns[0]
+    assert kept[0] == turns[0] and kept[3] == turns[3]  # the newest result keeps its screenshot
+    # thinking is signed against the turns before it, which just changed
+    assert [b["type"] for b in kept[2]["content"]] == ["tool_use"]
 
 
 def test_global_rules_reach_every_system_prompt_ahead_of_memory(tmp_path: Path, monkeypatch) -> None:
@@ -727,3 +733,27 @@ def test_claude_path_also_guards_open_link_after_local_data(monkeypatch: pytest.
                                       [{"role": "user", "content": "hi"}], "off", 5, host)
     assert reply.text == "Done." and [c[0] for c in host.calls] == ["read_clipboard"]  # open_link never reached the host
     assert "only opens links already in this chat" in json.dumps(sent[-1]["messages"][-1])
+
+
+def test_thinking_levels_follow_the_provider() -> None:
+    from src.tools.ai_assist import fit_thinking, thinking_levels, thinking_params
+
+    ds, gem, oai = "https://api.deepseek.com/v1", "https://generativelanguage.googleapis.com/v1beta/openai", "https://api.openai.com/v1"
+    assert thinking_levels(ds) == ("off", "high", "max") and "max" not in thinking_levels(gem)
+    assert "medium" in thinking_levels(oai)
+    assert fit_thinking(ds, "low") == "high" and fit_thinking(ds, "medium") == "high" and fit_thinking(gem, "max") == "high"
+    assert fit_thinking(oai, "medium") == "medium"
+    assert thinking_params(ds, "low")["reasoning_effort"] == "high"
+
+
+def test_models_that_always_think_have_no_off_and_old_shots_go_in_batches() -> None:
+    from src.tools.ai_assist import KEEP_SHOTS, _drop_old_shots, _shot_count, fit_thinking, thinking_levels
+
+    oai = "https://api.openai.com/v1"
+    assert "off" in thinking_levels(oai, "gpt-5") and "off" not in thinking_levels(oai, "o3-mini")
+    assert "off" not in thinking_levels("https://openrouter.ai/api/v1", "openai/o3")
+    assert fit_thinking(oai, "off", "o3") == "low"
+    image = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "A"}}
+    result = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "1",
+                                           "content": [{"type": "text", "text": "t"}, image]}]}
+    assert _shot_count([result] * KEEP_SHOTS) == KEEP_SHOTS and _shot_count(_drop_old_shots([result, result, {"role": "user", "content": "x"}])) == 0
