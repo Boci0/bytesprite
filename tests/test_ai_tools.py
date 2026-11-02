@@ -777,3 +777,36 @@ def test_front_note_says_what_an_action_changed() -> None:
     assert "changed: 'Doc - Word' -> 'Font'" in front_note(("Doc - Word", False), ("Font", True))
     assert "dialog is open" in front_note(("Doc - Word", False), ("Font", True))
     assert "unchanged" in front_note(("Doc - Word", False), ("Doc - Word", False))
+
+
+def test_steering_rides_with_the_next_tool_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    said = [["use blue instead"], []]  # typed before the first tool result, nothing before the second
+
+    def steer() -> list[str]:
+        return said.pop(0) if said else []
+
+    def claude(body):
+        if len(sent) > 2:
+            return {"stop_reason": "end_turn", "content": [{"type": "text", "text": "done"}]}
+        return {"stop_reason": "tool_use", "content": [{"type": "tool_use", "id": f"t{len(sent)}", "name": "list_files", "input": {}}]}
+
+    sent: list[dict] = []
+    monkeypatch.setattr(ai_assist, "_request", lambda *a: sent.append(json.loads(json.dumps(a[3]))) or claude(a[3]))
+    ai_assist._post_anthropic("https://api.anthropic.com/v1", "k", "claude-x", [{"role": "user", "content": "go"}],
+                              "off", 5, _Host(), steer=steer)
+    assert "use blue instead" in sent[1]["messages"][-1]["content"][-1]["text"]
+    assert all("sent this while you worked" not in json.dumps(s["messages"][-1]) for s in sent[2:])
+
+    said[:] = [["use blue instead"], []]
+    sent.clear()
+
+    def openai(body):
+        if len(sent) > 2:
+            return {"choices": [{"message": {"role": "assistant", "content": "done"}}]}
+        return {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "c1", "function": {"name": "list_files", "arguments": "{}"}}]}}]}
+
+    monkeypatch.setattr(ai_assist, "_request", lambda *a: sent.append(json.loads(json.dumps(a[3]))) or openai(a[3]))
+    ai_assist._post("https://api.example/v1", "k", "m", [{"role": "user", "content": "go"}], "off", 5, True, _Host(), steer=steer)
+    tool = [m for m in sent[1]["messages"] if m["role"] == "tool"][0]["content"]
+    assert "use blue instead" in tool and "Finish or undo" in tool

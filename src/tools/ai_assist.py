@@ -83,6 +83,8 @@ BUDGET_NOTE = (f"\n\n[ByteSprite: that was the last of this message's {MAX_TOOL_
 PACE_AT = MAX_TOOL_ROUNDS * 7 // 10  # rounds used when the model is told to stop polishing and finish
 PACE_NOTE = (f"\n\n[ByteSprite: {PACE_AT} of this message's {MAX_TOOL_ROUNDS} tool rounds are used. Stop polishing: fix "
              "only what is broken, verify the result, remove your scratch files, then give the final answer.]")
+USER_NOTE = ("\n\n[ByteSprite: the user sent this while you worked: {text}\nFinish or undo the step you are in the "
+              "middle of, then follow it.]")
 MAX_ANSWER_TOKENS = 3_000_000  # billable tokens (cached prompt counts a tenth) over every round of one answer; then tools go off
 OVER_NOTE = ("\n\n[ByteSprite: this answer has used its token budget, so tools are off now. Say what is done and "
              "what is left; the user can send another message to continue.]")
@@ -133,7 +135,8 @@ SYSTEM_PROMPT = (
     "asked for, but ask first before anything destructive, irreversible or outward (deleting, sending, buying, "
     "publishing). (8) Do the highest-value steps first and leave the work in a consistent state, since rounds "
     "and tokens run out. Finish with the result first, then what you changed, how you checked it, and what is "
-    "left. "
+    "left. A '[ByteSprite: the user sent this while you worked: ...]' note is the user steering you mid-job: "
+    "finish or undo the step you are in, then follow it. "
     "Driving Office through COM: put the whole job in one script, run it, then at most two refinement passes, "
     "since every run-and-look round is slow. A drop cap is set on the Paragraph, not its Range "
     "($p.DropCap.Enable(); $p.DropCap.Position=1; $p.DropCap.LinesToDrop=3). Never click the Office window "
@@ -422,25 +425,27 @@ def _text_only(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def ask(base_url: str, key: str, model: str, messages: list[dict[str, Any]], *,
         thinking: str = "off", timeout: float | None = None, host: ToolHost | None = None,
-        progress: Callable[[str], None] | None = None, web: bool = True) -> AiReply:
+        progress: Callable[[str], None] | None = None, web: bool = True,
+        steer: Callable[[], list[str]] | None = None) -> AiReply:
     """The reply with its model and token details. Raises ValueError with a short, key-free reason.
 
     Claude goes through its native Messages API with its own server-side search and fetch. Every other model
     may call web_search and fetch_page (run here, up to MAX_TOOL_ROUNDS times); one that refuses tools or
     images (400/422) gets the request again without them, and later requests to it skip them. Both also get
-    `host`'s local PC tools when one is given. `web=False` with no host sends no tools at all (Watch mode). `progress` (called on the worker thread) gets a short status
+    `host`'s local PC tools when one is given. `steer` returns what the user typed while it worked; that text
+    rides along with the next tool result. `web=False` with no host sends no tools at all (Watch mode). `progress` (called on the worker thread) gets a short status
     such as "Writing 840 chars" while an OpenAI-style answer streams in or a tool runs.
     """
     thinking = fit_thinking(base_url, thinking, model)
     if is_anthropic(base_url):
-        return _post_anthropic(base_url, key, model, messages, thinking, timeout, host, progress, web)
+        return _post_anthropic(base_url, key, model, messages, thinking, timeout, host, progress, web, steer)
     while True:
         tools = web and (base_url, model) not in _NO_TOOLS
         if (base_url, model) in _NO_VISION:
             messages = _text_only(messages)
         level = "default" if (base_url, model) in _NO_THINK else thinking
         try:
-            return _post(base_url, key, model, messages, level, timeout, tools, host, progress)
+            return _post(base_url, key, model, messages, level, timeout, tools, host, progress, steer)
         except ValueError as exc:
             if str(exc) != "bad request":
                 raise
@@ -728,6 +733,11 @@ def _billable(fresh: int, cached: int, completion: int) -> int:
     return fresh + cached // 10 + completion
 
 
+def _steered(steer: Callable[[], list[str]] | None) -> str:
+    """Notes the user typed while the model worked, as one text for the next tool result ('' when none)."""
+    return "".join(USER_NOTE.format(text=t[:MAX_INPUT_CHARS]) for t in (steer() if steer else []))
+
+
 def _int(value: Any) -> int:
     return value if isinstance(value, int) and value >= 0 else 0
 
@@ -767,7 +777,8 @@ def claude_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[str,
 
 def _post_anthropic(base_url: str, key: str, model: str, messages: list[dict[str, Any]], thinking: str,
                     timeout: float | None, host: ToolHost | None = None,
-                    progress: Callable[[str], None] | None = None, web: bool = True) -> AiReply:
+                    progress: Callable[[str], None] | None = None, web: bool = True,
+                    steer: Callable[[], list[str]] | None = None) -> AiReply:
     """One answer from Claude's native Messages API with its web search and fetch tools.
 
     Thinking levels become adaptive thinking plus an effort (older models without it get Anthropic's 400
@@ -834,6 +845,8 @@ def _post_anthropic(base_url: str, key: str, model: str, messages: list[dict[str
                     shots = shots or bool(shot)
                 tool_rounds += 1
                 note = [{"type": "text", "text": (BUDGET_NOTE if tool_rounds == MAX_TOOL_ROUNDS else PACE_NOTE).strip()}]                     if tool_rounds in (MAX_TOOL_ROUNDS, PACE_AT) else []
+                if said := _steered(steer):
+                    note = [*note, {"type": "text", "text": said.strip()}]
                 turns = [*turns, {"role": "assistant", "content": blocks}, {"role": "user", "content": results + note}]
                 if shots and _shot_count(turns) > KEEP_SHOTS:
                     turns = _drop_old_shots(turns)  # only the newest screenshot stays in the request
@@ -865,7 +878,8 @@ def _post_anthropic(base_url: str, key: str, model: str, messages: list[dict[str
 
 def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], thinking: str,
           timeout: float | None, tools: bool = False, host: ToolHost | None = None,
-          progress: Callable[[str], None] | None = None) -> AiReply:
+          progress: Callable[[str], None] | None = None,
+          steer: Callable[[], list[str]] | None = None) -> AiReply:
     thinks = thinking in THINKING_LEVELS and thinking != "off"
     messages = list(messages)
     read_local = any(read_local_data(m) for m in messages)  # set once a tool has returned the user's own data
@@ -939,6 +953,8 @@ def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], t
                     shot = _take_shot(host)
                     if shot:
                         shots.append(shot)
+                if said := _steered(steer):
+                    messages[-1] = {**messages[-1], "content": messages[-1]["content"] + said}
                 if shots and (base_url, model) not in _NO_VISION:
                     if shot_at is not None:  # only the newest screenshot stays in the request
                         messages[shot_at] = {"role": "user", "content": "(earlier screenshot removed)"}

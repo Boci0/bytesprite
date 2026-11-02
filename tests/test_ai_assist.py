@@ -1021,3 +1021,53 @@ def test_stream_joins_split_tool_calls() -> None:
     assert seen[0] == "Preparing list_files"
     with pytest.raises(ValueError, match="bad reply"):
         ai_assist._read_stream(_sse({"error": {"message": "x"}}), seen.append)
+
+
+def test_typing_while_it_works_steers_the_answer(monkeypatch: pytest.MonkeyPatch, api: str) -> None:
+    from src.tools.ai_assist import AiReply
+
+    app, _plugin, chat = _chat(monkeypatch, api)
+    go, took = threading.Event(), []
+
+    def fake_ask(url, key, model, messages, *, steer=None, **_kw):
+        go.wait(5)
+        took.extend(steer())  # the model's next tool round
+        return AiReply(text="done")
+
+    monkeypatch.setattr("src.ui.ai_chat.ask", fake_ask)
+    try:
+        chat.insert_text("big job")
+        chat.send()
+        chat.insert_text("use blue")
+        chat.send()  # Enter while busy: steers, does not start a second job
+        assert chat._job is not None and chat._steer_q == ["use blue"] and chat._draft.toPlainText() == ""
+        assert [h["role"] for h in chat._history] == ["user"]
+        go.set()
+        _wait(app, lambda: chat._job is None)
+        assert took == ["use blue"]
+        assert [h["content"] for h in chat._history] == ["big job", "(sent while you worked) use blue", "done"]
+    finally:
+        chat.close()
+
+
+def test_steering_typed_too_late_goes_back_to_the_draft(monkeypatch: pytest.MonkeyPatch, api: str) -> None:
+    from src.tools.ai_assist import AiReply
+
+    app, _plugin, chat = _chat(monkeypatch, api)
+    go = threading.Event()
+
+    def fake_ask(*_a, steer=None, **_kw):
+        go.wait(5)  # never takes the steering: no tool round left
+        return AiReply(text="done")
+
+    monkeypatch.setattr("src.ui.ai_chat.ask", fake_ask)
+    try:
+        chat.insert_text("job")
+        chat.send()
+        chat.insert_text("one more thing")
+        chat.send()
+        go.set()
+        _wait(app, lambda: chat._job is None)
+        assert chat._draft.toPlainText() == "one more thing" and [h["content"] for h in chat._history] == ["job", "done"]
+    finally:
+        chat.close()

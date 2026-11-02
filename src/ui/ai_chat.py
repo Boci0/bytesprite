@@ -636,6 +636,8 @@ class AiChat(QWidget):
         self._dots_timer.setInterval(120)
         self._dots_timer.timeout.connect(self._tick_dots)
         self._thinking_label: ChatText | None = None
+        self._steer_q: list[str] = []  # typed while an answer is coming; the worker takes them with its next tool result
+        self._steer_sent: list[str] = []  # the ones it took
         self._progress = ""  # what the worker is doing now (written on its thread, shown by _tick_dots)
         self._tasks: list[tuple[str, str]] = []
         self._sid: str | None = None  # this chat's saved session, made on its first answer
@@ -1104,8 +1106,28 @@ class AiChat(QWidget):
         self.clear_ask()
         run()
 
+    def _take_steer(self) -> list[str]:
+        """Worker thread: what the user typed since the last tool result."""
+        taken: list[str] = []
+        while self._steer_q:
+            taken.append(self._steer_q.pop(0))
+        self._steer_sent.extend(taken)
+        return taken
+
+    def _steer(self, text: str) -> None:
+        """The user typed while the model works: show it now, and the model reads it at its next tool round."""
+        if not text:
+            return
+        self._steer_q.append(text[:MAX_INPUT_CHARS])
+        self._add_bubble("user", text)
+        self._draft.clear()
+        self._relayout()
+
     def send(self) -> None:
         text = self._draft.toPlainText().strip()
+        if self._job is not None and not self._testing:
+            self._steer(text)
+            return
         if not text and self._actions and self._job is None:
             self._run_action(0)  # Enter on an empty draft: the best-fit action
             return
@@ -1159,6 +1181,7 @@ class AiChat(QWidget):
         self._asked = (model, thinking)
         job = self._job = AiJob(self)
         job.finished.connect(self._on_done)
+        self._steer_q, self._steer_sent = [], []
         host = None if self._testing else self._tool_host
 
         def note(text: str) -> None:
@@ -1167,10 +1190,11 @@ class AiChat(QWidget):
 
         def run() -> AiReply:
             if history is None:
-                return ask(url, key, model, messages or [], thinking=thinking, host=host)
+                return ask(url, key, model, messages or [], thinking=thinking, host=host, steer=self._take_steer)
             sent, n, summary = (compact_history(url, key, model, history) if history_chars(history) > COMPACT_AT
                                 else (history, 0, ""))
-            reply = ask(url, key, model, chat_messages(sent), thinking=thinking, host=host, progress=note)
+            reply = ask(url, key, model, chat_messages(sent), thinking=thinking, host=host, progress=note,
+                         steer=self._take_steer)
             reply.compacted, reply.summary = n, summary
             return reply
 
@@ -1196,6 +1220,8 @@ class AiChat(QWidget):
             return
         self._dots_timer.stop()
         self._hide_status()
+        said, left = self._steer_sent, self._steer_q
+        self._steer_sent, self._steer_q = [], []
         for path in getattr(self._tool_host, "take_saved", list)():
             self._add_saved_row(path)
         if error or reply is None:
@@ -1205,9 +1231,14 @@ class AiChat(QWidget):
                 self._add_bubble("error", friendly_error(error))
             else:
                 self._relayout()
-            if failed and not self._draft.toPlainText():
-                self._draft.setPlainText(failed["content"])  # nothing lost: edit and press Enter again
+            lost = "\n\n".join(filter(None, [failed["content"] if failed else "", *said, *left]))
+            if lost and not self._draft.toPlainText():
+                self._draft.setPlainText(lost)  # nothing lost: edit and press Enter again
             return
+        for text in said:  # steering the model read: part of the chat, in the order it was said
+            self._history.append({"role": "user", "content": f"(sent while you worked) {text}"})
+        if left and not self._draft.toPlainText():  # typed too late for a tool round: ready to send as the next message
+            self._draft.setPlainText("\n\n".join(left))
         if reply.compacted:
             self._history[:reply.compacted] = summary_turns(reply.summary)
             self._add_row("note", f"Compacted {reply.compacted} earlier messages into a summary to keep the chat "
@@ -1644,6 +1675,7 @@ class AiChat(QWidget):
     def _set_busy(self, busy: bool) -> None:
         self._send_btn.kind = "stop" if busy and not self._testing else "send"
         self._send_btn.setToolTip("Stop waiting for the reply" if self._send_btn.kind == "stop" else "Send (Enter)")
+        self._draft.setPlaceholderText("Ask anything" if not busy or self._testing else "Steer it: Enter sends while it works")
         self._send_btn.setEnabled(not (busy and self._testing))
         self._send_btn.update()
         self._refresh_title()
