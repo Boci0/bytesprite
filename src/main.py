@@ -335,7 +335,8 @@ def main(argv: list[str] | None = None) -> int:
             storage_override = StorageManager(Path(args[idx + 1]))
 
     controller = ByteSpriteApp(app=app, storage=storage_override)
-    install_crash_guard(lambda: controller.window._show_toast("OOPS", QColor("#E05A47")))
+    install_crash_guard(lambda: (controller.window._react("#E05A47"),
+                                 controller.window._show_toast("OOPS", QColor("#E05A47"))))
 
     # Allow graceful Ctrl+C exit when launched from a terminal
     signal.signal(signal.SIGINT, lambda *_sig: controller.quit())

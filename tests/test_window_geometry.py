@@ -576,3 +576,31 @@ def test_pet_size_keeps_feet_in_place_and_persists(qapp: QApplication, tmp_path)
         assert app.window.pet_scale == 2
     finally:
         app.shutdown()
+
+
+def test_notices_react_by_colour_and_quiet_ones_skip_the_tray(qapp: QApplication) -> None:
+    sm = PetStateMachine(PetStats())
+    shown: list[str] = []
+    win = PetWindow(state_machine=sm, animation_controller=AnimationController(size=32), auto_wander=False,
+                    on_notification=shown.append)
+    try:
+        for color, clip in (("#38B764", "cheer"), ("#EF7D57", "flinch"), ("#E05A47", "flinch")):
+            win._react(color)
+            assert win._anim.active_clip_name == clip, color
+        sm.pop_notifications = lambda: [("PUSHED", "#38B764")]  # type: ignore[method-assign]
+        win._handle_stats_change(sm.stats)
+        assert win._anim.active_clip_name == "cheer" and shown == []  # toast and cheer, no tray balloon
+
+        win._on_ai_thinking(True)
+        win._on_ai_thinking(False)
+        win._anim.play_oneshot("blink")
+        win._on_ai_answered(True)  # a quick chat answer: no fuss
+        assert win._anim.active_clip_name == "blink"
+        win._ai_since -= win.LONG_TASK_S
+        win._on_ai_answered(True)
+        assert win._anim.active_clip_name == "cheer"
+        win._on_ai_answered(False)
+        assert win._anim.active_clip_name == "flinch"
+    finally:
+        win.shutdown()
+        win.close()

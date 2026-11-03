@@ -24,6 +24,18 @@ class GitStatus:
     behind: int
 
 
+def git_notice(old: GitStatus | None, new: GitStatus) -> tuple[str, str] | None:
+    """A commit or push seen between two polls of the same branch, as a (toast, colour) notice.
+    Only `ahead` moves with `behind` unchanged: a pull, fetch or branch switch says nothing."""
+    if old is None or old.branch != new.branch or old.behind != new.behind:
+        return None
+    if new.ahead > old.ahead:
+        return ("COMMITTED", "#38B764")
+    if old.ahead > 0 and new.ahead == 0:
+        return ("PUSHED", "#38B764")
+    return None
+
+
 def parse_git_status(text: str) -> GitStatus:
     """Parse `git status --porcelain=v2 --branch` output."""
     branch, changed, ahead, behind = "?", 0, 0, 0
@@ -58,6 +70,7 @@ class ProjectPlugin:
         self._proc: subprocess.Popen[str] | None = None
         self._next_run: float = 0.0
         self._git = shutil.which("git")
+        self._notice: tuple[str, str] | None = None
 
     @property
     def tool_id(self) -> str:
@@ -113,7 +126,8 @@ class ProjectPlugin:
             code = self._proc.returncode
             self._proc = None
             if code == 0:
-                self._status, self._error = parse_git_status(out), ""
+                old, self._status, self._error = self._status, parse_git_status(out), ""
+                self._notice = git_notice(old, self._status) or self._notice
             else:
                 self._status, self._error = None, "Not a git repo"
             return True
@@ -130,6 +144,10 @@ class ProjectPlugin:
             self._error = "git failed to start"
             return True
         return False
+
+    def pop_notification(self) -> tuple[str, str] | None:
+        notice, self._notice = self._notice, None
+        return notice
 
     def desired_state(self) -> CompanionState | None:
         return None

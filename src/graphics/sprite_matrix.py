@@ -30,6 +30,7 @@ ALL_ANIMATIONS: tuple[str, ...] = (
     "yawn",
     "dangle",
     "land",
+    "flinch",
 )
 
 # Frosted-glass neutral palette: low-saturation translucent greys that read on light and dark
@@ -363,6 +364,10 @@ def _build_32_animations() -> dict[str, list[FrameMatrix]]:
         frame(dy=-1, eyes="happy", mouth="smile", shadow=7),
         frame(dy=0, eyes="open", mouth="smile"),
     ]
+    # 14. FLINCH (something failed: squeezed eyes, a quick side-to-side shudder, sweat drop, then a worried look)
+    animations["flinch"] = [
+        frame(dx=dx, dy=1, eyes="closed", mouth="sad", shadow=9, extras=((25, 8, sweat),)) for dx in (-1, 1, -1)
+    ] + [frame(eyes="plead", mouth="flat")]
     return animations
 
 
@@ -443,6 +448,7 @@ def _build_16_animations() -> dict[str, list[FrameMatrix]]:
         "yawn": [_build_16_base(eyes="closed"), _build_16_base(dy=-1, eyes="closed"), _build_16_base()],
         "dangle": [_build_16_base(dy=-1), _build_16_base(dy=-1, eyes="closed")],
         "land": [_build_16_base(dy=1, eyes="closed"), _build_16_base(eyes="happy"), _build_16_base()],
+        "flinch": [_build_16_base(dy=1, eyes="closed", extra="sweat"), _build_16_base(extra="sweat")],
     }
 
 

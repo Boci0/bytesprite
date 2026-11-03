@@ -610,6 +610,7 @@ class AiChat(QWidget):
     """The chat bar. `thinking_changed` lets the pet animate while a reply is pending."""
 
     thinking_changed = pyqtSignal(bool)
+    answered = pyqtSignal(bool)  # an answer landed (True) or failed (False); not sent when stopped
 
     WIDTH = 380
     THREAD_MAX_H = 320
@@ -1240,6 +1241,7 @@ class AiChat(QWidget):
             failed = self._history.pop() if self._history and self._history[-1]["role"] == "user" else None
             if error != "stopped":
                 play_cue("error")
+                self.answered.emit(False)
                 self._add_bubble("error", friendly_error(error))
             else:
                 self._relayout()
@@ -1283,6 +1285,7 @@ class AiChat(QWidget):
         self._add_details(row, reply)
         self._scroll_target = row
         play_cue("reply")
+        self.answered.emit(True)
         self._refresh_title()
         self._try_auto_send()
 

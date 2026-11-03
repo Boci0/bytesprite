@@ -68,7 +68,7 @@ from src.ui.quick_tools import (HOTKEY_ACTIONS, OcrJob, SnipSession, default_hot
 from src.ui.sfx import play_cue, preload_tick_sounds, prewarm as prewarm_ticks
 from src.ui.tool_wheel import WEB_SHORTCUTS, ToolWheel, ToolWheelOption, WheelLayout, google_search_url
 from src.updater import APP_DIR, FROZEN, RELEASES_URL, UpdateJob, is_installed
-from src.ui.theme import (ACCENT_HEX, GLASS_RGBA, HAIRLINE_RGBA, HOVER_RGBA, SLEEP_HEX, TEXT_DIM_HEX, TEXT_HEX,
+from src.ui.theme import (ACCENT_HEX, DANGER_HEX, GLASS_RGBA, HAIRLINE_RGBA, HOVER_RGBA, SLEEP_HEX, TEXT_DIM_HEX, TEXT_HEX,
                           paint_pixel_panel, pet_accent, qcolor, ui_font)
 
 
@@ -285,6 +285,9 @@ class PetWindow(QWidget):
     )
     TIP_FIRST_S: float = 8.0
     TIP_GAP_S: float = 30.0
+    SUCCESS_HEX: str = "#38B764"  # the green every tool uses for a finished job
+    QUIET_NOTICES: frozenset[str] = frozenset({"COMMITTED", "PUSHED"})  # toast and react, no tray balloon
+    LONG_TASK_S: float = 30.0  # an AI answer that took this long cheers when it lands
     AWAY_AFTER_S: float = 300.0  # no keyboard or mouse input this long: the idle clip becomes a nap
     PREWARM_DELAY_MS: int = 150  # a drag has usually passed DRAG_THRESHOLD_PX by now; still before the wheel opens
 
@@ -366,6 +369,7 @@ class PetWindow(QWidget):
         self._ocr_jobs: list[OcrJob] = []
         self._ai_chat: AiChat | None = None  # built on first open
         self._ai_thinking: bool = False
+        self._ai_since: float = 0.0  # when the pending AI answer started
         self._away: bool = False  # no input for AWAY_AFTER_S: idle naps (visual only, never DND)
         self._glows: list[ScreenGlow] = []
         # Image dragged out of a browser (URL or raw image), fetched only once a slice is chosen
@@ -627,14 +631,10 @@ class PetWindow(QWidget):
         notifications = self._state_machine.pop_notifications()
         if notifications:
             toast_text, color_hex = notifications[-1]
-            if toast_text == "FOCUS DONE":
-                self._anim.play_oneshot("cheer")
-                self._schedule_next_anim_tick()
-            elif self._state_machine.state == PetState.IDLE:
-                self._anim.play_oneshot("spin")
-                self._schedule_next_anim_tick()
+            # FOCUS DONE is ice-blue, but a finished focus session is the biggest win there is
+            self._react(self.SUCCESS_HEX if toast_text == "FOCUS DONE" else color_hex or self.SUCCESS_HEX)
             self._show_toast(toast_text, QColor(color_hex or "#38B764"))
-            if self._on_notification is not None:
+            if self._on_notification is not None and toast_text not in self.QUIET_NOTICES:
                 self._on_notification(toast_text)
             return
         if self._is_hud_visible():
@@ -1579,6 +1579,7 @@ class PetWindow(QWidget):
         """Build the chat card hidden (about 0.4s of widget setup on the Qt thread)."""
         self._ai_chat = AiChat(plugin, on_attach_screen=lambda: self.trigger_snip("ask"), tool_host=AiToolHost(self))
         self._ai_chat.thinking_changed.connect(self._on_ai_thinking)
+        self._ai_chat.answered.connect(self._on_ai_answered)
 
     def ensure_ai_chat(self) -> AiChat | None:
         """Open the chat if it is closed (never toggles it shut, unlike open_ai_chat)."""
@@ -1608,7 +1609,30 @@ class PetWindow(QWidget):
     def _sprite_global_rect(self) -> QRect:
         return QRect(self.mapToGlobal(self._sprite_rect.topLeft()), self._sprite_rect.size())
 
+    def _react(self, color_hex: str) -> None:
+        """One-shot reaction to a notice by its colour: green success cheers, coral failure flinches (in any
+        state), anything else (aborted, info) spins while idle."""
+        if QColor(color_hex) == QColor(self.SUCCESS_HEX):
+            clip = "cheer"
+        elif pet_accent(color_hex) == QColor(DANGER_HEX):
+            clip = "flinch"
+        elif self._state_machine.state == PetState.IDLE:
+            clip = "spin"
+        else:
+            return
+        self._anim.play_oneshot(clip)
+        self._schedule_next_anim_tick()
+
+    def _on_ai_answered(self, ok: bool) -> None:
+        # A quick answer is just a chat; only a long job (an agentic task) earns a cheer
+        if not ok:
+            self._react("#EF7D57")
+        elif time.monotonic() - self._ai_since >= self.LONG_TASK_S:
+            self._react(self.SUCCESS_HEX)
+
     def _on_ai_thinking(self, thinking: bool) -> None:
+        if thinking and not self._ai_thinking:
+            self._ai_since = time.monotonic()
         self._ai_thinking = thinking
         if not self._is_shutting_down:
             self._sync_animation_to_pet_state(self._state_machine.state)

@@ -677,3 +677,15 @@ def test_port_kill_guards() -> None:
     assert all(1024 <= p.port < 49152 for p in ports)
     ok, toast, _ = SystemMonitorPlugin().execute_action("sysmon:kill:99999999:1")
     assert (ok, toast) == (True, "PORT FREE")
+
+
+def test_git_notice_sees_commits_and_pushes_only() -> None:
+    from src.tools.project import GitStatus, git_notice
+
+    base = GitStatus("main", 2, 1, 0)
+    assert git_notice(None, base) is None  # first poll: nothing to compare
+    assert git_notice(base, GitStatus("main", 0, 2, 0)) == ("COMMITTED", "#38B764")
+    assert git_notice(base, GitStatus("main", 0, 0, 0)) == ("PUSHED", "#38B764")
+    assert git_notice(base, GitStatus("main", 5, 1, 0)) is None  # edits only
+    assert git_notice(base, GitStatus("dev", 0, 3, 0)) is None  # branch switch
+    assert git_notice(base, GitStatus("main", 0, 0, 2)) is None  # behind moved: a fetch or pull, not a push
