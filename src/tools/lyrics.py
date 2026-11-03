@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from src.engine.models import CompanionState, HudBar, HudData, ToolMenuItem
+from src.tools.ai_tools import _end_job, _kill_on_close_job
 
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 _LRC_TIME = re.compile(r"\[(\d+):(\d+(?:\.\d+)?)\]")
@@ -204,6 +205,8 @@ class _SmtcReader:
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
             text=True, encoding="utf-8", errors="replace", creationflags=_NO_WINDOW,
         )
+        # The watcher loops forever and ignores a closed pipe: the job ends it when the pet dies, even on a crash
+        self._job = _kill_on_close_job(self._proc.pid)
         self._snap: dict[str, Any] = {}
         self._thread = threading.Thread(target=self._pump, daemon=True)
         self._thread.start()
@@ -225,6 +228,9 @@ class _SmtcReader:
         return self._snap
 
     def close(self) -> None:
+        if self._job is not None:
+            job, self._job = self._job, None
+            _end_job(job)
         try:
             self._proc.kill()
         except OSError:

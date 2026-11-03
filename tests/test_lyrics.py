@@ -217,3 +217,30 @@ def test_broken_lrclib_reply_is_a_miss_not_a_dead_lookup(monkeypatch, tmp_path) 
         assert lyrics.fetch_synced_lyrics("Song", "Artist", 200.0) == []
     finally:
         server.close()
+
+
+def test_media_watcher_dies_when_the_pet_crashes() -> None:
+    """An orphaned watcher kept the app folder as its cwd forever and blocked standalone updates."""
+    import os
+    import subprocess
+    import sys
+
+    import pytest
+
+    if os.name != "nt":
+        pytest.skip("Windows job objects")
+    crash = ("from src.tools.lyrics import _SmtcReader; import os; r = _SmtcReader(); "
+             "assert r._job is not None; print(r._proc.pid, flush=True); os._exit(3)")
+    out = subprocess.run([sys.executable, "-c", crash], capture_output=True, text=True, timeout=60,
+                         cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    assert out.returncode == 3, out.stderr
+    pid = int(out.stdout.strip())
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        alive = subprocess.run(["tasklist", "/fi", f"PID eq {pid}", "/fo", "csv", "/nh"],
+                               capture_output=True, text=True).stdout
+        if "powershell" not in alive.lower():
+            return
+        time.sleep(0.2)
+    subprocess.run(["taskkill", "/f", "/pid", str(pid)], capture_output=True)
+    raise AssertionError("the media watcher outlived the crashed pet")

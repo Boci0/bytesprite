@@ -33,6 +33,7 @@ TIPS_KEY = "tips"
 SIZE_KEY = "size"
 HOTKEYS_KEY = "hotkeys"
 
+UPDATE_FAILED_FLAG = "--update-failed"
 SIMULATION_TICK_INTERVAL_MS: int = 2_000
 AUTO_SAVE_INTERVAL_MS: int = 60_000
 
@@ -315,14 +316,16 @@ def _finish_update(args: list[str]) -> int:
     setup_logging()
     log = logging.getLogger("src.main")
     app_dir: Path | None = APP_DIR.with_name(APP_DIR.name.removesuffix(".new"))
+    flags: list[str] = []
     try:
         app_dir = finish_frozen_update(int(args[args.index("--finish-update") + 1]))
     except (OSError, ValueError, IndexError) as exc:
         log.warning("finishing the update failed, starting the old build: %s: %s", type(exc).__name__, exc)
+        flags.append(UPDATE_FAILED_FLAG)  # the old build reports it instead of looking updated
     if app_dir is None:
         log.warning("finishing the update: the old copy did not exit")
         return 1
-    subprocess.Popen([str(app_dir / FROZEN_EXE)], cwd=str(app_dir.parent), close_fds=True,
+    subprocess.Popen([str(app_dir / FROZEN_EXE), *flags], cwd=str(app_dir.parent), close_fds=True,
                      creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
     return 0
 
@@ -362,6 +365,8 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGINT, lambda *_sig: controller.quit())
 
     controller.show()
+    if UPDATE_FAILED_FLAG in args:
+        controller.window._on_update_done(None, "error", "could not replace the app folder (Settings > Copy Log)", True)
     return app.exec()
 
 

@@ -330,3 +330,24 @@ def test_install_ps1_verifier_matches_python_signer(tmp_path: Path) -> None:
     out = subprocess.run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(tmp_path / "check.ps1")],
                          capture_output=True, text=True, timeout=120)
     assert out.stdout.split() == ["True", "False", "False"], out.stderr
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_update_helper_tells_the_old_build_a_swap_failed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+                                                         fails: bool) -> None:
+    from src import main as main_mod
+
+    def finish(_pid: int) -> Path:
+        if fails:
+            raise PermissionError("folder in use")
+        return tmp_path / "app"
+
+    started: list[list[str]] = []
+    monkeypatch.setattr(main_mod, "finish_frozen_update", finish)
+    monkeypatch.setattr(main_mod, "setup_logging", lambda: None)
+    monkeypatch.setattr(main_mod.os, "chdir", lambda _p: None)
+    import subprocess
+
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **_kw: started.append(argv))
+    assert main_mod._finish_update(["ByteSprite.exe", "--finish-update", "1"]) == 0
+    assert (main_mod.UPDATE_FAILED_FLAG in started[0][1:]) is fails

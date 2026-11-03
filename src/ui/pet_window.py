@@ -1190,13 +1190,14 @@ class PetWindow(QWidget):
         if install:
             self._show_toast("CHECKING", QColor("#8A9AF2"))
 
-    def _on_update_done(self, job: UpdateJob, status: str, tag: str, install: bool) -> None:
+    def _on_update_done(self, job: UpdateJob | None, status: str, tag: str, install: bool) -> None:
         if job in self._update_jobs:
             self._update_jobs.remove(job)
         if status == "installed":
-            self._show_toast("UPDATED", QColor("#38B764"))
+            # A frozen build is only staged: the swap after restart can still fail, and the old build then says so
+            self._show_toast("RESTARTING" if FROZEN else "UPDATED", QColor("#38B764"))
             if self._on_notification is not None:
-                self._on_notification(f"Updated to {tag}, restarting")
+                self._on_notification(f"{'Installing' if FROZEN else 'Updated to'} {tag}, restarting")
             QTimer.singleShot(1500, self.restart)
         elif status == "available":
             self._show_toast(f"NEW {tag}", QColor("#FFCD75"))
