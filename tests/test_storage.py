@@ -68,6 +68,13 @@ class TestStorageManager:
         assert loaded.stats.cpu_usage == 0.0
         assert (tmp_path / "state.json.corrupt").exists()
 
+    def test_non_object_root_is_backed_up(self, tmp_path: Path) -> None:
+        state_file = tmp_path / "state.json"
+        state_file.write_text("[1, 2]", encoding="utf-8")
+
+        assert StorageManager(state_file).load().state == PetState.IDLE
+        assert (tmp_path / "state.json.corrupt").read_text(encoding="utf-8") == "[1, 2]"
+
     @pytest.mark.parametrize(
         "payload",
         [

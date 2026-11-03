@@ -179,6 +179,7 @@ class StorageManager:
                 "Invalid root JSON type in %s; falling back to defaults.",
                 self._state_path,
             )
+            self._backup_corrupt_file()  # the next save would overwrite it
             return PetSaveData()
 
         stats_raw = payload.get("stats")

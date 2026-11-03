@@ -161,10 +161,7 @@ class ByteSpriteApp:
         self.window.raise_()
 
     def _on_simulation_tick(self) -> None:
-        self.state_machine.tick(1)
-        desired = self._desired_tick_interval_ms()
-        if self.sim_timer.interval() != desired:
-            self.sim_timer.setInterval(desired)
+        self.state_machine.tick(1)  # its stats-change event resyncs the timer interval
 
     def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.Context:
