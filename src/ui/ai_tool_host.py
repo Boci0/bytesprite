@@ -102,10 +102,17 @@ class AiToolHost(QObject):
         self.procs = BackgroundProcs()
         self.cancel = threading.Event()  # the chat swaps in a fresh one per answer and sets it on Stop
         self._call.connect(self._on_call)
+        self._idle_timer = QTimer(self)
+        self._idle_timer.timeout.connect(self._close_idle_mcp)
+        self._idle_timer.start(60_000)
         app = QCoreApplication.instance()
         if app is not None:
             app.aboutToQuit.connect(self.mcp.close)
             app.aboutToQuit.connect(self.procs.stop_all)
+
+    def _close_idle_mcp(self) -> None:
+        if getattr(self._win._ai_chat, "_job", None) is None:  # never mid-answer
+            threading.Thread(target=self.mcp.close_idle, daemon=True).start()  # taskkill blocks briefly
 
     @property
     def specs(self) -> list[dict[str, Any]]:

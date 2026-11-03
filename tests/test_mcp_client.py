@@ -218,3 +218,35 @@ def test_destructive_mcp_calls_ask_every_time_with_their_arguments(hub: McpHub) 
         app.processEvents()
     assert asked[0] == ("fake__wipe", '{"path": "a"}', "destructive tool")
     assert asked[1][2] and asked[2] == ("fake__echo", '{"text": "hi"}', "")
+
+
+def _children(pid: int) -> list[str]:
+    import subprocess
+
+    out = subprocess.run(["powershell", "-NoProfile", "-Command",
+                          f"(Get-CimInstance Win32_Process -Filter 'ParentProcessId={pid}').ProcessId"],
+                         capture_output=True, text=True).stdout
+    return out.split()
+
+
+def test_close_kills_the_whole_server_tree_and_idle_servers_close(tmp_path: Path) -> None:
+    import subprocess
+
+    path = tmp_path / "mcp.json"
+    # like npx: a cmd.exe wrapper whose child is the real server
+    path.write_text(json.dumps({"mcpServers": {"wrapped": {"command": "cmd", "args": ["/c", sys.executable, FAKE]}}}),
+                    encoding="utf-8")
+    hub = McpHub(path)
+    try:
+        assert hub.specs()
+        wrapper = hub._servers["wrapped"]._proc.pid
+        inner = [p for p in _children(wrapper) if int(p) != wrapper]
+        assert inner  # the python server under cmd.exe
+        assert not hub.close_idle(60)  # just used
+        assert hub.close_idle(0)
+        assert hub.server_of("wrapped__echo") is None and not hub.close_idle(0)  # nothing left to close
+        alive = subprocess.run(["tasklist", "/FI", f"PID eq {inner[0]}", "/NH"], capture_output=True, text=True).stdout
+        assert inner[0] not in alive  # the grandchild died with the wrapper
+        assert hub.specs()  # the next answer starts them again
+    finally:
+        hub.close()
