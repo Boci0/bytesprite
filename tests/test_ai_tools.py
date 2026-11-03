@@ -840,3 +840,58 @@ def test_steering_rides_with_the_next_tool_result(monkeypatch: pytest.MonkeyPatc
     ai_assist._post("https://api.example/v1", "k", "m", [{"role": "user", "content": "go"}], "off", 5, True, _Host(), steer=steer)
     tool = [m for m in sent[1]["messages"] if m["role"] == "tool"][0]["content"]
     assert "use blue instead" in tool and "Finish or undo" in tool
+
+
+def test_stop_ends_the_tool_loop_and_kills_a_running_command(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import threading
+    import time
+
+    from src.tools import ai_tools
+
+    cancel = threading.Event()
+
+    class Stopper(_Host):
+        def run(self, name: str, args: dict) -> str:
+            cancel.set()  # the user presses Stop while the first tool runs
+            return super().run(name, args)
+
+    claude = {"stop_reason": "tool_use", "content": [{"type": "tool_use", "id": "t", "name": "list_files", "input": {}}] * 2}
+    openai = {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+        {"id": "c", "function": {"name": "list_files", "arguments": "{}"}}] * 2}}]}
+    for post, reply in ((lambda h: ai_assist._post_anthropic("https://api.anthropic.com/v1", "k", "m", [
+            {"role": "user", "content": "go"}], "off", 5, h, cancel=cancel), claude),
+                        (lambda h: ai_assist._post("https://api.example/v1", "k", "m", [
+            {"role": "user", "content": "go"}], "off", 5, True, h, cancel=cancel), openai)):
+        cancel.clear()
+        monkeypatch.setattr(ai_assist, "_request", lambda *a, r=reply: r)
+        host = Stopper()
+        with pytest.raises(ValueError, match="stopped"):
+            post(host)
+        assert len(host.calls) == 1  # the second call of the same round never ran
+
+    cancel.clear()
+    threading.Timer(0.5, cancel.set).start()
+    started = time.monotonic()
+    assert ai_tools.run_command(repo, "ping -n 30 127.0.0.1 >nul", cancel) == "error: stopped by the user"
+    assert time.monotonic() - started < 5
+
+
+def test_computer_batch_runs_steps_in_order_and_stops_at_an_error() -> None:
+    import threading
+    from types import SimpleNamespace
+
+    from src.ui.ai_tool_host import AiToolHost
+
+    done: list[tuple[str, dict]] = []
+    fake = SimpleNamespace(cancel=threading.Event(),
+                           _computer=lambda n, a: done.append((n, a)) or ("error: no" if a.get("keys") == "bad" else "ok"))
+    steps = [{"tool": "mouse_click", "x": 1, "y": 2}, {"tool": "type_text", "text": "hi"}, {"tool": "press_key", "keys": "enter"}]
+    assert AiToolHost._batch(fake, steps) == "1. ok\n2. ok\n3. ok"
+    assert done[0] == ("mouse_click", {"x": 1, "y": 2})
+    done.clear()
+    out = AiToolHost._batch(fake, [{"tool": "press_key", "keys": "bad"}, {"tool": "press_key", "keys": "enter"}])
+    assert out.endswith("stopped at step 1 of 2") and len(done) == 1
+    assert AiToolHost._batch(fake, [{"tool": "run_command"}]).startswith("error: step 1")
+    assert AiToolHost._batch(fake, []).startswith("error")
+    fake.cancel.set()
+    assert AiToolHost._batch(fake, steps) == "error: stopped by the user"

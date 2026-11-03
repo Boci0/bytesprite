@@ -30,6 +30,7 @@ import re
 import subprocess
 import tempfile
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,7 @@ MAX_SCANNED = 20000  # entries one find or search walks before giving up
 MAX_DIFF_CHARS = 4000  # diff shown in the chat for the user to approve
 MAX_NOTE_CHARS = 300  # one memory note
 MAX_EDITS = 12  # files one edit_files call changes
+MAX_BATCH_STEPS = 12  # steps one computer_batch call runs
 MAX_TASKS = 20  # items on the task list
 MAX_TASK_CHARS = 120
 TASK_STATUSES = ("pending", "in_progress", "done")
@@ -108,6 +110,11 @@ TOOL_SPECS: list[dict[str, Any]] = [
         {"text": {"type": "string"}}, ("text",)),
     _fn("press_key", "Press a key or shortcut such as enter, tab, esc, ctrl+s, alt+tab, ctrl+shift+t, f5.",
         {"keys": {"type": "string"}}, ("keys",)),
+    _fn("computer_batch", "Run several mouse_click, type_text, press_key and scroll steps in one call, in order, "
+        "stopping at the first error. Use it whenever you can predict the next steps (click a field, type, press "
+        "enter; or a known chain of shortcuts): one round instead of several. Each step is an object with "
+        "\"tool\" plus that tool's arguments, e.g. {\"tool\": \"mouse_click\", \"x\": 10, \"y\": 20}. Max "
+        f"{MAX_BATCH_STEPS} steps.", {"steps": {"type": "array", "items": {"type": "object"}}}, ("steps",)),
     _fn("scroll", "Scroll the wheel at the cursor, or at x and y when given: positive amounts scroll down, negative "
         "up, one notch each (max 20).", {"amount": {"type": "integer"}, "x": {"type": "integer"},
                                         "y": {"type": "integer"}}, ("amount",)),
@@ -186,8 +193,8 @@ TOOL_SPECS: list[dict[str, Any]] = [
         {"note": {"type": "string", "description": "Text from the note to remove"}}, ("note",)),
 ]
 # the user allows each call in the chat (or all of them for a chat)
-COMPUTER_TOOLS = {"mouse_click", "type_text", "press_key", "scroll"}
-APPROVED_TOOLS = COMPUTER_TOOLS | {"edit_file", "edit_files", "run_command", "start_background", "add_mcp_server", "add_skill", "update_skill", "remember", "forget"}
+COMPUTER_TOOLS = {"mouse_click", "type_text", "press_key", "scroll"}  # computer_batch runs these as its steps
+APPROVED_TOOLS = COMPUTER_TOOLS | {"computer_batch", "edit_file", "edit_files", "run_command", "start_background", "add_mcp_server", "add_skill", "update_skill", "remember", "forget"}
 FILE_TOOLS = {"list_files", "read_file", "find_files", "search_text"}
 
 
@@ -509,9 +516,9 @@ def destructive_reason(command: str) -> str:
     return found.group(0).strip() if found else ""
 
 
-def run_command(root: Path | None, command: Any) -> str:
+def run_command(root: Path | None, command: Any, cancel: threading.Event | None = None) -> str:
     """Exit code and output of an allowed cmd.exe command in `root` (the Project Folder, or the host's fallback
-    home folder); the whole tree dies on timeout."""
+    home folder); the whole tree dies on timeout or once `cancel` is set (the chat's Stop)."""
     try:
         cwd = resolve(root, "")
     except ValueError as exc:
@@ -527,12 +534,19 @@ def run_command(root: Path | None, command: Any) -> str:
                                     stderr=subprocess.STDOUT, creationflags=flags)
         except OSError as exc:
             return f"error: could not start ({exc.strerror or 'failed'})"
-        try:
-            proc.wait(timeout=COMMAND_TIMEOUT_S)
+        end = time.monotonic() + COMMAND_TIMEOUT_S
+        while proc.poll() is None and time.monotonic() < end and not (cancel is not None and cancel.is_set()):
+            try:
+                proc.wait(timeout=0.25)
+            except subprocess.TimeoutExpired:
+                pass
+        if proc.poll() is not None:
             head = f"exit code {proc.returncode}"
-        except subprocess.TimeoutExpired:
+        else:
             _kill_tree(proc.pid)
             proc.wait()
+            if cancel is not None and cancel.is_set():
+                return "error: stopped by the user"
             head = f"stopped after {COMMAND_TIMEOUT_S} s"
             if re.search(r"GetActiveObject|Application|Word|Excel|PowerPoint", command, re.I):
                 head += " (an Office app is probably waiting on an open dialog: read_screen, press esc, retry)"

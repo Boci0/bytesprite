@@ -628,6 +628,7 @@ class AiChat(QWidget):
         self._plugin = plugin
         self._on_attach_screen = on_attach_screen
         self._tool_host = tool_host  # PC tools the model may call (None: web tools only)
+        self._cancel = threading.Event()  # set by Stop; a fresh one per answer
         self._history: list[dict[str, str]] = []
         self._attachments: list[Attachment] = []
         self._chips: list[Chip] = []
@@ -1176,9 +1177,11 @@ class AiChat(QWidget):
             self.send()
 
     def stop(self) -> None:
-        """Drop the pending reply (the request may still finish, but its answer is ignored)."""
+        """End the pending reply: its worker runs no further tool or request, and a request already in flight is
+        ignored when it lands."""
         if self._job is None or self._testing:
             return
+        self._cancel.set()  # no further request or tool runs; a running command is killed
         if self._pending is not None:  # the worker is waiting on it
             self._pending(None)
         job, self._job = self._job, None
@@ -1196,6 +1199,9 @@ class AiChat(QWidget):
         job.finished.connect(self._on_done)
         self._steer_q, self._steer_sent = [], []
         host = None if self._testing else self._tool_host
+        cancel = self._cancel = threading.Event()
+        if host is not None:
+            host.cancel = cancel
 
         def note(text: str) -> None:
             if self._job is job:  # a stopped answer's worker may still be talking
@@ -1203,11 +1209,11 @@ class AiChat(QWidget):
 
         def run() -> AiReply:
             if history is None:
-                return ask(url, key, model, messages or [], thinking=thinking, host=host, steer=self._take_steer)
+                return ask(url, key, model, messages or [], thinking=thinking, host=host, steer=self._take_steer, cancel=cancel)
             sent, n, summary = (compact_history(url, key, model, history) if history_chars(history) > COMPACT_AT
                                 else (history, 0, ""))
             reply = ask(url, key, model, chat_messages(sent), thinking=thinking, host=host, progress=note,
-                         steer=self._take_steer)
+                         steer=self._take_steer, cancel=cancel)
             reply.compacted, reply.summary = n, summary
             return reply
 

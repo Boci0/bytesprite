@@ -490,9 +490,9 @@ def test_chat_stop_drops_the_pending_reply(monkeypatch: pytest.MonkeyPatch, api:
         chat.send()
         assert chat._send_btn.kind == "stop"
         chat._send_or_stop()  # the send button doubles as Stop while waiting
+        assert chat._cancel.is_set()  # the worker runs no further request or tool
         assert chat._job is None and chat._send_btn.kind == "send" and chat._history == []
         assert chat._draft.toPlainText() == "long question"
-        _wait(app, lambda: len(_Api.seen) == 1)
         for _ in range(30):
             app.processEvents()
         assert chat._history == [] and plugin.asks == 0  # the late reply is ignored
@@ -513,6 +513,7 @@ def test_chat_stop_keeps_the_job_alive_until_its_thread_is_done(monkeypatch: pyt
     try:
         chat.insert_text("question")
         chat.send()
+        _wait(app, lambda: len(_Api.seen) == 1)  # Stop before the request would now skip it altogether
         chat.stop()
         end = time.monotonic() + 1.2
         while time.monotonic() < end:

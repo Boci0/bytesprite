@@ -24,7 +24,7 @@ from PyQt6.QtGui import QCursor, QGuiApplication, QImage
 from PyQt6.QtWidgets import QFileDialog
 
 from src.tools import computer
-from src.tools.ai_tools import (COMPUTER_TOOLS, FILE_TOOLS, PET_ACTIONS, TOOL_SPECS, BackgroundProcs, apply_edits,
+from src.tools.ai_tools import (COMPUTER_TOOLS, MAX_BATCH_STEPS, FILE_TOOLS, PET_ACTIONS, TOOL_SPECS, BackgroundProcs, apply_edits,
                                 computer_action, destructive_reason, is_secret, load_skill, memory_path, parse_boxes, plan_edit,
                                 plan_edits, plan_memory, plan_skill_update, resolve, run_command, run_file_tool, save_args,
                                 skill_text, skills_dir, task_list, write_memory, write_skill)
@@ -100,6 +100,7 @@ class AiToolHost(QObject):
         self._shot = ""
         self.mcp = mcp or McpHub()
         self.procs = BackgroundProcs()
+        self.cancel = threading.Event()  # the chat swaps in a fresh one per answer and sets it on Stop
         self._call.connect(self._on_call)
         app = QCoreApplication.instance()
         if app is not None:
@@ -163,7 +164,7 @@ class AiToolHost(QObject):
             if not self._allowed("run_command", f"The model wants to run in {where}:\n\n{command.strip()}", "commands",
                                  risk):
                 return "error: the user declined this command"
-            return run_command(cwd, command)
+            return run_command(cwd, command, self.cancel)
         if name == "start_background":
             command = args.get("command")
             if not isinstance(command, str) or not command.strip():
@@ -250,6 +251,8 @@ class AiToolHost(QObject):
             return parse_boxes(lines, image.width(), image.height(), elements, note)
         if name in COMPUTER_TOOLS:
             return self._computer(name, args)
+        if name == "computer_batch":
+            return self._batch(args.get("steps"))
         if name == "save_file":
             try:
                 file_name, content = save_args(args)
@@ -272,6 +275,23 @@ class AiToolHost(QObject):
             return "error: the user declined this action"
         out = self._on_gui(lambda done: self._act(done, name, args), 90.0)  # up to 2000 chars at 20 ms
         return out if isinstance(out, str) else "error: the action did not finish in time"
+
+    def _batch(self, steps: Any) -> str:
+        """computer_batch: each step through `_computer` (same approvals), stopping at the first error or Stop."""
+        if not isinstance(steps, list) or not steps or len(steps) > MAX_BATCH_STEPS:
+            return f"error: give 1 to {MAX_BATCH_STEPS} steps"
+        cancel, lines = self.cancel, []
+        for i, step in enumerate(steps, 1):
+            tool = step.get("tool") if isinstance(step, dict) else None
+            if tool not in COMPUTER_TOOLS:
+                return "\n".join([*lines, f"error: step {i} needs \"tool\" set to one of {', '.join(sorted(COMPUTER_TOOLS))}"])
+            if cancel.is_set():
+                return "\n".join([*lines, "error: stopped by the user"])
+            out = self._computer(tool, {k: v for k, v in step.items() if k != "tool"})
+            lines.append(f"{i}. {out}")
+            if out.startswith("error"):
+                return "\n".join([*lines, f"error: stopped at step {i} of {len(steps)}"])
+        return "\n".join(lines)
 
     def _act(self, done: Callable[[Any], None], name: str, args: dict[str, Any]) -> None:
         """Hide the pet and the chat (so they get no click and no keys), act, then bring them back unfocused."""

@@ -129,7 +129,7 @@ SYSTEM_PROMPT = (
     "changes the result and looking cannot settle it, otherwise decide and go. (2) Look before acting: read the "
     "file, document, clipboard or screen first, never guess paths, names or versions. (3) Take the most precise "
     "tool: files, CLIs, APIs and COM beat clicking; screen tools only for what nothing else reaches, and check "
-    "each click's effect by reading, not assuming. (4) Batch: one script or one edit_files call beats many tiny "
+    "each click's effect by reading, not assuming. (4) Batch: one script, one edit_files or one computer_batch call beats many tiny "
     "steps; delete scratch files you created. (5) Verify every change by reading the result back (tests, the "
     "file, the document's properties) and never say done without that evidence. (6) When a step fails, read "
     "the error and fix its cause; after two similar failures change approach, never repeat the same call. "
@@ -428,26 +428,27 @@ def _text_only(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def ask(base_url: str, key: str, model: str, messages: list[dict[str, Any]], *,
         thinking: str = "off", timeout: float | None = None, host: ToolHost | None = None,
         progress: Callable[[str], None] | None = None, web: bool = True,
-        steer: Callable[[], list[str]] | None = None) -> AiReply:
+        steer: Callable[[], list[str]] | None = None, cancel: threading.Event | None = None) -> AiReply:
     """The reply with its model and token details. Raises ValueError with a short, key-free reason.
 
     Claude goes through its native Messages API with its own server-side search and fetch. Every other model
     may call web_search and fetch_page (run here, up to MAX_TOOL_ROUNDS times); one that refuses tools or
     images (400/422) gets the request again without them, and later requests to it skip them. Both also get
     `host`'s local PC tools when one is given. `steer` returns what the user typed while it worked; that text
-    rides along with the next tool result. `web=False` drops web_search and fetch_page, so with no host no tools are sent (a Watch pre-fetch). `progress` (called on the worker thread) gets a short status
+    rides along with the next tool result. Once `cancel` is set (Stop) no further request or tool runs and
+    ValueError("stopped") ends the answer. `web=False` drops web_search and fetch_page, so with no host no tools are sent (a Watch pre-fetch). `progress` (called on the worker thread) gets a short status
     such as "Writing 840 chars" while an OpenAI-style answer streams in or a tool runs.
     """
     thinking = fit_thinking(base_url, thinking, model)
     if is_anthropic(base_url):
-        return _post_anthropic(base_url, key, model, messages, thinking, timeout, host, progress, web, steer)
+        return _post_anthropic(base_url, key, model, messages, thinking, timeout, host, progress, web, steer, cancel)
     while True:
         tools = (web or host is not None) and (base_url, model) not in _NO_TOOLS
         if (base_url, model) in _NO_VISION:
             messages = _text_only(messages)
         level = "default" if (base_url, model) in _NO_THINK else thinking
         try:
-            return _post(base_url, key, model, messages, level, timeout, tools, host, progress, steer, web)
+            return _post(base_url, key, model, messages, level, timeout, tools, host, progress, steer, web, cancel)
         except ValueError as exc:
             if str(exc) != "bad request":
                 raise
@@ -780,7 +781,7 @@ def claude_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[str,
 def _post_anthropic(base_url: str, key: str, model: str, messages: list[dict[str, Any]], thinking: str,
                     timeout: float | None, host: ToolHost | None = None,
                     progress: Callable[[str], None] | None = None, web: bool = True,
-                    steer: Callable[[], list[str]] | None = None) -> AiReply:
+                    steer: Callable[[], list[str]] | None = None, cancel: threading.Event | None = None) -> AiReply:
     """One answer from Claude's native Messages API with its web search and fetch tools.
 
     Thinking levels become adaptive thinking plus an effort (older models without it get Anthropic's 400
@@ -811,6 +812,7 @@ def _post_anthropic(base_url: str, key: str, model: str, messages: list[dict[str
                                 "max_tokens": MAX_THINKING_TOKENS if effort else MAX_REPLY_TOKENS,
                                 **({"thinking": {"type": "adaptive", "display": "summarized"}, "output_config": {"effort": effort}}
                                    if effort else {})}
+        _check(cancel)
         if tools and (tool_rounds >= MAX_TOOL_ROUNDS or _stuck(fails) or paid >= MAX_ANSWER_TOKENS):  # same tool list (thinking is bound to it), but answer-only
             body["tool_choice"] = {"type": "none"}
         data = _request(base_url, key, "/messages", body, timeout or THINKING_TIMEOUT_S, progress)
@@ -834,6 +836,7 @@ def _post_anthropic(base_url: str, key: str, model: str, messages: list[dict[str
                 results = []
                 shots = False
                 for b in (b for b in blocks if b.get("type") == "tool_use"):
+                    _check(cancel)
                     seen = json.dumps([t["content"] for t in turns if t["role"] == "user"], ensure_ascii=False) if read_local else None
                     out = _run_tool(b["name"], b.get("input"), host, seen)
                     read_local = read_local or b["name"] in LOCAL_DATA_TOOLS or MCP_SEP in b["name"]
@@ -881,7 +884,8 @@ def _post_anthropic(base_url: str, key: str, model: str, messages: list[dict[str
 def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], thinking: str,
           timeout: float | None, tools: bool = False, host: ToolHost | None = None,
           progress: Callable[[str], None] | None = None,
-          steer: Callable[[], list[str]] | None = None, web: bool = True) -> AiReply:
+          steer: Callable[[], list[str]] | None = None, web: bool = True,
+          cancel: threading.Event | None = None) -> AiReply:
     thinks = thinking in THINKING_LEVELS and thinking != "off"
     messages = list(messages)
     read_local = any(read_local_data(m) for m in messages)  # set once a tool has returned the user's own data
@@ -891,6 +895,7 @@ def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], t
     shot_at: int | None = None  # index in `messages` of the screenshot message
     fails: list[Any] = [0, 0, None]
     for round_ in range(MAX_TOOL_ROUNDS + 1):
+        _check(cancel)
         shots: list[str] = []
         body: dict[str, Any] = {"model": model, "messages": messages,
                                 "max_tokens": MAX_THINKING_TOKENS if thinks else MAX_REPLY_TOKENS,
@@ -939,6 +944,7 @@ def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], t
                 messages.append({k: v for k, v in message.items()
                                  if k in ("role", "content", "tool_calls", "reasoning_content") and v is not None})
                 for call in calls:
+                    _check(cancel)
                     fn = call["function"]
                     # never the model's own turns: a URL it wrote itself would vouch for itself
                     seen = json.dumps([m.get("content") for m in messages if m.get("role") != "assistant"],
@@ -978,6 +984,11 @@ def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], t
             raise ValueError("cut off" if reply.cut_off else "empty reply")
         return reply
     raise ValueError("bad reply")
+
+
+def _check(cancel: threading.Event | None) -> None:
+    if cancel is not None and cancel.is_set():
+        raise ValueError("stopped")
 
 
 def _stuck(state: list[Any]) -> bool:
