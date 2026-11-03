@@ -23,7 +23,7 @@ from src.storage.storage_manager import StorageManager, log_path, repair_autosta
 from src.ui.pet_window import PetWindow, build_app_icon
 from src.ui.quick_tools import GlobalHotkeys
 from src.ui.theme import APP_STYLESHEET
-from src.updater import APP_DIR, FROZEN, is_installed, remove_old_build
+from src.updater import APP_DIR, FROZEN, FROZEN_EXE, finish_frozen_update, is_installed, remove_old_build
 
 # Stored beside plugin state in state.json "tools"; not a ToolPlugin, so it never joins the HUD cycle
 RECENT_FILES_KEY = "recent"
@@ -310,12 +310,35 @@ def install_crash_guard(on_error: Callable[[], None] | None = None) -> Callable[
     return hook
 
 
+def _finish_update(args: list[str]) -> int:
+    """`app.new/ByteSprite.exe --finish-update <pid>`: swap the staged build in, then start it."""
+    import subprocess
+
+    os.chdir(APP_DIR.parent)
+    setup_logging()
+    log = logging.getLogger("src.main")
+    app_dir: Path | None = APP_DIR.with_name(APP_DIR.name.removesuffix(".new"))
+    try:
+        app_dir = finish_frozen_update(int(args[args.index("--finish-update") + 1]))
+    except (OSError, ValueError, IndexError) as exc:
+        log.warning("finishing the update failed, starting the old build: %s: %s", type(exc).__name__, exc)
+    if app_dir is None:
+        log.warning("finishing the update: the old copy did not exit")
+        return 1
+    subprocess.Popen([str(app_dir / FROZEN_EXE)], cwd=str(app_dir.parent), close_fds=True,
+                     creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Launch ByteSprite on the Windows desktop."""
     if argv is None:
         _detach_console_if_present()
+    raw_args = argv if argv is not None else sys.argv
+    if FROZEN and "--finish-update" in raw_args:
+        return _finish_update(raw_args)
     if FROZEN:
-        os.chdir(APP_DIR.parent)  # outside the app folder, so an update can rename it while we run
+        os.chdir(APP_DIR.parent)  # outside the app folder, so the update helper can rename it
         remove_old_build()
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough

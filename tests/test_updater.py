@@ -255,40 +255,56 @@ def _frozen_app(tmp_path: Path) -> Path:
     return app
 
 
-def test_frozen_update_swaps_the_whole_folder(tmp_path: Path) -> None:
-    from src.updater import install_frozen_zip, remove_old_build, zip_version
+def test_frozen_update_stages_then_swaps_after_exit(tmp_path: Path) -> None:
+    import os
+    import subprocess
+    import sys
+
+    from src.updater import finish_frozen_update, install_frozen_zip, remove_old_build, zip_version
 
     app = _frozen_app(tmp_path)
     data = _frozen_zip({"ByteSprite.exe": "new", "_internal/x.dll": "x", "VERSION": "2.0.0\n"})
     assert zip_version(data) == "2.0.0"
     install_frozen_zip(data, app)
+    assert (app / "ByteSprite.exe").read_text() == "old"  # the running copy is never touched
+    staged = tmp_path / "app.new"
+    assert (staged / "ByteSprite.exe").read_text() == "new" and is_installed(staged)
+    with pytest.raises(ValueError):
+        finish_frozen_update(os.getpid(), app)  # only a staged folder may swap itself in
+    old = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        from src import updater
+
+        assert updater._wait_for_exit(old.pid, timeout_ms=100) is False  # still running: no swap, no relaunch
+    finally:
+        old.kill()
+        old.wait()
+    assert finish_frozen_update(old.pid, staged) == app
     assert (app / "ByteSprite.exe").read_text() == "new" and (app / "_internal" / "x.dll").exists()
     assert is_installed(app)  # the marker is not in the signed bundle; it follows the install
-    assert (tmp_path / "app.old" / "ByteSprite.exe").read_text() == "old"  # the running copy's files stay put
+    assert (tmp_path / "app.old" / "ByteSprite.exe").read_text() == "old"
     remove_old_build(app)
-    assert not (tmp_path / "app.old").exists() and not (tmp_path / "app.new").exists()
+    assert not (tmp_path / "app.old").exists() and not staged.exists()
 
 
 def test_bad_frozen_update_keeps_running_install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from src.updater import install_frozen_zip
+    from src.updater import finish_frozen_update, install_frozen_zip
 
     app = _frozen_app(tmp_path)
     with pytest.raises(ValueError):
         install_frozen_zip(_frozen_zip({"_internal/x.dll": "no exe"}), app)
     with pytest.raises(ValueError):
         install_frozen_zip(_frozen_zip({"../evil.dll": "x", "ByteSprite.exe": "new"}), app)
-    real_rename = Path.rename
-
-    def locked(self: Path, target: Path) -> Path:
-        if self.name == "app.new":
-            raise PermissionError("antivirus")
-        return real_rename(self, target)
-
-    monkeypatch.setattr(Path, "rename", locked)
-    with pytest.raises(PermissionError):
-        install_frozen_zip(_frozen_zip({"ByteSprite.exe": "new"}), app)
-    assert (app / "ByteSprite.exe").read_text() == "old" and not (tmp_path / "app.old").exists()
     assert not (tmp_path / "evil.dll").exists()
+    install_frozen_zip(_frozen_zip({"ByteSprite.exe": "new"}), app)
+
+    def locked(*_args: object, **_kwargs: object) -> None:
+        raise PermissionError("antivirus")
+
+    monkeypatch.setattr(shutil, "copytree", locked)
+    with pytest.raises(PermissionError):
+        finish_frozen_update(0, tmp_path / "app.new")
+    assert (app / "ByteSprite.exe").read_text() == "old" and not (tmp_path / "app.old").exists()
 
 
 @pytest.mark.skipif(shutil.which("powershell.exe") is None, reason="needs Windows PowerShell")

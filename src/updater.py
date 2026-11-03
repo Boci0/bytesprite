@@ -7,8 +7,8 @@ or an intercepted download cannot ship code. The version inside the zip must mat
 newer, so an old signed release cannot be replayed under a new tag to downgrade an install.
 
 A frozen (PyInstaller) build updates from `bytesprite-win64.zip` instead: the whole app folder, runtime
-included, swapped by renames while the app runs (Windows allows renaming the folder of a running exe as
-long as it is not the process's working directory; `main` moves there first).
+included. Windows will not rename a folder whose exe or DLLs are loaded, so the new build is staged as
+`app.new` and the swap runs from there (`--finish-update`) once the old process has exited.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ import re
 import shutil
 import sys
 import threading
+import time
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -175,15 +176,12 @@ def install_source_zip(data: bytes, app_dir: Path = APP_DIR) -> None:
 
 
 def install_frozen_zip(data: bytes, app_dir: Path = APP_DIR) -> None:
-    """Swap the frozen app folder for the `ByteSprite/` folder inside a verified bundle.
+    """Stage the `ByteSprite/` folder of a verified bundle as `app.new` for `finish_frozen_update`.
 
-    Extracted next to the old folder first, then two renames, rolled back if the second fails. The old
-    folder holds the running process's DLLs, so it is left as `app.old` for `remove_old_build` at the next
-    start. No library check: a frozen bundle carries its own runtime.
+    The running app is not touched. No library check: a frozen bundle carries its own runtime.
     """
-    new_dir, old_dir = app_dir.with_name(app_dir.name + ".new"), app_dir.with_name(app_dir.name + ".old")
+    new_dir = app_dir.with_name(app_dir.name + ".new")
     shutil.rmtree(new_dir, ignore_errors=True)
-    shutil.rmtree(old_dir, ignore_errors=True)  # shortcut: a copy updated but never restarted runs from here
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         for info in zf.infolist():
             parts = Path(info.filename).parts
@@ -200,17 +198,57 @@ def install_frozen_zip(data: bytes, app_dir: Path = APP_DIR) -> None:
         raise ValueError(f"update has no {FROZEN_EXE}")
     if is_installed(app_dir):
         (new_dir / INSTALL_MARKER).write_bytes((app_dir / INSTALL_MARKER).read_bytes())
-    app_dir.rename(old_dir)
+
+
+def _wait_for_exit(pid: int, timeout_ms: int = 30_000) -> bool:
+    """True once process `pid` has exited (or never existed), False if it is still running at the timeout."""
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    handle = kernel32.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
+    if not handle:
+        return True
     try:
-        new_dir.rename(app_dir)
+        return kernel32.WaitForSingleObject(ctypes.c_void_p(handle), timeout_ms) == 0  # WAIT_OBJECT_0
+    finally:
+        kernel32.CloseHandle(ctypes.c_void_p(handle))
+
+
+def finish_frozen_update(old_pid: int, new_dir: Path = APP_DIR) -> Path | None:
+    """Run from the staged `app.new` copy: once `old_pid` exits, replace `app` with a copy of this folder.
+
+    Copied, not renamed, because this process runs from `app.new`. A failed copy puts the old folder back.
+    Returns the app folder to launch, or None if the old copy is still running (launching would make two).
+    """
+    if not new_dir.name.endswith(".new"):
+        raise ValueError(f"not a staged update: {new_dir}")
+    app_dir = new_dir.with_name(new_dir.name.removesuffix(".new"))
+    old_dir = app_dir.with_name(app_dir.name + ".old")
+    if not _wait_for_exit(old_pid):
+        return None
+    shutil.rmtree(old_dir, ignore_errors=True)
+    for attempt in range(20):  # antivirus may still hold the old exe for a moment after it exits
+        try:
+            app_dir.rename(old_dir)
+            break
+        except PermissionError:
+            if attempt == 19:
+                raise
+            time.sleep(0.25)
+    try:
+        shutil.copytree(new_dir, app_dir)
     except OSError:
+        shutil.rmtree(app_dir, ignore_errors=True)
         old_dir.rename(app_dir)
         raise
+    return app_dir
 
 
 def remove_old_build(app_dir: Path = APP_DIR) -> None:
-    """Delete the folder a frozen update replaced; its files are free once the old process has exited."""
-    shutil.rmtree(app_dir.with_name(app_dir.name + ".old"), ignore_errors=True)
+    """Delete the replaced `app.old` and the staged `app.new` once a frozen update has been swapped in."""
+    for suffix in (".old", ".new"):
+        shutil.rmtree(app_dir.with_name(app_dir.name + suffix), ignore_errors=True)
 
 
 class UpdateJob(QObject):

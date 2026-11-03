@@ -473,6 +473,7 @@ def test_away_naps_and_wakes_with_a_yawn(qapp: QApplication, monkeypatch: pytest
     sm = PetStateMachine(PetStats())
     win = PetWindow(state_machine=sm, animation_controller=AnimationController(size=32), auto_wander=False)
     try:
+        monkeypatch.setattr(sm, "refresh_metrics", lambda: False)  # real RAM over 90% would make it hungry
         monkeypatch.setattr(pw, "idle_seconds", lambda: win.AWAY_AFTER_S + 1)
         monkeypatch.setattr(pw, "display_kept_on", lambda: True)  # a video is playing
         win._check_away()
