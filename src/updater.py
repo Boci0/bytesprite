@@ -17,6 +17,7 @@ import http.client
 import io
 import json
 import logging
+import os
 import re
 import shutil
 import sys
@@ -24,6 +25,7 @@ import threading
 import time
 import urllib.request
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 
 from PyQt6.QtCore import QObject, pyqtSignal
@@ -65,13 +67,23 @@ def is_installed(app_dir: Path = APP_DIR) -> bool:
     return (app_dir / INSTALL_MARKER).is_file()
 
 
-def _get(url: str, limit: int) -> bytes:
+def _get(url: str, limit: int, progress: Callable[[int], None] | None = None) -> bytes:
+    """Download up to `limit` bytes; `progress` gets the percent done whenever it changes (needs Content-Length)."""
     req = urllib.request.Request(url, headers={"User-Agent": f"ByteSprite/{__version__}"})
+    chunks: list[bytes] = []
+    size, shown = 0, -1
     with urllib.request.urlopen(req, timeout=_TIMEOUT_S) as resp:
-        data = resp.read(limit + 1)
-    if len(data) > limit:
-        raise ValueError("download too large")
-    return data
+        total = int(resp.headers.get("Content-Length") or 0)
+        while chunk := resp.read(256 * 1024):
+            chunks.append(chunk)
+            size += len(chunk)
+            if size > limit:
+                raise ValueError("download too large")
+            pct = min(100, size * 100 // total) if total else -1
+            if progress is not None and pct != shown:
+                shown = pct
+                progress(pct)
+    return b"".join(chunks)
 
 
 def latest_release() -> tuple[str, str, str]:
@@ -215,10 +227,29 @@ def _wait_for_exit(pid: int, timeout_ms: int = 30_000) -> bool:
         kernel32.CloseHandle(ctypes.c_void_p(handle))
 
 
-def finish_frozen_update(old_pid: int, new_dir: Path = APP_DIR) -> Path | None:
+def launch_env() -> dict[str, str]:
+    """This environment minus the Qt DLL folder PyQt6 put on PATH, so a launched build loads only its own DLLs."""
+    path = os.environ.get("PATH", "").split(os.pathsep)
+    return {**os.environ, "PATH": os.pathsep.join(p for p in path if "pyqt6" not in p.lower())}
+
+
+def _starts(app_dir: Path) -> bool:
+    """Test-launch a swapped-in frozen build: False if it cannot even load (missing DLLs, broken files)."""
+    import subprocess
+
+    try:
+        return subprocess.run([str(app_dir / FROZEN_EXE), "--self-check"], cwd=str(app_dir.parent),
+                              env=launch_env(), timeout=60).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def finish_frozen_update(old_pid: int, new_dir: Path = APP_DIR,
+                         starts: Callable[[Path], bool] = _starts) -> Path | None:
     """Run from the staged `app.new` copy: once `old_pid` exits, replace `app` with a copy of this folder.
 
-    Copied, not renamed, because this process runs from `app.new`. A failed copy puts the old folder back.
+    Copied, not renamed, because this process runs from `app.new`. A failed copy, or a copy that does not
+    start (a v1.8.4 swap lost every Qt DLL and bricked the install), puts the old folder back.
     Returns the app folder to launch, or None if the old copy is still running (launching would make two).
     """
     if not new_dir.name.endswith(".new"):
@@ -238,6 +269,8 @@ def finish_frozen_update(old_pid: int, new_dir: Path = APP_DIR) -> Path | None:
             time.sleep(0.25)
     try:
         shutil.copytree(new_dir, app_dir)
+        if not starts(app_dir):
+            raise OSError("the new build does not start")
     except OSError:
         shutil.rmtree(app_dir, ignore_errors=True)
         old_dir.rename(app_dir)
@@ -259,6 +292,7 @@ class UpdateJob(QObject):
     """
 
     finished = pyqtSignal(str, str)
+    progress = pyqtSignal(int)  # percent of the bundle downloaded
 
     def start(self, *, install: bool) -> None:
         threading.Thread(target=self._run, args=(install,), daemon=True).start()
@@ -276,7 +310,7 @@ class UpdateJob(QObject):
             if not zip_url or not sig_url:
                 raise ValueError("unsigned release")
             apply = install_frozen_zip if FROZEN else install_source_zip
-            apply(verified_bundle(_get(zip_url, _MAX_ZIP_BYTES), _get(sig_url, 1024), tag))
+            apply(verified_bundle(_get(zip_url, _MAX_ZIP_BYTES, self.progress.emit), _get(sig_url, 1024), tag))
         except (OSError, ValueError, KeyError, zipfile.BadZipFile, http.client.HTTPException) as exc:
             logger.warning("update %s failed: %s: %s", tag or "check", type(exc).__name__, exc)
             self.finished.emit("error", str(exc) or tag)

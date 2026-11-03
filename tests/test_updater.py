@@ -279,7 +279,7 @@ def test_frozen_update_stages_then_swaps_after_exit(tmp_path: Path) -> None:
     finally:
         old.kill()
         old.wait()
-    assert finish_frozen_update(old.pid, staged) == app
+    assert finish_frozen_update(old.pid, staged, starts=lambda _d: True) == app
     assert (app / "ByteSprite.exe").read_text() == "new" and (app / "_internal" / "x.dll").exists()
     assert is_installed(app)  # the marker is not in the signed bundle; it follows the install
     assert (tmp_path / "app.old" / "ByteSprite.exe").read_text() == "old"
@@ -301,9 +301,12 @@ def test_bad_frozen_update_keeps_running_install(tmp_path: Path, monkeypatch: py
     def locked(*_args: object, **_kwargs: object) -> None:
         raise PermissionError("antivirus")
 
+    with pytest.raises(OSError, match="does not start"):
+        finish_frozen_update(0, tmp_path / "app.new", starts=lambda _d: False)  # a copy that cannot load
+    assert (app / "ByteSprite.exe").read_text() == "old" and not (tmp_path / "app.old").exists()
     monkeypatch.setattr(shutil, "copytree", locked)
     with pytest.raises(PermissionError):
-        finish_frozen_update(0, tmp_path / "app.new")
+        finish_frozen_update(0, tmp_path / "app.new", starts=lambda _d: True)
     assert (app / "ByteSprite.exe").read_text() == "old" and not (tmp_path / "app.old").exists()
 
 
@@ -351,3 +354,37 @@ def test_update_helper_tells_the_old_build_a_swap_failed(monkeypatch: pytest.Mon
     monkeypatch.setattr(subprocess, "Popen", lambda argv, **_kw: started.append(argv))
     assert main_mod._finish_update(["ByteSprite.exe", "--finish-update", "1"]) == 0
     assert (main_mod.UPDATE_FAILED_FLAG in started[0][1:]) is fails
+
+
+def test_download_reports_progress_and_enforces_the_limit() -> None:
+    body = bytes(range(256)) * 4096  # 1 MiB: four 256 KiB chunks
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args: object) -> None:
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_port}/bundle.zip"
+    try:
+        seen: list[int] = []
+        assert updater._get(url, len(body), seen.append) == body
+        assert seen == sorted(set(seen)) and seen[-1] == 100  # rising, no repeats, ends at 100
+        with pytest.raises(ValueError, match="too large"):
+            updater._get(url, len(body) - 1)
+    finally:
+        server.shutdown()
+
+
+def test_launch_env_drops_the_parent_qt_dll_folder(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Inherited, it let a copy with no Qt DLLs pass the self-check by loading the helper's own."""
+    import os
+
+    monkeypatch.setenv("PATH", os.pathsep.join([r"C:\app.new\_internal\PyQt6\Qt6\bin", r"C:\Windows"]))
+    assert updater.launch_env()["PATH"] == r"C:\Windows"

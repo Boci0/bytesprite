@@ -23,7 +23,8 @@ from src.storage.storage_manager import StorageManager, log_path, repair_autosta
 from src.ui.pet_window import PetWindow, build_app_icon
 from src.ui.quick_tools import GlobalHotkeys
 from src.ui.theme import APP_STYLESHEET
-from src.updater import APP_DIR, FROZEN, FROZEN_EXE, finish_frozen_update, is_installed, remove_old_build
+from src.updater import (APP_DIR, FROZEN, FROZEN_EXE, launch_env, finish_frozen_update, is_installed,
+                         remove_old_build)
 
 # Stored beside plugin state in state.json "tools"; not a ToolPlugin, so it never joins the HUD cycle
 RECENT_FILES_KEY = "recent"
@@ -326,6 +327,7 @@ def _finish_update(args: list[str]) -> int:
         log.warning("finishing the update: the old copy did not exit")
         return 1
     subprocess.Popen([str(app_dir / FROZEN_EXE), *flags], cwd=str(app_dir.parent), close_fds=True,
+                     env=launch_env(),
                      creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
     return 0
 

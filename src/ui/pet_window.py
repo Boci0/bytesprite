@@ -1185,6 +1185,8 @@ class PetWindow(QWidget):
         """Ask GitHub for a newer release; `install` also applies it (installed copies only)."""
         job = UpdateJob()
         job.finished.connect(lambda status, tag, j=job, i=install: self._on_update_done(j, status, tag, i))
+        if install:  # a slow mirror takes minutes for the 38 MB standalone bundle: show it moving
+            job.progress.connect(lambda pct: self._show_toast(f"GET {pct}%", QColor("#8A9AF2")))
         self._update_jobs.append(job)
         job.start(install=install)
         if install:
