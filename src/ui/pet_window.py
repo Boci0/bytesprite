@@ -287,6 +287,7 @@ class PetWindow(QWidget):
     TIP_GAP_S: float = 30.0
     SUCCESS_HEX: str = "#38B764"  # the green every tool uses for a finished job
     QUIET_NOTICES: frozenset[str] = frozenset({"COMMITTED", "PUSHED"})  # toast and react, no tray balloon
+    BIG_WINS: frozenset[str] = frozenset({"FOCUS DONE", "PUSHED"})  # cheer plus the pixel-star burst
     LONG_TASK_S: float = 30.0  # an AI answer that took this long cheers when it lands
     AWAY_AFTER_S: float = 300.0  # no keyboard or mouse input this long: the idle clip becomes a nap
     PREWARM_DELAY_MS: int = 150  # a drag has usually passed DRAG_THRESHOLD_PX by now; still before the wheel opens
@@ -632,7 +633,8 @@ class PetWindow(QWidget):
         if notifications:
             toast_text, color_hex = notifications[-1]
             # FOCUS DONE is ice-blue, but a finished focus session is the biggest win there is
-            self._react(self.SUCCESS_HEX if toast_text == "FOCUS DONE" else color_hex or self.SUCCESS_HEX)
+            self._react(self.SUCCESS_HEX if toast_text == "FOCUS DONE" else color_hex or self.SUCCESS_HEX,
+                        big=toast_text in self.BIG_WINS)
             self._show_toast(toast_text, QColor(color_hex or "#38B764"))
             if self._on_notification is not None and toast_text not in self.QUIET_NOTICES:
                 self._on_notification(toast_text)
@@ -662,6 +664,10 @@ class PetWindow(QWidget):
         roll = random.random()
         if roll < 0.08 and self._anim.base_state == "idle":  # no yawning mid-song
             self._anim.play_oneshot("yawn")
+            self._schedule_next_anim_tick()
+            self.update()
+        elif roll < 0.18:
+            self._anim.play_oneshot("shine")  # a glint runs along the wire
             self._schedule_next_anim_tick()
             self.update()
         elif roll < 0.48:
@@ -1609,9 +1615,11 @@ class PetWindow(QWidget):
     def _sprite_global_rect(self) -> QRect:
         return QRect(self.mapToGlobal(self._sprite_rect.topLeft()), self._sprite_rect.size())
 
-    def _react(self, color_hex: str) -> None:
+    def _react(self, color_hex: str, *, big: bool = False) -> None:
         """One-shot reaction to a notice by its colour: green success cheers, coral failure flinches (in any
-        state), anything else (aborted, info) spins while idle."""
+        state), anything else (aborted, info) spins while idle. A `big` win also bursts pixel stars round the pet."""
+        if big and self.isVisible():
+            play_screen_glow(self.screen(), self._sprite_global_rect().center())
         if QColor(color_hex) == QColor(self.SUCCESS_HEX):
             clip = "cheer"
         elif pet_accent(color_hex) == QColor(DANGER_HEX):
@@ -1628,7 +1636,7 @@ class PetWindow(QWidget):
         if not ok:
             self._react("#EF7D57")
         elif time.monotonic() - self._ai_since >= self.LONG_TASK_S:
-            self._react(self.SUCCESS_HEX)
+            self._react(self.SUCCESS_HEX, big=True)
 
     def _on_ai_thinking(self, thinking: bool) -> None:
         if thinking and not self._ai_thinking:

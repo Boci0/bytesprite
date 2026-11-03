@@ -31,6 +31,7 @@ ALL_ANIMATIONS: tuple[str, ...] = (
     "dangle",
     "land",
     "flinch",
+    "shine",
 )
 
 # Frosted-glass neutral palette: low-saturation translucent greys that read on light and dark
@@ -169,6 +170,18 @@ def _hscale_frame(frame: FrameMatrix, sx: float) -> FrameMatrix:
     return out
 
 
+def _vscale_frame(frame: FrameMatrix, sy: float, foot: int) -> FrameMatrix:
+    """Nearest-neighbor vertical squash (<1) or stretch (>1) anchored at row `foot`, so the clip keeps
+    standing on its shadow while it compresses or reaches up."""
+    size = len(frame)
+    out: FrameMatrix = [[PALETTE["."]] * size for _ in range(size)]
+    for y in range(size):
+        src = int(foot + (y + 0.5 - foot - 0.5) / sy + 0.5)
+        if 0 <= src < size:
+            out[y] = list(frame[src])
+    return out
+
+
 def _over(base: FrameMatrix, top: FrameMatrix) -> FrameMatrix:
     """Composite `top` onto `base` wherever `top` is not fully transparent."""
     return [
@@ -221,6 +234,7 @@ def _draw_clip_32(
     blush: bool = False,
     face: bool = True,
     pulse_at: int | None = None,
+    pulse_chars: tuple[str, ...] = ("Q", "Q", "q", "q", "q"),
 ) -> None:
     """Render the frosted paperclip buddy; `face=False` shows its plain back mid-spin."""
     _trace_wire(grid, _CLIP_PATH_32, ox=dx, oy=dy, brush=2, core="L", outline="O")
@@ -230,7 +244,7 @@ def _draw_clip_32(
     if pulse_at is not None:
         # Light pulse running along the wire: bright head, fading glow tail
         cells = _PATH_CELLS_32
-        for offset, ch in ((0, "Q"), (1, "Q"), (2, "q"), (3, "q"), (4, "q")):
+        for offset, ch in enumerate(pulse_chars):
             px, py = cells[(pulse_at - offset) % len(cells)]
             for bx in (0, 1):
                 for by in (0, 1):
@@ -247,7 +261,7 @@ def _draw_clip_32(
 
 def _build_32_animations() -> dict[str, list[FrameMatrix]]:
     animations: dict[str, list[FrameMatrix]] = {}
-    sparkle_glyph = [" G ", "GWG", " G "]
+    sparkle_glyph = [" G ", "GQG", " G "]
     z_big = ["PPP", " P ", "PPP"]
     z_small = ["PP", "PP"]
 
@@ -255,26 +269,46 @@ def _build_32_animations() -> dict[str, list[FrameMatrix]]:
         *, dx: int = 0, dy: int = 0, eyes: str = "open", mouth: str = "smile",
         shadow: int = 8, blush: bool = False, pulse: int | None = None,
         extras: tuple[tuple[int, int, list[str]], ...] = (),
+        sx: float = 1.0, sy: float = 1.0, glint: bool = False,
     ) -> FrameMatrix:
-        g = _new_grid(32)
-        _draw_shadow_32(g, width_radius=shadow, y=29)
-        _draw_clip_32(g, dx=dx, dy=dy, eyes=eyes, mouth=mouth, blush=blush, pulse_at=pulse)
+        """One pose: body (squashed or stretched by sx/sy around the feet), shadow under it,
+        particles (`extras`) on top and never scaled."""
+        body = _new_grid(32)
+        _draw_clip_32(body, dx=dx, dy=dy, eyes=eyes, mouth=mouth, blush=blush, pulse_at=pulse,
+                      pulse_chars=("W", "W", "G", "G") if glint else ("Q", "Q", "q", "q", "q"))
+        out = _grid_to_rgba(body)
+        if sy != 1.0:
+            out = _vscale_frame(out, sy, foot=28 + dy)
+        if sx != 1.0:
+            out = _hscale_frame(out, sx)
+        under, top = _new_grid(32), _new_grid(32)
+        _draw_shadow_32(under, width_radius=shadow, y=29)
         for ex, ey, glyph in extras:
-            _stamp(g, ex, ey, glyph)
-        return _grid_to_rgba(g)
+            _stamp(top, ex, ey, glyph)
+        return _over(_over(_grid_to_rgba(under), out), _grid_to_rgba(top))
 
-    # 1. IDLE (gentle bob)
+    # Particles (stamped on top, never squashed): ice-blue core stars, dust puffs, an alarm "!", speed lines
+    star_big = ["  W  ", "  G  ", "WGQGW", "  G  ", "  W  "]
+    star = [" W ", "WQW", " W "]
+    twinkle = ["G"]
+    puff = [" hL ", "hLLh", " hh "]
+    puff_small = ["LL", "hh"]
+    puff_fade = ["h h", " h "]
+    bang = ["RR", "RR", "RR", "RR", "  ", "RR"]
+    tick = ["D", "D"]
+
+    # 1. IDLE (gentle bob that breathes: the body settles 1px into its shadow and back)
     animations["idle"] = [
-        frame(dy=0), frame(dy=0, shadow=9), frame(dy=1, shadow=9), frame(dy=0),
+        frame(), frame(sy=0.96, shadow=9), frame(dy=1, sy=0.96, shadow=9), frame(),
     ]
     # 2. BLINK
     animations["blink"] = [frame(eyes="half"), frame(eyes="closed"), frame(eyes="half")]
-    # 3. WALK (sway side to side while glancing along)
+    # 3. WALK (bouncy sway, a dust puff kicked up behind each step)
     animations["walk"] = [
-        frame(dx=-1, dy=-1, eyes="look_left", shadow=7),
-        frame(dx=0, dy=0, eyes="open"),
-        frame(dx=1, dy=-1, eyes="open", shadow=7),
-        frame(dx=0, dy=0, eyes="look_left"),
+        frame(dx=-1, dy=-1, eyes="look_left", shadow=7, sy=1.03),
+        frame(dx=0, dy=0, eyes="open", sx=1.06, sy=0.95, extras=((4, 27, puff_small),)),
+        frame(dx=1, dy=-1, eyes="open", shadow=7, sy=1.03),
+        frame(dx=0, dy=0, eyes="look_left", sx=1.06, sy=0.95, extras=((25, 27, puff_small),)),
     ]
     # 4. SLEEP (DND: settled low, closed eyes, rising Zzz)
     animations["sleep"] = [
@@ -309,6 +343,10 @@ def _build_32_animations() -> dict[str, list[FrameMatrix]]:
                       face=face, blush=eyes == "happy")
         under = _new_grid(32)
         _draw_shadow_32(under, width_radius=shadow, y=29)
+        if not face:  # speed lines while it whips round
+            _stamp(under, 1, 12 + dy, ["DDD"])
+            _stamp(under, 28, 18 + dy, ["DDD"])
+            _stamp(under, 3, 20 + dy, ["hh"])
         if eyes == "happy" and sx == 1.0:
             _stamp(under, 3, 6, sparkle_glyph)
             _stamp(under, 26, 4, sparkle_glyph)
@@ -336,38 +374,63 @@ def _build_32_animations() -> dict[str, list[FrameMatrix]]:
         frame(dx=1, dy=0, eyes="happy", extras=((2, 8, note),)),
         frame(dx=0, dy=1, eyes="happy", shadow=9, extras=((1, 5, note), (24, 11, note))),
     ]
-    # 10. CHEER (Pomodoro done: crouch, big hop, sparkles on landing)
+    # 10. CHEER (big win: deep crouch, stretched launch, star burst at the top, splat landing, glowing settle)
     animations["cheer"] = [
-        frame(dy=2, eyes="closed", mouth="flat", shadow=9),
-        frame(dy=-2, eyes="happy", mouth="open_happy", shadow=6, blush=True),
+        frame(eyes="closed", mouth="flat", sx=1.16, sy=0.8, shadow=10),
+        frame(dy=-1, eyes="happy", mouth="open_happy", sx=0.9, sy=1.08, shadow=6, blush=True,
+              extras=((5, 27, puff_small), (25, 27, puff_small))),
         frame(dy=-3, eyes="happy", mouth="open_happy", shadow=5, blush=True,
-              extras=((3, 5, sparkle_glyph), (26, 3, sparkle_glyph))),
-        frame(dy=-2, eyes="happy", mouth="open_happy", shadow=6, blush=True,
-              extras=((2, 3, sparkle_glyph), (27, 6, sparkle_glyph))),
-        frame(dy=1, eyes="happy", mouth="smile", shadow=9, blush=True),
-        frame(dy=0, eyes="happy", mouth="smile", blush=True, extras=((4, 8, sparkle_glyph),)),
+              extras=((1, 7, star_big), (26, 3, star_big), (24, 13, star))),
+        frame(dy=-3, eyes="happy", mouth="open_happy", shadow=5, blush=True,
+              extras=((2, 2, star_big), (26, 9, star_big), (5, 14, star), (22, 1, twinkle))),
+        frame(dy=-1, eyes="happy", mouth="open_happy", sx=0.94, sy=1.06, shadow=7, blush=True,
+              extras=((3, 4, star), (27, 12, twinkle), (6, 15, twinkle))),
+        frame(eyes="happy", mouth="smile", sx=1.18, sy=0.8, shadow=10, blush=True,
+              extras=((2, 25, puff), (26, 25, puff))),
+        frame(eyes="happy", mouth="smile", sy=1.04, blush=True,
+              extras=((4, 8, star), (26, 6, star), (1, 24, puff_fade), (28, 24, puff_fade))),
+        frame(eyes="happy", mouth="smile", blush=True, extras=((27, 4, twinkle),)),
     ]
-    # 11. YAWN (ambient idle variety)
+    # 11. YAWN (ambient idle variety: a big stretch up, then a relaxed slump)
     animations["yawn"] = [
         frame(eyes="half", mouth="flat"),
-        frame(dy=-1, eyes="closed", mouth="munch_open", shadow=7),
-        frame(dy=-1, eyes="closed", mouth="munch_open", shadow=7),
+        frame(dy=-1, eyes="closed", mouth="munch_open", sx=0.94, sy=1.06, shadow=7),
+        frame(dy=-1, eyes="closed", mouth="munch_open", sx=0.94, sy=1.06, shadow=7),
+        frame(eyes="half", mouth="flat", sx=1.06, sy=0.94, shadow=9),
         frame(eyes="half", mouth="flat"),
     ]
-    # 12. DANGLE (held by a drag: lifted off its shadow, round-mouthed, swaying)
+    # 12. DANGLE (held by a drag: pulled long, off its shadow, swinging with speed ticks at each end)
     animations["dangle"] = [
-        frame(dx=dx, dy=-2, eyes="open", mouth="munch_open", shadow=5) for dx in (-1, 0, 1, 0)
+        frame(dx=-1, dy=-1, eyes="open", mouth="munch_open", shadow=5, sy=1.05, extras=((26, 13, tick),)),
+        frame(dy=-1, eyes="open", mouth="munch_open", shadow=5, sy=1.05),
+        frame(dx=1, dy=-1, eyes="open", mouth="munch_open", shadow=5, sy=1.05, extras=((5, 13, tick),)),
+        frame(dy=-1, eyes="open", mouth="munch_open", shadow=5, sy=1.05),
     ]
-    # 13. LAND (drag released: squash onto the shadow, small rebound, settle)
+    # 13. LAND (drag released: splat flat with dust puffs, spring back up, settle)
     animations["land"] = [
-        frame(dy=2, eyes="closed", mouth="flat", shadow=10),
-        frame(dy=-1, eyes="happy", mouth="smile", shadow=7),
-        frame(dy=0, eyes="open", mouth="smile"),
+        frame(eyes="closed", mouth="flat", sx=1.2, sy=0.78, shadow=10,
+              extras=((5, 26, puff_small), (25, 26, puff_small))),
+        frame(eyes="closed", mouth="flat", sx=1.1, sy=0.9, shadow=10, extras=((1, 25, puff), (27, 25, puff))),
+        frame(dy=-1, eyes="happy", mouth="smile", sx=0.94, sy=1.06, shadow=7,
+              extras=((0, 24, puff_fade), (29, 24, puff_fade))),
+        frame(eyes="open", mouth="smile", sy=0.97),
+        frame(eyes="open", mouth="smile"),
     ]
-    # 14. FLINCH (something failed: squeezed eyes, a quick side-to-side shudder, sweat drop, then a worried look)
+    # 14. FLINCH (something failed: an alarm "!" pops, it recoils small, shudders with ticks, then looks worried)
     animations["flinch"] = [
-        frame(dx=dx, dy=1, eyes="closed", mouth="sad", shadow=9, extras=((25, 8, sweat),)) for dx in (-1, 1, -1)
-    ] + [frame(eyes="plead", mouth="flat")]
+        frame(dy=1, eyes="closed", mouth="sad", sx=0.9, sy=0.92, shadow=9, extras=((25, 1, bang),)),
+        frame(dx=-1, dy=1, eyes="closed", mouth="sad", shadow=9, extras=((25, 1, bang), (26, 12, tick))),
+        frame(dx=1, dy=1, eyes="closed", mouth="sad", shadow=9, extras=((25, 1, bang), (5, 12, tick))),
+        frame(dx=-1, dy=1, eyes="closed", mouth="sad", shadow=9, extras=((25, 1, bang), (26, 12, tick))),
+        frame(eyes="plead", mouth="flat", extras=((25, 1, bang), (25, 9, sweat))),
+        frame(eyes="plead", mouth="flat", extras=((25, 10, sweat),)),
+    ]
+    # 15. SHINE (ambient: a glint sweeps along the wire and pings off the top bend)
+    shine_steps = 10
+    shine_stride = len(_PATH_CELLS_32) // shine_steps
+    animations["shine"] = [frame(pulse=step * shine_stride, glint=True) for step in range(shine_steps)] + [
+        frame(extras=((7, 1, star),)), frame(extras=((8, 2, twinkle),)),
+    ]
     return animations
 
 
@@ -449,6 +512,7 @@ def _build_16_animations() -> dict[str, list[FrameMatrix]]:
         "dangle": [_build_16_base(dy=-1), _build_16_base(dy=-1, eyes="closed")],
         "land": [_build_16_base(dy=1, eyes="closed"), _build_16_base(eyes="happy"), _build_16_base()],
         "flinch": [_build_16_base(dy=1, eyes="closed", extra="sweat"), _build_16_base(extra="sweat")],
+        "shine": [_build_16_base(extra="spark"), _build_16_base()],
     }
 
 

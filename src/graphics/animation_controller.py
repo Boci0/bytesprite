@@ -21,11 +21,12 @@ DEFAULT_FRAME_DURATIONS_MS: dict[str, list[int]] = {
     "hungry": [500, 500, 500, 500],
     "eating": [180, 180, 180, 220],
     "music": [260, 260, 260, 260],
-    "cheer": [140, 110, 160, 110, 130, 420],
-    "yawn": [160, 520, 620, 220],
+    "cheer": [180, 70, 120, 120, 80, 90, 120, 380],
+    "yawn": [160, 520, 620, 200, 220],
     "dangle": [180, 180, 180, 180],
-    "land": [90, 110, 160],
-    "flinch": [70, 70, 70, 420],
+    "land": [60, 80, 110, 90, 140],
+    "flinch": [80, 60, 60, 60, 280, 260],
+    "shine": [45] * 10 + [120, 160],
 }
 
 
@@ -77,7 +78,7 @@ class AnimationController:
                 name=name,
                 frames=frames,
                 durations_ms=durations,
-                loop=(name not in {"blink", "eating", "spin", "cheer", "yawn", "land", "flinch"}),
+                loop=(name not in {"blink", "eating", "spin", "cheer", "yawn", "land", "flinch", "shine"}),
             )
 
     @property
