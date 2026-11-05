@@ -362,7 +362,9 @@ def test_chat_sends_only_on_enter_and_renders_reply(monkeypatch: pytest.MonkeyPa
         chat.insert_text("again")
         chat.send()
         _wait(app, lambda: chat._job is None)
-        assert len(chat._history) == 2 and chat._draft.toPlainText() == "again"  # failed turn back in the draft
+        # the failed turn stays in the chat with a closing note; the draft stays empty
+        assert [h["role"] for h in chat._history] == ["user", "assistant", "user", "assistant"]
+        assert chat._history[-1]["content"].startswith("(the answer failed") and chat._draft.toPlainText() == ""
     finally:
         chat.close()
 
@@ -491,11 +493,13 @@ def test_chat_stop_drops_the_pending_reply(monkeypatch: pytest.MonkeyPatch, api:
         assert chat._send_btn.kind == "stop"
         chat._send_or_stop()  # the send button doubles as Stop while waiting
         assert chat._cancel.is_set()  # the worker runs no further request or tool
-        assert chat._job is None and chat._send_btn.kind == "send" and chat._history == []
-        assert chat._draft.toPlainText() == "long question"
+        stopped = [{"role": "user", "content": "long question", "images": []},
+                   {"role": "assistant", "content": "(stopped by the user before answering)"}]
+        assert chat._job is None and chat._send_btn.kind == "send" and chat._history == stopped
+        assert chat._draft.toPlainText() == ""  # the message stays in the chat, not back in the draft
         for _ in range(30):
             app.processEvents()
-        assert chat._history == [] and plugin.asks == 0  # the late reply is ignored
+        assert chat._history == stopped and plugin.asks == 0  # the late reply is ignored
     finally:
         chat.close()
 
@@ -822,7 +826,7 @@ def test_saved_files_get_a_row_and_programs_are_not_opened(monkeypatch: pytest.M
     chat._on_done(None, "stopped")
     layout = chat._thread_layout
     rows = [[w.text() for w in layout.itemAt(i).widget().findChildren(_ClickLabel)] for i in range(layout.count())]
-    assert rows == [["Open", "Show in folder"], ["Show in folder"]]
+    assert [r for r in rows if r] == [["Open", "Show in folder"], ["Show in folder"]]  # plus a Stopped note each
 
 
 def test_chat_confirm_offers_once_or_for_this_chat(monkeypatch: pytest.MonkeyPatch, api: str) -> None:
@@ -1051,7 +1055,7 @@ def test_typing_while_it_works_steers_the_answer(monkeypatch: pytest.MonkeyPatch
         chat.close()
 
 
-def test_steering_typed_too_late_goes_back_to_the_draft(monkeypatch: pytest.MonkeyPatch, api: str) -> None:
+def test_steering_typed_too_late_is_sent_next(monkeypatch: pytest.MonkeyPatch, api: str) -> None:
     from src.tools.ai_assist import AiReply
 
     app, _plugin, chat = _chat(monkeypatch, api)
@@ -1069,6 +1073,8 @@ def test_steering_typed_too_late_goes_back_to_the_draft(monkeypatch: pytest.Monk
         chat.send()
         go.set()
         _wait(app, lambda: chat._job is None)
-        assert chat._draft.toPlainText() == "one more thing" and [h["content"] for h in chat._history] == ["job", "done"]
+        _wait(app, lambda: chat._job is None and len(chat._history) == 4)
+        assert chat._draft.toPlainText() == ""
+        assert [h["content"] for h in chat._history] == ["job", "done", "one more thing", "done"]
     finally:
         chat.close()

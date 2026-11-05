@@ -181,7 +181,7 @@ class ToolWheel(RadialDropWheel):
             return
         if sys.platform != "win32":
             return
-        self.restack_topmost()
+        self.restack_topmost(only_if_changed=True)
         l_down = bool(ctypes.windll.user32.GetAsyncKeyState(0x01) & 0x8000)
         self._button_up_ticks = 0 if l_down else self._button_up_ticks + 1
         # Two ticks (160ms): a normal release reaches the pet first and picks the slice

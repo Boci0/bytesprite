@@ -15,7 +15,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from PyQt6.QtCore import QDateTime, QPoint, QProcess, QRect, QStandardPaths, Qt, QTimer, QUrl
+from PyQt6.QtCore import QDateTime, QElapsedTimer, QPoint, QProcess, QRect, QStandardPaths, Qt, QTimer, QUrl
 from PyQt6.QtGui import (
     QCloseEvent,
     QColor,
@@ -53,7 +53,7 @@ from src.tools.watch import (ACTION_LABELS, EDITORS, LABELS as WATCH_LABELS, SOU
                               folder_check, hotkey_lens, run_lens, undo_moves)
 from src.tools import computer
 from src.ui.ai_chat import AiChat
-from src.ui.ai_tool_host import AiToolHost, grab_screen
+from src.ui.ai_tool_host import AiToolHost, grab_screen, show_quietly
 from src.ui.screen_glow import ScreenGlow, play_screen_glow
 from src.storage.recent_files import RecentFiles
 from src.storage.storage_manager import log_text
@@ -126,6 +126,19 @@ def yield_topmost(own: set[int], u32: object | None = None) -> bool:
     under = u32.GetAncestor(u32.WindowFromPoint(pt), 2) if u32.GetCursorPos(ctypes.byref(pt)) else None  # GA_ROOT
     return any(hwnd and hwnd not in own and u32.GetWindowLongW(hwnd, -20) & 0x8  # GWL_EXSTYLE, WS_EX_TOPMOST
                for hwnd in (u32.GetForegroundWindow(), under))
+
+
+_SHELL_CLASSES = {"Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd"}
+
+
+def fullscreen_in_front(own: set[int], pet_hwnd: int) -> bool:
+    """True while someone else's window fills the pet's whole monitor and has focus (a borderless game, a video,
+    a slideshow). Those are rarely topmost, so yield_topmost misses them and the pet popped over them every tick."""
+    fg = computer.foreground_window()
+    if not fg or fg in own or computer.window_class(fg) in _SHELL_CLASSES:  # the desktop is monitor-sized too
+        return False
+    front, pet = computer.window_on_monitor(fg), computer.window_on_monitor(pet_hwnd)
+    return front is not None and pet is not None and front[0] == pet[0] and front[1] == (0, 0, *front[2])
 
 
 def clamp_position_to_screens(
@@ -333,6 +346,8 @@ class PetWindow(QWidget):
 
         # Gentle autonomous walk steps
         self._walk_dx: int = 0
+        self._walk_dy: int = 0
+        self._walk_target: QPoint | None = None  # a walk to a spot (the dropped chat) ends exactly here
         self._walk_steps_remaining: int = 0
         self._is_shutting_down: bool = False
         self._drop_wheel: RadialDropWheel | None = None
@@ -377,6 +392,7 @@ class PetWindow(QWidget):
 
         # Frame timer uses exact frame durations when idle and steps smoothly during toasts/walks
         self._anim_timer = QTimer(self)
+        self._anim_clock = QElapsedTimer()  # real time since the last tick: 45ms shine frames ran on a 60ms floor
         self._anim_timer.timeout.connect(self._on_animation_tick)
         self._schedule_next_anim_tick()
 
@@ -441,7 +457,7 @@ class PetWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
         self.setAcceptDrops(True)
         if re_show and was_visible:
-            self.show()
+            show_quietly(self)
 
     @property
     def always_on_top(self) -> bool:
@@ -461,36 +477,51 @@ class PetWindow(QWidget):
             return
         wheels = self._open_wheels()
         own = {int(w.winId()) for w in (self, *wheels, self._ai_chat) if w is not None and w.isVisible()}
-        if yield_topmost(own):  # the next tick tries again
-            return
-        # HWND_TOPMOST, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE: re-raise without stealing focus
         set_pos = ctypes.windll.user32.SetWindowPos
         set_pos.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
                             ctypes.c_int, ctypes.c_int, ctypes.c_uint]
-        if not wheels:
+        if fullscreen_in_front(own, int(self.winId())):
+            # Skipping the re-raise is not enough: a topmost pet stays above a normal fullscreen window. Placing it
+            # right after that window drops its topmost bit, so it sits behind until the fullscreen app goes.
+            fg = computer.foreground_window()
+            for w in (self, self._ai_chat):
+                if w is not None and w.isVisible() and computer.is_topmost(int(w.winId())):
+                    set_pos(int(w.winId()), fg, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)
+            return
+        if yield_topmost(own):  # the next tick tries again
+            return
+        # HWND_TOPMOST, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE: re-raise without stealing focus
+        raised = False
+        pet = int(self.winId())
+        if not wheels and (not computer.is_topmost(pet) or computer.under_foreign_topmost(pet)):  # else no churn
             set_pos(int(self.winId()), -1, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)
+            raised = True
         for wheel in wheels:
             wheel.restack_topmost()  # wheels stay above the pet but below an in-flight drag image
-        if self._ai_chat is not None and self._ai_chat.isVisible():  # the pet never covers its own chat
-            set_pos(int(self._ai_chat.winId()), -1, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)
+        chat = self._ai_chat
+        if chat is not None and chat.isVisible() and (raised or not computer.is_topmost(int(chat.winId()))
+                                                      or computer.under_foreign_topmost(int(chat.winId()))):
+            set_pos(int(chat.winId()), -1, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)  # the pet never covers its chat
 
     def set_always_on_top(self, enabled: bool) -> None:
         if self._always_on_top == bool(enabled):
             return
         self._always_on_top = bool(enabled)
         self._apply_window_flags(re_show=True)
-        if self._drop_wheel is not None:
-            self._drop_wheel._always_on_top = self._always_on_top
-            self._drop_wheel._configure_window()
-        if self._tool_wheel is not None:
-            self._tool_wheel._always_on_top = self._always_on_top
-            self._tool_wheel._configure_window()
+        for wheel in (self._drop_wheel, self._tool_wheel):
+            if wheel is not None:
+                was_open = wheel.isVisible()
+                wheel._always_on_top = self._always_on_top
+                wheel._configure_window()  # setWindowFlags hides an open wheel
+                if was_open:
+                    show_quietly(wheel)
 
     def set_auto_wander(self, enabled: bool) -> None:
         self._auto_wander = bool(enabled)
         if not self._auto_wander and self._walk_steps_remaining > 0:
             self._walk_steps_remaining = 0
             self._sync_animation_to_pet_state(self._state_machine.state)
+            self._schedule_next_anim_tick()
             self.update()
 
     def _layout_sprite(self) -> None:
@@ -624,9 +655,11 @@ class PetWindow(QWidget):
     def _schedule_next_anim_tick(self) -> None:
         duration = max(60, self._anim.current_frame_duration_ms())
         self._anim_timer.start(duration)
+        self._anim_clock.start()
 
     def _on_animation_tick(self) -> None:
-        elapsed = self._anim_timer.interval()
+        # measured, capped so a stall (sleep, a busy Qt thread) skips at most a second of frames
+        elapsed = min(1000, self._anim_clock.elapsed()) if self._anim_clock.isValid() else self._anim_timer.interval()
         changed = self._anim.advance(elapsed)
         self._schedule_next_anim_tick()
         if changed:
@@ -635,8 +668,8 @@ class PetWindow(QWidget):
     def _on_ambient_tick(self) -> None:
         if self._press_global_pos is not None:
             return
-        if self._open_wheels():
-            return  # a hop or blink must not move the pet out from under an open wheel
+        if self._open_wheels() or self._walk_steps_remaining > 0:
+            return  # a hop or blink must not move the pet out from under an open wheel, or interrupt a walk
         if self._state_machine.state != PetState.IDLE or self._away:
             return
 
@@ -657,7 +690,7 @@ class PetWindow(QWidget):
         elif roll < 0.72 and self._auto_wander and not self._hovered:
             # Gentle short hop left or right
             direction = random.choice((-1, 1))
-            self._walk_dx = direction * 4
+            self._walk_dx, self._walk_dy, self._walk_target = direction * 4, 0, None
             self._walk_steps_remaining = random.randint(6, 10)
             self._anim.facing_left = direction < 0
             self._anim.set_state("walk")
@@ -681,12 +714,15 @@ class PetWindow(QWidget):
         if self._walk_steps_remaining > 0:
             self._walk_steps_remaining -= 1
             before = self.pos()
-            self.move_clamped(before.x() + self._walk_dx, before.y())
+            if self._walk_steps_remaining == 0 and self._walk_target is not None:
+                self.move_clamped(self._walk_target.x(), self._walk_target.y())  # no rounding drift at the end
+            else:
+                self.move_clamped(before.x() + self._walk_dx, before.y() + self._walk_dy)
             if self.pos() == before or self._walk_steps_remaining == 0:
                 self._walk_steps_remaining = 0
-                if self._state_machine.state == PetState.IDLE:
-                    self._anim.set_state(self._base_clip(PetState.IDLE))
-                    self._schedule_next_anim_tick()
+                self._walk_target = None
+                self._sync_animation_to_pet_state(self._state_machine.state)  # a walk may run in any state
+                self._schedule_next_anim_tick()
             needs_repaint = True
 
         if (
@@ -1472,13 +1508,13 @@ class PetWindow(QWidget):
         if self._is_shutting_down:
             return
         if self._snip_session is not None:  # a macro's region snip opened during the 180ms hide delay
-            self.show()
+            show_quietly(self)
             return
         self._snip_session = SnipSession(mode, self._on_snip_result)
 
     def _on_snip_result(self, mode: str, result: object | None) -> None:
         self._snip_session = None
-        self.show()
+        show_quietly(self)
         if mode == "ask":  # the chat's "Screen region" attachment
             if self._ai_chat is not None:
                 if isinstance(result, QImage):
@@ -1571,6 +1607,7 @@ class PetWindow(QWidget):
         self._ai_chat = AiChat(plugin, on_attach_screen=lambda: self.trigger_snip("ask"), tool_host=AiToolHost(self))
         self._ai_chat.thinking_changed.connect(self._on_ai_thinking)
         self._ai_chat.answered.connect(self._on_ai_answered)
+        self._ai_chat.moved.connect(self.walk_to_sprite)
 
     def ensure_ai_chat(self) -> AiChat | None:
         """Open the chat if it is closed (never toggles it shut, unlike open_ai_chat)."""
@@ -1596,6 +1633,25 @@ class PetWindow(QWidget):
             elif self.macros.double_click == name:
                 self.macros.double_click = ""
         self._show_toast(toast, QColor("#38B764" if toast in ("ADDED", "SAVED") else "#EF7D57"))
+
+    WALK_TO_STEP_PX = 10  # per 90ms overlay tick, about 110px a second
+
+    def walk_to_sprite(self, anchor: QRect) -> None:
+        """Walk (walk clip, facing the way it goes) until the sprite stands centred on `anchor` (global)."""
+        target = self.pos() + anchor.center() - self._sprite_global_rect().center()
+        dx, dy = target.x() - self.x(), target.y() - self.y()
+        steps = -(-max(abs(dx), abs(dy)) // self.WALK_TO_STEP_PX)
+        if steps == 0 or self._press_global_pos is not None:
+            return
+        self._walk_target, self._walk_steps_remaining = target, steps
+        self._walk_dx, self._walk_dy = round(dx / steps), round(dy / steps)
+        if dx:
+            self._anim.facing_left = dx < 0
+        self._anim.set_state("walk")
+        self._schedule_next_anim_tick()
+        if not self._overlay_timer.isActive():
+            self._overlay_timer.start()
+        self.update()
 
     def _sprite_global_rect(self) -> QRect:
         return QRect(self.mapToGlobal(self._sprite_rect.topLeft()), self._sprite_rect.size())

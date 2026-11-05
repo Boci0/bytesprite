@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import ctypes
+import os
 import time
 from ctypes import wintypes
 
@@ -84,8 +85,10 @@ def screen_size() -> tuple[int, int]:
 
 def _move(x: int, y: int) -> None:
     width, height = screen_size()
-    if not (0 <= x < width and 0 <= y < height):
+    if not (-2 <= x < width + 2 and -2 <= y < height + 2):
         raise ValueError(f"({x}, {y}) is off the screen, which is {width}x{height}")
+    # a hair past the edge (the taskbar's corner, a centre rounded up) lands on the last pixel instead of failing
+    x, y = max(0, min(x, width - 1)), max(0, min(y, height - 1))
     _user32().SetCursorPos(x, y)
     time.sleep(0.05)
 
@@ -108,7 +111,7 @@ def scroll(amount: int, x: int | None = None, y: int | None = None) -> None:
 
 
 def type_text(text: str, delay: float = 0.02) -> None:
-    for char in text[:MAX_TYPE_CHARS]:
+    for char in text.replace("\r\n", "\n")[:MAX_TYPE_CHARS]:  # one Enter per line break, not two
         if char in "\r\n":
             _send(_key(0x0D), _key(0x0D, flags=_KEYUP))
         elif char == "\t":
@@ -132,6 +135,10 @@ def press(codes: list[int]) -> None:
 _UIA_PS = r"""
 param([long]$Hwnd)
 $ErrorActionPreference = 'Stop'
+# Per-monitor DPI aware, so rectangles are physical pixels like SendInput and the grab; unaware, they were scaled
+# and drifted further off the further a control sat from the top-left (right and bottom edges missed most)
+Add-Type -Namespace BS -Name Dpi -MemberDefinition '[DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr c);'
+[void][BS.Dpi]::SetThreadDpiAwarenessContext([IntPtr]-4)
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
 $A = [System.Windows.Automation.AutomationElement]
@@ -192,6 +199,95 @@ def front_note(before: tuple[str, bool], after: tuple[str, bool]) -> str:
     if dialog:
         note += " A dialog is open in front: answer it or press esc before anything else."
     return note
+
+
+def _ours(user32, hwnd: int) -> bool:
+    pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(pid))
+    return pid.value == os.getpid()
+
+
+def front_app() -> int:
+    """The window the user is working in: the foreground one, or when that is ours (the pet, its chat or menu),
+    the first real app window under ours in the z-order (visible, not minimized, not cloaked, not a tool window,
+    titled). 0 when there is none."""
+    user32 = _user32()
+    fg = foreground_window()
+    if fg and not _ours(user32, fg):
+        return fg
+    user32.GetTopWindow.restype = user32.GetWindow.restype = wintypes.HWND
+    user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
+    user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+    hwnd = user32.GetTopWindow(None)
+    for _ in range(1000):  # a z-order walk; the bound guards against a window list that changes under us
+        if not hwnd:
+            return 0
+        cloaked = wintypes.DWORD()
+        ctypes.windll.dwmapi.DwmGetWindowAttribute(wintypes.HWND(hwnd), 14, ctypes.byref(cloaked), 4)  # DWMWA_CLOAKED
+        if (user32.IsWindowVisible(hwnd) and not user32.IsIconic(hwnd) and not cloaked.value
+                and not user32.GetWindowLongW(hwnd, -20) & 0x80  # WS_EX_TOOLWINDOW
+                and user32.GetWindowTextLengthW(hwnd) > 0 and not _ours(user32, hwnd)):
+            return int(hwnd)
+        hwnd = user32.GetWindow(hwnd, 2)  # GW_HWNDNEXT
+    return 0
+
+
+def focus_front_app() -> int:
+    """Give the keyboard back to the app under the pet and chat when one of ours has it (the chat does after the
+    user presses Enter), so typed keys and the described 'front window' are that app. Returns its handle."""
+    hwnd = front_app()
+    if hwnd and hwnd != foreground_window():
+        _user32().SetForegroundWindow(wintypes.HWND(hwnd))  # allowed: we are the foreground process
+        time.sleep(0.05)
+    return hwnd
+
+
+def window_class(hwnd: int) -> str:
+    buf = ctypes.create_unicode_buffer(64)
+    _user32().GetClassNameW(wintypes.HWND(hwnd), buf, 64)
+    return buf.value
+
+
+def is_topmost(hwnd: int) -> bool:
+    user32 = _user32()
+    user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+    return bool(user32.GetWindowLongW(hwnd, -20) & 0x8)  # WS_EX_TOPMOST
+
+
+def under_foreign_topmost(hwnd: int) -> bool:
+    """True when a visible topmost window of another process sits above `hwnd` in the z-order (so re-raising it
+    would change something); False means it is already on top and a SetWindowPos would be churn."""
+    user32 = _user32()
+    user32.GetWindow.restype = wintypes.HWND
+    user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
+    user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+    above = user32.GetWindow(wintypes.HWND(hwnd), 3)  # GW_HWNDPREV
+    for _ in range(1000):
+        if not above:
+            return False
+        if user32.IsWindowVisible(above) and user32.GetWindowLongW(above, -20) & 0x8 and not _ours(user32, above):
+            return True
+        above = user32.GetWindow(above, 3)
+    return True
+
+
+def exclude_from_capture(hwnd: int, on: bool) -> bool:
+    """WDA_EXCLUDEFROMCAPTURE: the window stays on screen but is left out of screen grabs (Windows 10 2004+).
+    False when Windows refused, so the caller hides the window instead."""
+    return bool(_user32().SetWindowDisplayAffinity(wintypes.HWND(hwnd), 0x11 if on else 0))
+
+
+def click_through(hwnd: int, on: bool) -> bool:
+    """Toggle WS_EX_TRANSPARENT on a layered window: clicks and the wheel fall to the window below while it stays
+    drawn. False when the window is not layered (the style would not change hit-testing), so the caller hides it."""
+    user32 = _user32()
+    user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+    user32.SetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.LONG]
+    style = user32.GetWindowLongW(hwnd, -20)
+    if not style & 0x80000:  # WS_EX_LAYERED
+        return False
+    user32.SetWindowLongW(hwnd, -20, style | 0x20 if on else style & ~0x20)
+    return True
 
 
 class _MonitorInfo(ctypes.Structure):

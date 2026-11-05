@@ -168,7 +168,10 @@ class ByteSpriteApp:
     def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.Context:
             menu = self.window.build_context_menu()
-            menu.exec(QCursor.pos())
+            try:
+                menu.exec(QCursor.pos())
+            finally:
+                menu.deleteLater()  # one tray menu per right-click: without this they piled up
         elif reason in (
             QSystemTrayIcon.ActivationReason.Trigger,
             QSystemTrayIcon.ActivationReason.DoubleClick,

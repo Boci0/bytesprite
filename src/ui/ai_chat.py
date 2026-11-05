@@ -19,7 +19,7 @@ from pathlib import Path
 from PyQt6.QtCore import (QBuffer, QByteArray, QIODevice, QMimeData, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer,
                           QUrl, pyqtSignal)
 from PyQt6.QtGui import (QColor, QDesktopServices, QDragEnterEvent, QDropEvent, QFont, QGuiApplication, QImage,
-                         QKeyEvent, QPainter, QPainterPath, QPalette, QPen, QPixmap, QTextBlockFormat, QTextCharFormat,
+                         QKeyEvent, QMouseEvent, QPainter, QPainterPath, QPalette, QPen, QPixmap, QTextBlockFormat, QTextCharFormat,
                          QTextCursor, QTextDocument, QTextFormat, QTextOption)
 from PyQt6.QtWidgets import (QAbstractButton, QComboBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
                              QLabel, QLineEdit, QMenu, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy,
@@ -220,6 +220,12 @@ class IconButton(QAbstractButton):
             painter.setBrush(color)
             painter.drawRect(QRectF(11.5, 11.5, 9, 9))
         painter.end()
+
+
+def _gap(area: QRect, point: QPoint) -> int:
+    """Manhattan distance from `point` to `area` (0 inside it)."""
+    return (max(area.left() - point.x(), 0, point.x() - area.right())
+            + max(area.top() - point.y(), 0, point.y() - area.bottom()))
 
 
 class _Separator(QWidget):
@@ -611,6 +617,7 @@ class AiChat(QWidget):
 
     thinking_changed = pyqtSignal(bool)
     answered = pyqtSignal(bool)  # an answer landed (True) or failed (False); not sent when stopped
+    moved = pyqtSignal(QRect)  # dragged by its header: where the pet's sprite should now stand (global)
 
     WIDTH = 380
     THREAD_MAX_H = 320
@@ -643,6 +650,7 @@ class AiChat(QWidget):
         self._asked = ("", "off")  # model and thinking level of the request in flight
         self._anchor: QRect | None = None  # the pet's sprite, in global coordinates
         self._above: bool | None = None  # which side of the sprite the card sits on, until the next open_near
+        self._drag_from: QPoint | None = None  # cursor minus card position while the header is dragged
         self._dots = 0
         self._dots_timer = QTimer(self)
         self._dots_timer.setInterval(120)
@@ -695,7 +703,8 @@ class AiChat(QWidget):
         for button in (self._history_btn, self._new_btn, self._gear, close_btn):
             header.addWidget(button, 0, Qt.AlignmentFlag.AlignTop)
         layout.addLayout(header)
-        layout.addWidget(_Separator())
+        self._header_sep = _Separator()  # presses above it drag the card
+        layout.addWidget(self._header_sep)
 
         # Conversation or setup, only shown once there is something in it
         self._panel = QWidget()
@@ -1158,9 +1167,13 @@ class AiChat(QWidget):
         self._context, self._actions = "", []
         self._action_box.hide()
         self._draft.clear()
-        self._history.append({"role": "user", "content": content, "images": [a.image_url for a in usable if a.image_url]})
         self._add_bubble("user", text, attachments=usable)
         self._clear_attachments()
+        self._ask(content, [a.image_url for a in usable if a.image_url])
+
+    def _ask(self, content: str, images: list[str] | None = None) -> None:
+        """Start an answer to `content`, whose bubble is already in the thread."""
+        self._history.append({"role": "user", "content": content, "images": images or []})
         self._thinking_label = self._status_line
         self._status_line.show()
         self._progress = ""
@@ -1244,26 +1257,30 @@ class AiChat(QWidget):
         for path in getattr(self._tool_host, "take_saved", list)():
             self._add_saved_row(path)
         if error or reply is None:
-            failed = self._history.pop() if self._history and self._history[-1]["role"] == "user" else None
+            # Everything the user typed stays in the thread and the history (never back in the draft), and one
+            # assistant note closes the turn so the next message keeps the context and turns stay paired
+            for text in (*said, *left):
+                self._history.append({"role": "user", "content": f"(sent while you worked) {text}"})
             if error != "stopped":
                 play_cue("error")
                 self.answered.emit(False)
                 self._add_bubble("error", friendly_error(error))
             else:
-                self._relayout()
-            lost = "\n\n".join(filter(None, [failed["content"] if failed else "", *said, *left]))
-            if lost and not self._draft.toPlainText():
-                self._draft.setPlainText(lost)  # nothing lost: edit and press Enter again
+                self._add_row("note", "Stopped")
+            if self._history and self._history[-1]["role"] == "user":
+                self._history.append({"role": "assistant", "content": "(stopped by the user before answering)"
+                                      if error == "stopped" else f"(the answer failed: {friendly_error(error)})"})
+            self._relayout()
             return
         for text in said:  # steering the model read: part of the chat, in the order it was said
             self._history.append({"role": "user", "content": f"(sent while you worked) {text}"})
-        if left and not self._draft.toPlainText():  # typed too late for a tool round: ready to send as the next message
-            self._draft.setPlainText("\n\n".join(left))
         if reply.compacted:
             self._history[:reply.compacted] = summary_turns(reply.summary)
             self._add_row("note", f"Compacted {reply.compacted} earlier messages into a summary to keep the chat "
                                   "within its context budget.")
         self._accept_reply(reply)
+        if left:  # typed too late for a tool round: it is the next message (its bubble is already shown)
+            QTimer.singleShot(0, lambda: self._job is None and self._ask("\n\n".join(left)[:MAX_INPUT_CHARS]))
 
     def add_watch_answer(self, label: str, reply: AiReply) -> bool:
         """A Watch mode answer the pet fetched itself, shown as a normal exchange so the user can follow up.
@@ -1771,6 +1788,8 @@ class AiChat(QWidget):
         self.resize(self.WIDTH, self.sizeHint().height())
         anchor = self._anchor
         screen = QGuiApplication.screenAt(anchor.center()) if anchor is not None else None
+        if screen is None and anchor is not None:  # in a gap between monitors: the nearest one, not the primary
+            screen = min(QGuiApplication.screens(), default=None, key=lambda s: _gap(s.availableGeometry(), anchor.center()))
         screen = screen or QGuiApplication.primaryScreen()
         if screen is None:
             return
@@ -1787,6 +1806,53 @@ class AiChat(QWidget):
         else:
             y = anchor.bottom() + self.GAP
         self.move(x, max(area.top() + 8, min(y, area.bottom() - self.height() - 8)))
+
+    # Header drag: the card stays where it is dropped (its anchor moves with it) and the pet walks over to it
+    def mousePressEvent(self, event: QMouseEvent | None) -> None:
+        if (event is not None and event.button() == Qt.MouseButton.LeftButton
+                and event.position().y() < self._header_sep.mapTo(self, QPoint(0, 0)).y()):
+            self._drag_from = event.globalPosition().toPoint() - self.pos()
+            self.grabMouse()  # the header's rich-text label would otherwise take the moves for itself
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent | None) -> None:
+        if event is None or self._drag_from is None:
+            super().mouseMoveEvent(event)
+            return
+        cursor = event.globalPosition().toPoint()
+        area = (QGuiApplication.screenAt(cursor) or self.screen()).availableGeometry()
+        pos = cursor - self._drag_from
+        self.move(max(area.left(), min(pos.x(), area.right() - self.width())),
+                  max(area.top(), min(pos.y(), area.bottom() - self.height())))
+        event.accept()
+
+    def mouseReleaseEvent(self, event: QMouseEvent | None) -> None:
+        if event is None or self._drag_from is None:
+            super().mouseReleaseEvent(event)
+            return
+        self._drag_from = None
+        self.releaseMouse()
+        event.accept()
+        self._anchor = self.dropped_anchor()
+        self.moved.emit(QRect(self._anchor))
+
+    def dropped_anchor(self) -> QRect:
+        """A sprite-sized rect GAP under the card (over it when the card sits below the pet, or when there is no
+        room under it), so _relayout keeps this spot and the pet has somewhere to stand."""
+        size = self._anchor.size() if self._anchor is not None else QSize(128, 128)
+        geo = self.geometry()
+        area = (QGuiApplication.screenAt(geo.center()) or self.screen()).availableGeometry()
+        above = self._above is not False
+        if above and geo.bottom() + self.GAP + size.height() > area.bottom():
+            above = False
+        elif not above and geo.top() - self.GAP - size.height() < area.top():
+            above = True
+        self._above = above
+        top = geo.bottom() + 1 + self.GAP if above else geo.top() - self.GAP - size.height() + 1
+        # centred the way _relayout centres the card on it, so a relayout keeps the card exactly here
+        return QRect(QPoint(geo.x() + self.WIDTH // 2 - (size.width() - 1) // 2, top), size)
 
     def keyPressEvent(self, event: QKeyEvent | None) -> None:
         if event is not None and event.key() == Qt.Key.Key_Escape:

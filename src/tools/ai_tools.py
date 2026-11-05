@@ -319,6 +319,8 @@ class Edit:
     after: str
     crlf: bool
     diff: str
+    added: int = 0  # line counts from the whole diff (the shown one may be cut)
+    removed: int = 0
 
 
 def plan_edit(root: Path | None, args: dict[str, Any]) -> Edit:
@@ -330,7 +332,10 @@ def plan_edit(root: Path | None, args: dict[str, Any]) -> Edit:
     rel = _rel(resolve(root, ""), path) if root else str(path)  # no folder: show the full path in the approval
     if len(new) > MAX_SAVE_CHARS:
         raise ValueError(f"new_text is longer than {MAX_SAVE_CHARS} characters")
-    if not old:
+    bom = False
+    if not old and path.is_file() and path.stat().st_size == 0:  # an empty file has no text to match: fill it
+        before, after, crlf = "", new, False
+    elif not old:
         if path.exists():
             raise ValueError("that file exists; give old_text to change it")
         before, after, crlf = None, new, False
@@ -344,19 +349,28 @@ def plan_edit(root: Path | None, args: dict[str, Any]) -> Edit:
         except UnicodeDecodeError:
             raise ValueError("not a UTF-8 text file") from None
         crlf = "\r\n" in before
-        text = before.replace("\r\n", "\n") if crlf else before
+        bom = before.startswith("\ufeff")  # read_file shows line 1 without it, so match without it
+        text = before.removeprefix("\ufeff")
+        text = text.replace("\r\n", "\n") if crlf else text
         old = old.replace("\r\n", "\n")
-        count = text.count(old)
+        first = text.find(old)
+        # a second find from first + 1 also catches overlapping matches, which str.count misses
+        count = 0 if first < 0 else 1 if text.find(old, first + 1) < 0 else max(2, text.count(old))
         if count != 1:
             raise ValueError("old_text was not found; read the file again" if not count else
                              f"old_text appears {count} times; include more surrounding lines")
-        after = text.replace(old, new.replace("\r\n", "\n"), 1)
-    diff = "".join(difflib.unified_diff(
-        (before or "").replace("\r\n", "\n").splitlines(keepends=True), after.splitlines(keepends=True),
-        f"a/{rel}", f"b/{rel}", n=2))
+        after = text[:first] + new.replace("\r\n", "\n") + text[first + len(old):]
+        if after == text:
+            raise ValueError("new_text is the same as old_text; nothing would change")
+    lines = list(difflib.unified_diff(
+        (before or "").removeprefix("\ufeff").replace("\r\n", "\n").splitlines(keepends=True),
+        after.splitlines(keepends=True), f"a/{rel}", f"b/{rel}", n=2))
+    added = sum(1 for x in lines if x.startswith("+") and not x.startswith("+++"))
+    removed = sum(1 for x in lines if x.startswith("-") and not x.startswith("---"))
+    diff = "".join(x if x.endswith("\n") else x + "\n\\ No newline at end of file\n" for x in lines)
     if len(diff) > MAX_DIFF_CHARS:
         diff = diff[:MAX_DIFF_CHARS] + f"\n... diff cut, {len(diff) - MAX_DIFF_CHARS} more characters"
-    return Edit(path, rel, before, after, crlf, diff or "(no change)")
+    return Edit(path, rel, before, "\ufeff" + after if bom else after, crlf, diff or "(no change)", added, removed)
 
 
 def plan_edits(root: Path | None, args: dict[str, Any]) -> list[Edit]:
@@ -407,10 +421,7 @@ def apply_edits(edits: list[Edit]) -> str:
                     "the other files were put back")
     rows = []
     for edit in edits:
-        lines = edit.diff.splitlines()
-        added = sum(1 for x in lines if x.startswith("+") and not x.startswith("+++"))
-        removed = sum(1 for x in lines if x.startswith("-") and not x.startswith("---"))
-        rows.append(f"{'created' if edit.before is None else 'edited'} {edit.rel} (+{added} -{removed} lines)")
+        rows.append(f"{'created' if edit.before is None else 'edited'} {edit.rel} (+{edit.added} -{edit.removed} lines)")
     return "\n".join(rows)
 
 
@@ -461,7 +472,9 @@ def parse_boxes(raw: str, width: int, height: int, elements: str = "", shot: str
             x, y, w, h = (int(n) for n in box.split(","))
         except ValueError:
             continue
-        controls.append(f'[{kind}] "{" ".join(name.split())[:60]}" ({x + w // 2}, {y + h // 2})')
+        cx, cy = x + w // 2, y + h // 2
+        if 0 <= cx < width and 0 <= cy < height:  # a control off the primary monitor cannot be clicked
+            controls.append(f'[{kind}] "{" ".join(name.split())[:60]}" ({cx}, {cy})')
     lines = []
     for line in raw.splitlines():
         box, _tab, text = line.partition("\t")
@@ -506,7 +519,10 @@ def computer_action(name: str, args: dict[str, Any]) -> tuple[str, str]:
         risky = keys.split("+")[0] in ("delete", "del") or keys == "alt+f4" or "win" in keys.split("+")
         return f"press {keys}", keys if risky else ""
     amount = num("amount")
-    return f"scroll {'down' if amount > 0 else 'up'} {abs(amount)}", ""
+    if ("x" in args) != ("y" in args):
+        raise ValueError("give both x and y, or neither")
+    at = f" at ({num('x')}, {num('y')})" if "x" in args else ""
+    return f"scroll {'down' if amount > 0 else 'up'} {abs(amount)}{at}", ""
 
 
 def destructive_reason(command: str) -> str:

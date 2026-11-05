@@ -11,6 +11,7 @@ killed when the app quits.
 
 from __future__ import annotations
 
+import ctypes
 import json
 import tempfile
 import threading
@@ -53,9 +54,9 @@ def _strings(value: Any) -> list[str]:
     return found
 
 
-def _front_window_shot() -> QImage | None:
-    """Only the front window, cut from a grab of the monitor it is on (None when that fails)."""
-    found = computer.window_on_monitor(computer.foreground_window())
+def _front_window_shot(hwnd: int) -> QImage | None:
+    """Only window `hwnd`, cut from a grab of the monitor it is on (None when that fails)."""
+    found = computer.window_on_monitor(hwnd)
     if found is None:
         return None
     device, (left, top, right, bottom), (mon_w, mon_h) = found
@@ -67,25 +68,40 @@ def _front_window_shot() -> QImage | None:
     return image.copy(round(left * sx), round(top * sy), round((right - left) * sx), round((bottom - top) * sy))
 
 
+def _ours(win: Any) -> list[Any]:
+    return [w for w in (win, win._ai_chat) if w is not None and w.isVisible()]
+
+
+def show_quietly(w: Any) -> None:
+    """Show without taking the keyboard from the app the user (or the model) is in."""
+    w.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+    w.show()
+    w.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
+
+
 def grab_screen(win: Any, done: Callable[[Any], None], primary: bool = False, window: bool = False) -> None:
-    """Grab the screen under the cursor (or the primary one, with the front window's handle; or with `window`,
-    just the front window) on the Qt thread, with the pet `win` and its chat hidden for the shot."""
-    chat = win._ai_chat
-    shown = [w for w in (win, chat) if w is not None and w.isVisible()]
-    for w in shown:  # keep the pet and the chat out of the grab
+    """Grab the screen under the cursor (or the primary one, with the front app's handle; or with `window`,
+    just the front app's window) on the Qt thread, with the pet `win` and its chat left out of the shot.
+    They stay on screen (excluded from capture); only where Windows cannot exclude them are they hidden."""
+    shown = _ours(win)
+    hidden = [w for w in shown if not computer.exclude_from_capture(int(w.winId()), True)]
+    for w in hidden:
         w.hide()
 
     def grab() -> None:
-        image = _front_window_shot() if window else None
+        hwnd = computer.focus_front_app() if primary else computer.front_app()  # the app under the pet and chat
+        image = _front_window_shot(hwnd) if window else None
         if image is None:
             screen = (None if primary else QGuiApplication.screenAt(QCursor.pos())) or QGuiApplication.primaryScreen()
             image = screen.grabWindow(0).toImage() if screen is not None else None
-        hwnd = computer.foreground_window()  # the app under the hidden pet and chat
         for w in shown:
-            w.show()
+            if w in hidden:
+                show_quietly(w)
+            else:
+                computer.exclude_from_capture(int(w.winId()), False)
         done((image, hwnd) if primary else image)
 
-    QTimer.singleShot(180, grab)
+    QTimer.singleShot(180 if hidden else 30, grab)  # the compositor applies the affinity on its next frame
 
 
 class AiToolHost(QObject):
@@ -301,13 +317,16 @@ class AiToolHost(QObject):
         return "\n".join(lines)
 
     def _act(self, done: Callable[[Any], None], name: str, args: dict[str, Any]) -> None:
-        """Hide the pet and the chat (so they get no click and no keys), act, then bring them back unfocused."""
-        shown = [w for w in (self._win, self._win._ai_chat) if w is not None and w.isVisible()]
-        for w in shown:
+        """Make the pet and the chat click-through (hidden only where Windows cannot), give the keyboard to the
+        app under them, act, then restore them."""
+        shown = _ours(self._win)
+        hidden = [w for w in shown if not computer.click_through(int(w.winId()), True)]
+        for w in hidden:
             w.hide()
         before = [("", False)]
 
         def act() -> str:  # on a worker thread: typing takes 20 ms a character and must not freeze the pet
+            computer.focus_front_app()  # the chat has the keyboard after the user pressed Enter
             before[0] = computer.front_state()
             try:
                 if name == "mouse_click":
@@ -322,15 +341,16 @@ class AiToolHost(QObject):
                 else:
                     computer.scroll(args["amount"], args.get("x"), args.get("y"))
                     result = "scrolled"
-            except (ValueError, OSError) as exc:
+            except (ValueError, OSError, TypeError, ctypes.ArgumentError) as exc:  # a bad arg must not hang the call
                 result = f"error: {exc}"
             return result
 
         def finish(result: str) -> None:
             for w in shown:  # back without taking the keyboard from the app the model is driving
-                w.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
-                w.show()
-                w.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
+                if w in hidden:
+                    show_quietly(w)
+                else:
+                    computer.click_through(int(w.winId()), False)
             done(result + "." + computer.front_note(before[0], computer.front_state()) + " Call screen_map for details."
                  if not result.startswith("error") else result)
 
@@ -340,7 +360,7 @@ class AiToolHost(QObject):
             self._call.emit((lambda _done: QTimer.singleShot(250, lambda: finish(result)),
                              {"event": threading.Event(), "result": None}))
 
-        QTimer.singleShot(180, lambda: threading.Thread(target=work, daemon=True).start())
+        QTimer.singleShot(180 if hidden else 0, lambda: threading.Thread(target=work, daemon=True).start())
 
     def _add_mcp_server(self, args: dict[str, Any]) -> str:
         server, command = args.get("name"), args.get("command")

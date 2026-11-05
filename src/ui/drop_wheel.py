@@ -140,6 +140,7 @@ class RadialDropWheel(QWidget):
         self._open_anim.setDuration(self.OPEN_ANIM_MS)
         self._open_anim.valueChanged.connect(self._on_open_anim_value)
 
+        self._drag_image: int | None = None  # the SysDragImage window the wheel last slotted under
         self._watchdog_timer = QTimer(self)
         self._watchdog_timer.setInterval(80)
         self._watchdog_timer.timeout.connect(self._on_watchdog_tick)
@@ -306,8 +307,9 @@ class RadialDropWheel(QWidget):
         self._set_hovered(new_idx)
         return self.selected_option()
 
-    def restack_topmost(self) -> None:
-        """Topmost, but directly under the shell's drag image so the dragged item stays visible."""
+    def restack_topmost(self, only_if_changed: bool = False) -> None:
+        """Topmost, but directly under the shell's drag image so the dragged item stays visible.
+        `only_if_changed` (the 80ms watchdog) restacks only when the drag image appeared, went or changed."""
         if sys.platform != "win32" or not self._always_on_top or not self.isVisible():
             return
         u32 = ctypes.windll.user32
@@ -315,6 +317,9 @@ class RadialDropWheel(QWidget):
         u32.SetWindowPos.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
                                      ctypes.c_int, ctypes.c_int, ctypes.c_uint]
         drag_image = u32.FindWindowW("SysDragImage", None)
+        if only_if_changed and drag_image == self._drag_image:
+            return
+        self._drag_image = drag_image
         # HWND_TOPMOST = -1; SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE
         u32.SetWindowPos(int(self.winId()), drag_image or -1, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)
 
@@ -322,7 +327,7 @@ class RadialDropWheel(QWidget):
         if not self.isVisible():
             self._watchdog_timer.stop()
             return
-        self.restack_topmost()
+        self.restack_topmost(only_if_changed=True)
         cursor_pos = QCursor.pos()
         if not self.geometry().adjusted(-14, -14, 14, 14).contains(cursor_pos):
             self.dismiss()
