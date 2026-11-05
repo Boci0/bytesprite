@@ -54,7 +54,6 @@ EXTRA_SLICES: tuple[ToolWheelOption, ...] = (
     ToolWheelOption("UUID", "new", "#8A9AF2", "clipvault:dev:uuid"),
     ToolWheelOption("VS Code", "project", "#41A6F6", "project:code"),
     ToolWheelOption("Terminal", "project", "#C9D1D9", "project:terminal"),
-    ToolWheelOption("Lyrics", "on/off", "#EF7D57", "lyrics:toggle"),
 )
 
 

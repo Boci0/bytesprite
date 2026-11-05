@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "bytesprite"
 dynamic = ["version"]
-description = "Frosted paperclip desktop companion for Windows with Pear Music lyrics and dev tools"
+description = "Frosted paperclip desktop companion for Windows with dev tools"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"

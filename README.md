@@ -2,13 +2,11 @@
 
 <p align="center">
   <img src="docs/images/idle.png" width="144" alt="ByteSprite idling">
-  <img src="docs/images/music.png" width="144" alt="ByteSprite grooving to music">
   <img src="docs/images/spin.png" width="144" alt="ByteSprite spinning">
 </p>
 
-A small frosted-glass paperclip that lives on your Windows desktop. It shows synced lyrics for whatever
-Pear Music is playing, carries a pocket full of developer and file tools behind a click, a hold
-or a drag, and can open an AI chat with the model and key you bring.
+A small frosted-glass paperclip that lives on your Windows desktop. It carries a pocket full of developer and file
+tools behind a click, a hold or a drag, and can open an AI chat with the model and key you bring.
 
 Windows 10 / 11, PyQt6 (the installed app bundles its own Python). No telemetry, no asset files: every
 sprite is generated in code.
@@ -67,14 +65,6 @@ powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\ByteSprite\app\unins
 
 `-Purge` also deletes your settings.
 
-## Pear Music lyrics
-
-Right-click > **Lyrics > Show Song Lyrics**. ByteSprite reads the playing track from Windows media
-controls (no Pear plugin needed), then shows the current line in a small card. Lyrics
-come from Pear's own lyrics cache first, so anything Pear can show works, then from
-[LRCLIB](https://lrclib.net). Turning it on sends the song title and artist to LRCLIB. While a song
-plays, the paperclip grooves along.
-
 ## AI chat (opt-in)
 
 Hold the pet and pick **Ask AI**, use **AI Assist > Open AI Chat**, or press `Ctrl+Shift+Alt+A`. The
@@ -102,11 +92,11 @@ on the model. The header shows the real model behind an alias, e.g. `DeepSeek-V4
 
 ## What else it does
 
-- **Click** cycles the HUD: CPU / RAM / Disk, Pomodoro, File Forge, Clip Vault, Project (git), Lyrics, Hints.
+- **Click** cycles the HUD: CPU / RAM / Disk, Pomodoro, File Forge, Clip Vault, Project (git), Hints.
 - **Double-click** snips a screen region to the clipboard.
 - **Hold** opens a tool wheel: OCR, clipboard history, search, focus timer, mute, Ask AI, web shortcuts.
   Drag onto a slice and release to run it; release over the center or off the ring to close it.
-  **Settings > Customize Wheel** adds extra tools (Snip, Color, JSON, UUID, VS Code, Terminal, Lyrics)
+  **Settings > Customize Wheel** adds extra tools (Snip, Color, JSON, UUID, VS Code, Terminal)
   or your own website and app slices, up to 10.
 - **Smart hints** (offline, no network): copy a JWT, an epoch timestamp or one-line JSON and the pet
   offers to decode or format it; ten minutes in a code editor suggests a focus session. Click to run,

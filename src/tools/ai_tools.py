@@ -63,7 +63,6 @@ PET_ACTIONS: dict[str, str] = {
     "pomodoro:break": "start a short break",
     "pomodoro:reset": "reset the focus timer",
     "hints:toggle": "turn smart suggestions on or off",
-    "lyrics:toggle": "turn song lyrics on or off",
     "pet:mute": "mute or unmute the system volume",
     "project:code": "open the Project Folder in VS Code",
     "project:terminal": "open a terminal in the Project Folder",
