@@ -27,11 +27,13 @@ import http.client
 import json
 import logging
 import os
+import random
 import re
 import sys
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date
 import html
@@ -70,6 +72,7 @@ COMPACT_PROMPT = ("Summarize the conversation so far so it can continue without 
                   "file path, command, number and open task the user may come back to; drop small talk. "
                   "Plain notes, no preamble.")
 TOOLS_MARK = "[Tools run (added by the app; output may be cut short):"
+MAX_TOOL_LINES = 12  # tool calls an earlier answer's note lists
 MAX_REPLY_TOKENS = 8192  # the answer alone; most current models allow it
 MAX_THINKING_TOKENS = 32000  # reasoning and answer share max_tokens, so thinking gets a bigger budget
 MAX_TOOL_ROUNDS = 100  # tool rounds one message may trigger; multi-file jobs need many, Stop ends a stuck loop
@@ -89,13 +92,15 @@ USER_NOTE = ("\n\n[ByteSprite: the user sent this while you worked: {text}\nFini
 MAX_ANSWER_TOKENS = 3_000_000  # billable tokens (cached prompt counts a tenth) over every round of one answer; then tools go off
 OVER_NOTE = ("\n\n[ByteSprite: this answer has used its token budget, so tools are off now. Say what is done and "
              "what is left; the user can send another message to continue.]")
-RETRY_DELAYS = (1.0, 3.0)  # waits before the 2nd and 3rd try of a call that hit a rate limit, a 5xx or a dropped connection
+RETRY_DELAYS = (1.0, 3.0, 8.0)  # waits before each retry of a call that hit a rate limit, a 5xx or a dropped connection
+MAX_RETRY_AFTER_S = 30.0  # a Retry-After header longer than this is cut to it
 _RETRY_CODES = {429, 500, 502, 503, 504, 529}
 STEER_STOP = 6  # in a row: the model ignored the note, so tools go off for the rest of the answer
 STEER_AFTER = 3  # failed tool results in a row before the model is told to change course
+REPEAT_WINDOW = 2 * STEER_STOP  # recent calls checked for repeats, so A,B,A,B loops count too
 STEER_NOTE = ("\n\n[ByteSprite: {n} tool calls in a row failed. Do not repeat them: try a different approach, or stop "
               "and tell the user what is blocking you and what you need.]")
-REPEAT_NOTE = ("\n\n[ByteSprite: the same call gave the same result {n} times in a row. It is not getting anywhere: try "
+REPEAT_NOTE = ("\n\n[ByteSprite: the same call gave the same result {n} times recently. It is not getting anywhere: try "
                "something different, or tell the user what is blocking you.]")
 STUCK_NOTE = ("\n\n[ByteSprite: that is {n} in a row, so tools are off for the rest of this answer. Tell the user what "
               "failed and what you need.]")
@@ -130,7 +135,8 @@ SYSTEM_PROMPT = (
     "file, document, clipboard or screen first, never guess paths, names or versions. (3) Take the most precise "
     "tool: files, CLIs, APIs and COM beat clicking; screen tools only for what nothing else reaches, and check "
     "each click's effect by reading, not assuming. (4) Batch: one script, one edit_files or one computer_batch call beats many tiny "
-    "steps; delete scratch files you created. (5) Verify every change by reading the result back (tests, the "
+    "steps; call independent searches and listings together in one turn, they run at the same time; delete "
+    "scratch files you created. (5) Verify every change by reading the result back (tests, the "
     "file, the document's properties) and never say done without that evidence. (6) When a step fails, read "
     "the error and fix its cause; after two similar failures change approach, never repeat the same call. "
     "(7) Keep going until the job is done or truly blocked; do not stop to ask about steps the user already "
@@ -319,8 +325,7 @@ def chat_messages(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for turn in reversed(history):
         content = turn["content"][:MAX_INPUT_CHARS]
         if tools := turn.get("tools"):
-            content = tools_block(tools, min(RECENT_TOOL_CHARS // len(tools), RECENT_TOOL_CHARS // 2)
-                                  if recent else OLD_TOOL_CHARS) + content
+            content = tools_block(tools, _tool_share(tools) if recent else OLD_TOOL_CHARS) + content
             recent = False
         if kept and total + len(content) > MAX_HISTORY_CHARS:
             break
@@ -335,8 +340,20 @@ def chat_messages(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [{"role": "system", "content": "\n\n".join([system, *extra])}, *reversed(kept)]
 
 
+def _tool_share(tools: list[tuple[str, str]]) -> int:
+    """Output chars per tool for the newest answer that ran tools (only the newest MAX_TOOL_LINES are shown)."""
+    return min(RECENT_TOOL_CHARS // min(len(tools), MAX_TOOL_LINES), RECENT_TOOL_CHARS // 2)
+
+
 def history_chars(history: list[dict[str, Any]]) -> int:
-    return sum(len(t["content"]) + sum(len(n) + len(o) for n, o in t.get("tools") or []) for t in history)
+    """Characters `chat_messages` would send for these turns (tool output counted as capped, not as stored)."""
+    total, recent = 0, True
+    for t in reversed(history):
+        total += len(t["content"][:MAX_INPUT_CHARS])
+        if tools := t.get("tools"):
+            total += len(tools_block(tools, _tool_share(tools) if recent else OLD_TOOL_CHARS))
+            recent = False
+    return total
 
 
 def summary_turns(summary: str) -> list[dict[str, Any]]:
@@ -352,16 +369,17 @@ def compact_split(history: list[dict[str, Any]]) -> int:
     return split if split >= 2 else 0
 
 
-def compact_history(base_url: str, key: str, model: str,
-                    history: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int, str]:
+def compact_history(base_url: str, key: str, model: str, history: list[dict[str, Any]],
+                    cancel: threading.Event | None = None) -> tuple[list[dict[str, Any]], int, str]:
     """(history to send, turns summarized, summary). Any failure sends the history as it was: nothing is lost."""
     split = compact_split(history)
     if not split:
         return history, 0, ""
     try:
-        summary = ask(base_url, key, model, [*chat_messages(history[:split]),
-                                             {"role": "user", "content": COMPACT_PROMPT}]).text.strip()
+        summary = ask(base_url, key, model, [*chat_messages(history[:split]), {"role": "user", "content": COMPACT_PROMPT}],
+                      web=False, cancel=cancel).text.strip()
     except ValueError:
+        _check(cancel)  # Stop during the summary stops the answer too
         return history, 0, ""
     if not summary:
         return history, 0, ""
@@ -440,6 +458,12 @@ def ask(base_url: str, key: str, model: str, messages: list[dict[str, Any]], *,
     such as "Writing 840 chars" while an OpenAI-style answer streams in or a tool runs.
     """
     thinking = fit_thinking(base_url, thinking, model)
+    if progress is not None and cancel is not None:  # streams report every chunk, so Stop ends one mid-stream
+        report = progress
+
+        def progress(text: str) -> None:
+            _check(cancel)
+            report(text)
     if is_anthropic(base_url):
         return _post_anthropic(base_url, key, model, messages, thinking, timeout, host, progress, web, steer, cancel)
     while True:
@@ -463,7 +487,19 @@ def ask(base_url: str, key: str, model: str, messages: list[dict[str, Any]], *,
 
 
 class _Transient(ValueError):
-    """A failure worth another try: rate limit, server error, dropped connection."""
+    """A failure worth another try: rate limit, server error, dropped connection. `wait`: the server's Retry-After."""
+
+    def __init__(self, message: str, wait: float | None = None) -> None:
+        super().__init__(message)
+        self.wait = wait
+
+
+def _retry_after(headers: Any) -> float | None:
+    """Seconds from a Retry-After header (the seconds form only), capped at MAX_RETRY_AFTER_S."""
+    try:
+        return min(max(float((headers or {}).get("Retry-After")), 0.0), MAX_RETRY_AFTER_S)
+    except (TypeError, ValueError):
+        return None
 
 
 def _request(base_url: str, key: str, path: str, body: dict[str, Any] | None, timeout: float,
@@ -476,8 +512,9 @@ def _request(base_url: str, key: str, path: str, body: dict[str, Any] | None, ti
             if attempt == len(RETRY_DELAYS):
                 logger.warning("request %s failed after %d tries: %s", path.split("?")[0], attempt + 1, exc)
                 raise
-            logger.info("request %s: %s, retrying in %.0f s", path.split("?")[0], exc, RETRY_DELAYS[attempt])
-            time.sleep(RETRY_DELAYS[attempt])
+            delay = exc.wait if exc.wait is not None else RETRY_DELAYS[attempt] * random.uniform(1.0, 1.25)  # jitter
+            logger.info("request %s: %s, retrying in %.0f s", path.split("?")[0], exc, delay)
+            time.sleep(delay)
         except ValueError as exc:
             logger.warning("request %s failed: %s", path.split("?")[0], exc)
             raise
@@ -508,7 +545,9 @@ def _request_once(base_url: str, key: str, path: str, body: dict[str, Any] | Non
         if is_anthropic(base_url) and exc.code in (400, 422):  # ...except Anthropic's own error text, which names the cause
             raise ValueError(_anthropic_error(exc)) from None
         message = _HTTP_ERRORS.get(exc.code, f"http {exc.code}")
-        raise (_Transient if exc.code in _RETRY_CODES else ValueError)(message) from None
+        if exc.code in _RETRY_CODES:
+            raise _Transient(message, _retry_after(exc.headers)) from None
+        raise ValueError(message) from None
     except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:  # e.g. BadStatusLine
         slow = isinstance(exc, TimeoutError) or isinstance(getattr(exc, "reason", None), TimeoutError)
         raise (ValueError if slow else _Transient)("network") from None  # a timeout already cost the full wait
@@ -641,6 +680,7 @@ def _read_anthropic_stream(resp: Any, progress: Callable[[str], None]) -> dict[s
     that ends before `message_stop` is a dropped connection."""
     blocks: dict[int, dict[str, Any]] = {}
     json_bufs: dict[int, list[str]] = {}  # tool input arrives as JSON fragments
+    bad: dict[str, str] = {}  # tool_use id -> why its input was not valid JSON
     message: dict[str, Any] = {}
     usage: dict[str, Any] = {}
     stop = None
@@ -653,8 +693,8 @@ def _read_anthropic_stream(resp: Any, progress: Callable[[str], None]) -> dict[s
         if parts is not None and index in blocks:
             try:
                 value = json.loads("".join(parts) or "{}")
-            except ValueError:
-                value = {}
+            except ValueError as exc:
+                value, bad[str(blocks[index].get("id"))] = {}, str(exc)[:120]
             blocks[index]["input"] = value if isinstance(value, dict) else {}
 
     for raw_line in _stream_lines(resp):
@@ -727,7 +767,7 @@ def _read_anthropic_stream(resp: Any, progress: Callable[[str], None]) -> dict[s
     for index in list(json_bufs):
         finish(index)
     return {"model": message.get("model"), "content": [blocks[i] for i in sorted(blocks)], "usage": usage,
-            "stop_reason": stop}
+            "stop_reason": stop, "bad_input": bad}
 
 
 def _billable(fresh: int, cached: int, completion: int) -> int:
@@ -807,6 +847,8 @@ def _post_anthropic(base_url: str, key: str, model: str, messages: list[dict[str
     tool_rounds = 0
     fails: list[Any] = [0, 0, None]
     read_local = any(read_local_data(m) for m in messages)  # set once a tool has returned the user's own data
+    seen_buf: list[Any] = ["", 0]  # see _grow_seen
+    start = len(turns)  # this answer's own turns follow
     for _ in range(MAX_NATIVE_ROUNDS + MAX_TOOL_ROUNDS + 1):
         body: dict[str, Any] = {"model": model, "system": system, "messages": turns, **({"tools": tools} if tools else {}),
                                 "max_tokens": MAX_THINKING_TOKENS if effort else MAX_REPLY_TOKENS,
@@ -835,14 +877,20 @@ def _post_anthropic(base_url: str, key: str, model: str, messages: list[dict[str
             if data.get("stop_reason") == "tool_use" and host is not None and tool_rounds < MAX_TOOL_ROUNDS:
                 results = []
                 shots = False
-                for b in (b for b in blocks if b.get("type") == "tool_use"):
+                bad = data.get("bad_input") or {}  # tool inputs that streamed in as broken JSON
+                uses = [b for b in blocks if b.get("type") == "tool_use"]
+                ready = [None] * len(uses) if bad else _run_calls(
+                    [(b["name"], b.get("input")) for b in uses], host, _grow_seen(seen_buf, turns) if read_local else None, progress)
+                for b, out in zip(uses, ready):
                     _check(cancel)
-                    seen = json.dumps([t["content"] for t in turns if t["role"] == "user"], ensure_ascii=False) if read_local else None
-                    out = _run_tool(b["name"], b.get("input"), host, seen)
+                    if b.get("id") in bad:
+                        out = (f"error: the arguments for {b['name']} were not valid JSON ({bad[b['id']]}); "
+                               "send the call again with a JSON object")
+                    elif out is None:
+                        out = _run_tool(b["name"], b.get("input"), host, _grow_seen(seen_buf, turns) if read_local else None)
                     read_local = read_local or b["name"] in LOCAL_DATA_TOOLS or MCP_SEP in b["name"]
                     shot = _take_shot(host)
-                    sent = out + _steer(b["name"], f"{b['name']}{json.dumps(b.get('input'), sort_keys=True)}", out, fails,
-                                        paid)
+                    sent = out + _steer(b["name"], _call_key(b["name"], b.get("input")), out, fails, paid)
                     content: Any = sent if not shot else [{"type": "text", "text": sent}, {"type": "image", "source": {
                         "type": "base64", "media_type": "image/png", "data": shot.split(",", 1)[1]}}]
                     results.append({"type": "tool_result", "tool_use_id": b["id"], "content": content})
@@ -850,11 +898,16 @@ def _post_anthropic(base_url: str, key: str, model: str, messages: list[dict[str
                     shots = shots or bool(shot)
                 tool_rounds += 1
                 note = [{"type": "text", "text": (BUDGET_NOTE if tool_rounds == MAX_TOOL_ROUNDS else PACE_NOTE).strip()}]                     if tool_rounds in (MAX_TOOL_ROUNDS, PACE_AT) else []
+                _check(cancel)  # a stopped answer must not take steer text meant for the next one
                 if said := _steered(steer):
                     note = [*note, {"type": "text", "text": said.strip()}]
+                if results:  # the prompt cache mark moves to the newest result, so the next round reads the rest cached
+                    _unmark(turns, start)
+                    results[-1] = {**results[-1], "cache_control": {"type": "ephemeral"}}
                 turns = [*turns, {"role": "assistant", "content": blocks}, {"role": "user", "content": results + note}]
                 if shots and _shot_count(turns) > KEEP_SHOTS:
                     turns = _drop_old_shots(turns)  # only the newest screenshot stays in the request
+                turns = _trim_claude_results(turns, start) or turns
                 continue
             text = "".join(b["text"] for b in blocks if b.get("type") == "text" and isinstance(b.get("text"), str))
             sources: dict[str, str] = {}
@@ -888,7 +941,9 @@ def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], t
           cancel: threading.Event | None = None) -> AiReply:
     thinks = thinking in THINKING_LEVELS and thinking != "off"
     messages = list(messages)
+    start = len(messages)  # this answer's own turns follow
     read_local = any(read_local_data(m) for m in messages)  # set once a tool has returned the user's own data
+    seen_buf: list[Any] = ["", 0]  # see _grow_seen
     spent = [0, 0, 0, 0]  # prompt, completion, reasoning, total tokens over every round
     paid = 0  # billable tokens (see _billable)
     used: list[tuple[str, str]] = []
@@ -915,7 +970,11 @@ def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], t
                 data = _request(base_url, key, "/chat/completions", body, wait, None)
                 _NO_STREAM.add((base_url, model))
         except ValueError as exc:
-            if str(exc) != "bad request" or shot_at is None:
+            if str(exc) != "bad request":
+                raise
+            if shot_at is None:
+                if used:  # `ask` would restart the answer without thinking or tools, running its edits and commands again
+                    raise ValueError("refused mid-answer") from None
                 raise
             _NO_VISION.add((base_url, model))  # this model refuses the screenshot: go on with the text lists
             messages[shot_at] = {"role": "user", "content": "(this model cannot see screenshots; use the text lists)"}
@@ -939,28 +998,30 @@ def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], t
             paid += (_billable(_int(usage.get("prompt_tokens")) - hit, hit, _int(usage.get("completion_tokens")))
                      if usage.get("prompt_tokens") or usage.get("completion_tokens") else _int(usage.get("total_tokens")))
             calls = message.get("tool_calls") or []
-            if calls and tools:
+            if calls and "tools" in body:  # never run calls this round did not offer tools for (last round, stuck, budget)
                 # echo the model's own turn (DeepSeek also wants its reasoning back), then answer each call
                 messages.append({k: v for k, v in message.items()
                                  if k in ("role", "content", "tool_calls", "reasoning_content") and v is not None})
-                for call in calls:
+                named = [(c["function"]["name"], c["function"].get("arguments")) for c in calls]
+                ready = _run_calls(named, host, _grow_seen(seen_buf, messages) if read_local else None, progress)
+                for call, result in zip(calls, ready):
                     _check(cancel)
                     fn = call["function"]
-                    # never the model's own turns: a URL it wrote itself would vouch for itself
-                    seen = json.dumps([m.get("content") for m in messages if m.get("role") != "assistant"],
-                                      ensure_ascii=False) if read_local else None
-                    if progress is not None:
-                        progress(f"Running {fn['name']}")
-                    result = _run_tool(fn["name"], fn.get("arguments"), host, seen)
+                    if result is None:
+                        seen = _grow_seen(seen_buf, messages) if read_local else None
+                        if progress is not None:
+                            progress(f"Running {fn['name']}")
+                        result = _run_tool(fn["name"], fn.get("arguments"), host, seen)
                     last = round_ == MAX_TOOL_ROUNDS - 1 and call is calls[-1]  # the next round sends no tools
                     messages.append({"role": "tool", "tool_call_id": call["id"],
-                                     "content": result + _steer(fn["name"], fn["name"] + str(fn.get("arguments")), result, fails, paid)
+                                     "content": result + _steer(fn["name"], _call_key(fn["name"], fn.get("arguments")), result, fails, paid)
                                      + (BUDGET_NOTE if last else PACE_NOTE if round_ == PACE_AT - 1 and call is calls[-1] else "")})
                     read_local = read_local or fn["name"] in LOCAL_DATA_TOOLS or MCP_SEP in fn["name"]
                     used.append((tool_note(fn["name"], fn.get("arguments")), result))
                     shot = _take_shot(host)
                     if shot:
                         shots.append(shot)
+                _check(cancel)  # a stopped answer must not take steer text meant for the next one
                 if said := _steered(steer):
                     messages[-1] = {**messages[-1], "content": messages[-1]["content"] + said}
                 if shots and (base_url, model) not in _NO_VISION:
@@ -970,6 +1031,7 @@ def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], t
                         {"type": "text", "text": "Screenshot from screen_map:"},
                         {"type": "image_url", "image_url": {"url": shots[-1]}}]})
                     shot_at = len(messages) - 1
+                _trim_results(messages, start)
                 continue
             reply = AiReply(
                 text=content.strip() if isinstance(content, str) else "",
@@ -996,19 +1058,22 @@ def _stuck(state: list[Any]) -> bool:
 
 
 def _failed(result: str) -> bool:
-    head = result.lstrip()[:60]
+    head = result.lstrip()
+    if head.startswith("[MCP server"):  # its data label comes first; the server's own error follows
+        head = head.partition("\n")[2]
+    head = head[:60]
     return head.startswith(("error", "stopped after")) or (head.startswith("exit code") and not head.startswith("exit code 0"))
 
 
 def _steer(name: str, call: str, result: str, state: list[Any], tokens: int = 0) -> str:
     """The note to add to a tool result once STEER_AFTER results in a row failed, the same call gave the same
-    result that often, or the answer used MAX_ANSWER_TOKENS; `state` is [failure streak, repeat streak, last
-    (call, result)] and lives for one answer. Also logs the call (name and outcome only: never arguments or output)."""
+    result that often within the last REPEAT_WINDOW calls, or the answer used MAX_ANSWER_TOKENS; `state` is
+    [failure streak, repeat count, recent (call, result) pairs] and lives for one answer. Also logs the call (name and outcome only: never arguments or output)."""
     bad = _failed(result)
     logger.info("tool %s: %s", name, "failed" if bad else "ok")
     state[0] = state[0] + 1 if bad else 0
-    state[1] = state[1] + 1 if state[2] == (call, result) else 1
-    state[2] = (call, result)
+    window = [*(state[2] if isinstance(state[2], list) else []), (call, result)][-REPEAT_WINDOW:]
+    state[1], state[2] = window.count(window[-1]), window  # A,B,A,B repeats count, not only A,A
     if tokens >= MAX_ANSWER_TOKENS:
         return OVER_NOTE
     if _stuck(state):
@@ -1025,6 +1090,13 @@ def _take_shot(host: ToolHost | None) -> str:
 
 
 KEEP_SHOTS = 3  # old screenshots go in one batch past this, so the prompt cache holds in between
+WORKING_CHARS = 200_000  # tool output of one answer kept word for word; past it older results are trimmed
+KEEP_RESULTS = 4  # newest tool results a trim keeps whole (one trim frees room for several rounds: fewer cache misses)
+TRIM_HEAD = 300  # characters a trimmed result keeps
+TRIMMED = "\n[ByteSprite: older output trimmed to save room; run the tool again if you need it]"
+# Read-only tools that may run at the same time when one reply asks for several
+PARALLEL_SAFE = frozenset({"list_files", "find_files", "search_text", "web_search", "fetch_page"})
+MAX_PARALLEL = 4
 
 
 def _shot_count(turns: list[dict[str, Any]]) -> int:
@@ -1032,21 +1104,103 @@ def _shot_count(turns: list[dict[str, Any]]) -> int:
                for b in t["content"] if b.get("type") == "tool_result" and isinstance(b.get("content"), list))
 
 
+def _strip_thinking(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Claude, after earlier turns were edited: thinking blocks of every assistant turn but the newest go (the API
+    requires the newest one's thinking while it answers that turn's tool calls)."""
+    newest = max((i for i, t in enumerate(turns) if t["role"] == "assistant"), default=-1)
+    return [{**t, "content": [b for b in t["content"] if b.get("type") not in ("thinking", "redacted_thinking")]}
+            if t["role"] == "assistant" and isinstance(t["content"], list) and i != newest else t
+            for i, t in enumerate(turns)]
+
+
 def _drop_old_shots(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Claude: earlier tool results (all but the last turn) keep their text but lose their screenshot (each costs
-    tokens and request size). Thinking blocks are signed against the turns before them, so editing those turns
-    invalidates the signatures: the thinking blocks go too."""
+    tokens and request size); see _strip_thinking."""
     out = []
     for i, turn in enumerate(turns):
         content = turn["content"]
-        if turn["role"] == "assistant" and isinstance(content, list):
-            turn = {**turn, "content": [b for b in content if b.get("type") not in ("thinking", "redacted_thinking")]}
-        elif turn["role"] == "user" and isinstance(content, list) and i < len(turns) - 1:
+        if turn["role"] == "user" and isinstance(content, list) and i < len(turns) - 1:
             content = [{**b, "content": b["content"][0]["text"]} if b.get("type") == "tool_result"
                        and isinstance(b.get("content"), list) else b for b in content]
             turn = {**turn, "content": content}
         out.append(turn)
-    return out
+    return _strip_thinking(out)
+
+
+def _trimmed(text: str) -> str | None:
+    """The head of an old tool result plus TRIMMED, or None when it is already that short."""
+    return None if text.endswith(TRIMMED) or len(text) <= TRIM_HEAD + len(TRIMMED) else text[:TRIM_HEAD] + TRIMMED
+
+
+def _trim_results(messages: list[dict[str, Any]], start: int) -> None:
+    """Chat completions, in place: once this answer's tool results (from `start`) pass WORKING_CHARS, all but the
+    newest KEEP_RESULTS keep only their head. One trim makes room for several rounds, so the provider's prompt
+    cache breaks once per batch, not every round, and a long job never outgrows the context window."""
+    spots = [i for i in range(start, len(messages))
+             if messages[i].get("role") == "tool" and isinstance(messages[i].get("content"), str)]
+    if sum(len(messages[i]["content"]) for i in spots) <= WORKING_CHARS:
+        return
+    for i in spots[:-KEEP_RESULTS]:
+        if (short := _trimmed(messages[i]["content"])) is not None:
+            messages[i] = {**messages[i], "content": short}
+
+
+def _trim_claude_results(turns: list[dict[str, Any]], start: int) -> list[dict[str, Any]] | None:
+    """`_trim_results` for Messages API turns (a trimmed result loses its screenshot too); None when under budget."""
+    def text(block: dict[str, Any]) -> str:
+        body = block.get("content")
+        return body if isinstance(body, str) else str(body[0].get("text", "")) if isinstance(body, list) and body else ""
+
+    spots = [(t, b) for t in range(start, len(turns)) if turns[t]["role"] == "user" and isinstance(turns[t]["content"], list)
+             for b, block in enumerate(turns[t]["content"]) if block.get("type") == "tool_result"]
+    if sum(len(text(turns[t]["content"][b])) for t, b in spots) <= WORKING_CHARS:
+        return None
+    out = list(turns)
+    for t, b in spots[:-KEEP_RESULTS]:
+        block = out[t]["content"][b]
+        if (short := _trimmed(text(block))) is not None:
+            content = list(out[t]["content"])
+            content[b] = {**block, "content": short}
+            out[t] = {**out[t], "content": content}
+    return _strip_thinking(out)
+
+
+def _unmark(turns: list[dict[str, Any]], start: int) -> None:
+    """Remove the moving prompt cache mark from this answer's earlier tool results (the API allows four marks)."""
+    for t in turns[start:]:
+        if t["role"] == "user" and isinstance(t["content"], list):
+            for block in t["content"]:
+                block.pop("cache_control", None)
+
+
+def _grow_seen(buf: list[Any], messages: list[dict[str, Any]]) -> str:
+    """The link guard's chat text: JSON of every non-assistant content (a URL the model wrote itself must not vouch
+    for itself). `buf` is [text, messages added], so each content is serialized once per answer, not once per call."""
+    buf[0] += "".join(json.dumps(m.get("content"), ensure_ascii=False)
+                      for m in messages[buf[1]:] if m.get("role") != "assistant")
+    buf[1] = len(messages)
+    return buf[0]
+
+
+def _call_key(name: str, arguments: Any) -> str:
+    """A call's name plus its arguments as sorted JSON, so spacing or key order never hides a repeat."""
+    try:
+        args = arguments if isinstance(arguments, dict) else json.loads(arguments or "{}")
+        return name + json.dumps(args, sort_keys=True, ensure_ascii=False)
+    except (ValueError, TypeError, RecursionError):
+        return f"{name}{arguments}"
+
+
+def _run_calls(named: list[tuple[str, Any]], host: ToolHost | None, seen: str | None,
+               progress: Callable[[str], None] | None = None) -> list[str | None]:
+    """Results of several read-only calls (PARALLEL_SAFE) run at the same time, in call order. Any other mix gets
+    Nones: those run one at a time, since approvals and screen tools must not overlap."""
+    if len(named) < 2 or any(name not in PARALLEL_SAFE for name, _ in named):
+        return [None] * len(named)
+    if progress is not None:
+        progress(f"Running {len(named)} tools at once")
+    with ThreadPoolExecutor(min(MAX_PARALLEL, len(named))) as pool:
+        return list(pool.map(lambda call: _run_tool(call[0], call[1], host, seen), named))
 
 
 def tool_note(name: str, arguments: Any) -> str:
@@ -1062,7 +1216,9 @@ def tool_note(name: str, arguments: Any) -> str:
 def tools_block(tools: list[tuple[str, str]], per_tool: int) -> str:
     """The app's note of the tools an answer ran, each with up to `per_tool` chars of its output."""
     lines = [f"- {note}" + (f": {out[:per_tool]}" + (" [cut]" if len(out) > per_tool else "") if out else "")
-             for note, out in tools[:12]]
+             for note, out in tools[-MAX_TOOL_LINES:]]  # the newest: usually the final checks
+    if len(tools) > MAX_TOOL_LINES:
+        lines.insert(0, f"- ({len(tools) - MAX_TOOL_LINES} earlier calls not shown)")
     return TOOLS_MARK + "\n" + "\n".join(lines) + "]\n"
 
 
@@ -1116,21 +1272,32 @@ def _run_tool_raw(name: str, arguments: Any, host: ToolHost | None = None, seen:
     except (ValueError, TypeError, RecursionError):
         args = None
     if not isinstance(args, dict):
-        return "error: bad arguments"
+        return f"error: the arguments for {name} must be a JSON object, e.g. {_example_args(name, host)}"
     if name == "open_link" and seen is not None and (refused := _new_link(name, str(args.get("url", "")).strip(), host, seen)):
         return refused
     if host is not None and name not in ("web_search", "fetch_page") and any(
             s["function"]["name"] == name for s in host.specs):
         return host.run(name, args)
-    value = args.get({"web_search": "query", "fetch_page": "url"}.get(name, ""))
+    param = {"web_search": "query", "fetch_page": "url"}.get(name)
+    if param is None:
+        return f"error: there is no tool named {name}; use one of the tools offered"
+    value = args.get(param)
     if not isinstance(value, str) or not value.strip():
-        return "error: unknown tool or bad arguments"
+        return f"error: {name} needs a non-empty '{param}' string"
     if name == "fetch_page" and seen is not None and (refused := _new_link(name, value.strip(), host, seen)):
         return refused
     try:
         return web_search(value.strip()[:300]) if name == "web_search" else fetch_page(value.strip()[:2000])
     except ValueError as exc:
         return f"error: {name} failed ({exc})"
+
+
+def _example_args(name: str, host: ToolHost | None) -> str:
+    """`{"a": ..., "b": ...}` naming a tool's required parameters, for a bad-arguments error."""
+    specs = [*(host.specs if host is not None else []), SEARCH_TOOL, FETCH_TOOL]
+    need = next((s["function"].get("parameters", {}).get("required", []) for s in specs
+                 if s["function"]["name"] == name), [])
+    return "{" + ", ".join(f'"{p}": ...' for p in need) + "}"
 
 
 def _new_link(name: str, url: str, host: ToolHost | None, seen: str) -> str:

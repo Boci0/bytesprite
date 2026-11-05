@@ -79,13 +79,24 @@ def save_session(sid: str, history: list[dict[str, Any]], tasks: list[tuple[str,
     root = root or sessions_dir()
     now = time.time()
     turns = list(history)
-    while True:
-        data = json.dumps(_body(sid, turns, list(tasks or []), created or now, now), ensure_ascii=False).encode("utf-8")
-        if len(data) <= MAX_SESSION_BYTES or len(turns) <= 2:
-            break
-        turns = turns[2:]
-        while turns and turns[0]["role"] != "user":
-            turns = turns[1:]
+    # a compacted chat starts with its summary pair: it holds everything older, so it is never the part dropped
+    head = 2 if len(turns) > 2 and str(turns[0]["content"]).startswith("[Earlier conversation") else 0
+
+    def dump() -> bytes:
+        return json.dumps(_body(sid, turns, list(tasks or []), created or now, now), ensure_ascii=False).encode("utf-8")
+
+    data = dump()
+    while len(data) > MAX_SESSION_BYTES and len(turns) > head + 2:
+        # drop about the excess in one go (sizes measured once), cut before a user turn, then measure again
+        over, cut = len(data) - MAX_SESSION_BYTES, head
+        while cut < len(turns) - 2 and over > 0:
+            t = turns[cut]
+            over -= len(t["content"].encode("utf-8")) + sum(len(n) + len(o) for n, o in t.get("tools") or [])
+            cut += 1
+        while cut < len(turns) - 1 and turns[cut]["role"] != "user":
+            cut += 1
+        turns = turns[:head] + turns[cut:]
+        data = dump()
     tmp_name = ""
     try:
         root.mkdir(parents=True, exist_ok=True)

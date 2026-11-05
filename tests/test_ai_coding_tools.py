@@ -43,7 +43,7 @@ def test_edit_files_refuses_bad_plans_and_changed_files(repo: Path) -> None:
     for bad in ({"edits": []}, {"edits": "x"}, {"edits": [{"path": "a"}]},
                 {"edits": [{**ok, "path": ".env"}]}, {"edits": [{**ok, "path": ".git/app.py"}]},
                 {"edits": [{**ok, "path": "../outside.txt"}]},
-                {"edits": [ok, {**ok, "old_text": "Hello"}]},  # the same file twice
+                {"edits": [ok, {**ok, "old_text": ""}]},  # creating a file that already has an edit
                 {"edits": [ok] * (ai_tools.MAX_EDITS + 1)}):
         with pytest.raises(ValueError):
             ai_tools.plan_edits(repo, bad)
@@ -209,7 +209,7 @@ def test_host_background_start_needs_approval_and_guards_destructive(repo: Path)
     _run_on_thread(app, work)
     assert results[0] == "error: the user declined this command"
     assert results[1].startswith("started bg1") and results[2].startswith("started bg2") and results[3] == "stopped bg1"
-    assert asked == [("run_command", ""), ("run_command", ""), ("run_command", "del")]
+    assert asked == [("start_background", ""), ("start_background", ""), ("start_background", "del")]
     names = {s["function"]["name"] for s in TOOL_SPECS}
     assert {"edit_files", "plan_tasks", "start_background", "read_background", "stop_background"} <= names
     assert {"edit_files", "start_background"} <= ai_tools.APPROVED_TOOLS

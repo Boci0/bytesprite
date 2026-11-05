@@ -31,6 +31,7 @@ from src.tools.ai_assist import (BRAVE_KEY_PAGE, BRAVE_URL, COMPACT_AT, COMPACT_
                                  THINKING_LEVELS, AiAssistPlugin, fit_thinking, thinking_levels, AiJob, AiReply, ModelInfo, ToolHost, ask, chat_messages, delete_key, list_models, load_key, save_key, valid_key,
                                  valid_model, validate_base_url)
 from src.tools.ai_sessions import delete_sessions, list_sessions, load_session, new_id, save_session
+from src.ui.ai_tool_host import APPROVE_TIMEOUT_S
 from src.ui.context_menu import style_menu
 from src.ui.quick_tools import OcrJob
 from src.ui.sfx import play_cue
@@ -54,6 +55,8 @@ _FRIENDLY_ERRORS = {
     "network": "Could not reach the provider. Check your connection.",
     "forbidden": "The provider refused this key for that model.",
     "bad request": "The provider rejected the request. If Thinking is on, this model may not support it: set it Off.",
+    "refused mid-answer": ("The provider rejected the request partway through the job (often the chat got too long). "
+                           "Send a message to continue from here, or start a new chat."),
     "cut off": "The model spent its whole token budget thinking. Try a lower Thinking level.",
 }
 _FIELD_CSS = (
@@ -435,9 +438,14 @@ class ChatText(QTextBrowser):
         return True
 
     def heightForWidth(self, width: int) -> int:
-        doc = self.document().clone()
-        doc.setTextWidth(max(1, width))
-        return int(doc.size().height()) + 2
+        # cached: every draft keystroke relays the whole thread, and an uncached call clones each row's document
+        doc = self.document()
+        key = (width, doc.revision(), doc.documentMargin(), self.font().key())
+        if getattr(self, "_hfw_key", None) != key:
+            measure = doc.clone()
+            measure.setTextWidth(max(1, width))
+            self._hfw_key, self._hfw = key, int(measure.size().height()) + 2
+        return self._hfw
 
     def sizeHint(self) -> QSize:
         return QSize(200, self.heightForWidth(self.width() if self.width() > 1 else 340))
@@ -1223,7 +1231,7 @@ class AiChat(QWidget):
         def run() -> AiReply:
             if history is None:
                 return ask(url, key, model, messages or [], thinking=thinking, host=host, steer=self._take_steer, cancel=cancel)
-            sent, n, summary = (compact_history(url, key, model, history) if history_chars(history) > COMPACT_AT
+            sent, n, summary = (compact_history(url, key, model, history, cancel) if history_chars(history) > COMPACT_AT
                                 else (history, 0, ""))
             reply = ask(url, key, model, chat_messages(sent), thinking=thinking, host=host, progress=note,
                          steer=self._take_steer, cancel=cancel)
@@ -1270,6 +1278,7 @@ class AiChat(QWidget):
             if self._history and self._history[-1]["role"] == "user":
                 self._history.append({"role": "assistant", "content": "(stopped by the user before answering)"
                                       if error == "stopped" else f"(the answer failed: {friendly_error(error)})"})
+            self._save_session()  # the turn and any steer text survive a quit before the next answer
             self._relayout()
             return
         for text in said:  # steering the model read: part of the chat, in the order it was said
@@ -1623,6 +1632,16 @@ class AiChat(QWidget):
         card.body.addLayout(buttons)
         self._append(card)
         self._pending = answer
+
+        def expire() -> None:
+            if self._pending is answer:  # the worker stopped waiting (declined): the card must not look answerable
+                self._pending = None
+                card.set_header(f"Timed out  -  {what}", TEXT_DIM_HEX)
+                for btn in btns:
+                    btn.hide()
+                self._relayout()
+
+        QTimer.singleShot(int(APPROVE_TIMEOUT_S * 1000), expire)
         self.show()
         self._relayout()
 

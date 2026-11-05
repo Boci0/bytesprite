@@ -69,7 +69,7 @@ def test_deeply_nested_arguments_do_not_overflow() -> None:
         deep = {"a": [deep]}
     assert _strings(deep) == ["rm -rf /"]
     nested = '{"a":' + "[" * 6000 + "]" * 6000 + "}"
-    assert ai_assist._run_tool("list_files", nested) == "error: bad arguments"
+    assert ai_assist._run_tool("list_files", nested).startswith("error: the arguments for list_files must be")
 
 
 # --- stream caps --------------------------------------------------------------------------------------------

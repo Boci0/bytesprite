@@ -42,6 +42,7 @@ MAX_FOUND = 100
 MAX_MATCHES = 60
 MAX_SAVE_CHARS = MAX_FILE_BYTES  # one save_file call
 MAX_SCANNED = 20000  # entries one find or search walks before giving up
+MAX_CONTEXT = 3  # lines search_text may show around a match
 MAX_DIFF_CHARS = 4000  # diff shown in the chat for the user to approve
 MAX_NOTE_CHARS = 300  # one memory note
 MAX_EDITS = 12  # files one edit_files call changes
@@ -87,12 +88,14 @@ TOOL_SPECS: list[dict[str, Any]] = [
     _fn("read_file", "Read a text file anywhere on the PC, with line numbers. Secret-looking files (.env, keys) "
         "ask the user first.",
         {"path": _PATH, "start_line": {"type": "integer", "description": "First line to show, default 1"}}, ("path",)),
-    _fn("find_files", "Find files by name pattern, e.g. *.py or *config*, under a folder (default the Project "
-        "Folder or home).", {"pattern": {"type": "string"}, "path": _PATH}, ("pattern",)),
+    _fn("find_files", "Find files by name pattern, e.g. *.py or *config*, or by path pattern with a /, e.g. "
+        "tests/*.py, under a folder (default the Project Folder or home).",
+        {"pattern": {"type": "string"}, "path": _PATH}, ("pattern",)),
     _fn("search_text", "Find lines containing some text in the files under a folder (case-insensitive; default the "
-        "Project Folder or home).",
+        "Project Folder or home). Prints file:line: text.",
         {"text": {"type": "string"}, "pattern": {"type": "string", "description": "Optional file name pattern"},
-         "path": _PATH},
+         "path": _PATH, "regex": {"type": "boolean", "description": "Treat text as a regular expression"},
+         "context": {"type": "integer", "description": f"Lines shown around each match, 0 to {MAX_CONTEXT}"}},
         ("text",)),
     _fn("read_clipboard", "Read the text currently on the user's clipboard."),
     _fn("copy_text", "Put text on the user's clipboard.", {"text": {"type": "string"}}, ("text",)),
@@ -136,7 +139,8 @@ TOOL_SPECS: list[dict[str, Any]] = [
         ("path", "old_text", "new_text")),
     _fn("edit_files", "Change several files in the Project Folder as one change: the user sees every diff in a single "
         "approval and all edits are written, or none. Each edit works like edit_file (old_text must appear exactly "
-        "once; an empty old_text creates a file); at most one edit per file.",
+        "once; an empty old_text creates a file). Several edits to one file apply in order, each to the text the "
+        "one before left.",
         {"edits": {"type": "array", "items": {"type": "object", "properties": {
             "path": _PATH, "old_text": {"type": "string"}, "new_text": {"type": "string"}},
             "required": ["path", "old_text", "new_text"]}}}, ("edits",)),
@@ -225,14 +229,19 @@ def is_secret(path: Path) -> bool:
     return bool(_SECRET.search(path.name))
 
 
-def _walk(base: Path):
-    """Files under base, skipping build and VCS folders, stopping after MAX_SCANNED entries."""
+SCAN_CUT = f"\n... stopped after scanning {MAX_SCANNED} files; give a narrower path to see the rest"
+
+
+def _walk(base: Path, cut: list[bool] | None = None):
+    """Files under base, skipping build and VCS folders, stopping after MAX_SCANNED entries (`cut` gets True)."""
     seen = 0
     for top, dirs, files in os.walk(base):
         dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
         for name in sorted(files):
             seen += 1
             if seen > MAX_SCANNED:
+                if cut is not None:
+                    cut.append(True)
                 return
             yield Path(top) / name
 
@@ -254,8 +263,10 @@ def run_file_tool(root: Path | None, name: str, args: dict[str, Any], secrets: b
             folder = resolve(root, args.get("path"))
             if not folder.is_dir():
                 return "error: not a folder"
-            rows = [f"{p.name}/" if p.is_dir() else f"{p.name}  ({p.stat().st_size} bytes)"
-                    for p in sorted(folder.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))[:MAX_LISTED]]
+            entries = sorted(folder.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+            rows = [f"{p.name}/" if p.is_dir() else f"{p.name}  ({p.stat().st_size} bytes)" for p in entries[:MAX_LISTED]]
+            if len(entries) > MAX_LISTED:
+                rows.append(f"... {len(entries) - MAX_LISTED} more; use find_files with a pattern to see them")
             return f"{_rel(base, folder)}:\n" + ("\n".join(rows) or "(empty)")
         if name == "read_file":
             path = resolve(root, args.get("path"))
@@ -270,10 +281,16 @@ def run_file_tool(root: Path | None, name: str, args: dict[str, Any], secrets: b
             start = start if isinstance(start, int) and start > 0 else 1
             out, size = [], 0
             lines = text.splitlines()
+            if start > len(lines) > 0:
+                return f"error: the file has only {len(lines)} lines"
             for n, line in enumerate(lines[start - 1:], start):
                 row = f"{n}: {line}"
                 if size + len(row) > MAX_FILE_CHARS:
-                    out.append(f"... more from line {n} (of {len(lines)}); call again with start_line={n}")
+                    if not out:  # one line longer than a whole call (minified code): show its start, move on
+                        out.append(row[:MAX_FILE_CHARS] + f" ... [line {n} cut, {len(row) - MAX_FILE_CHARS} more characters]")
+                        n += 1
+                    if n <= len(lines):
+                        out.append(f"... more from line {n} (of {len(lines)}); call again with start_line={n}")
                     break
                 out.append(row)
                 size += len(row) + 1
@@ -284,25 +301,48 @@ def run_file_tool(root: Path | None, name: str, args: dict[str, Any], secrets: b
             if not base.is_dir():
                 return "error: not a folder"
         if name == "find_files":
-            found = [_rel(base, p) for p in _walk(base) if fnmatch.fnmatch(p.name.lower(), pattern.strip().lower())]
-            return "\n".join(found[:MAX_FOUND]) + (f"\n... {len(found) - MAX_FOUND} more" if len(found) > MAX_FOUND
-                                                   else "") if found else "no files match"
+            cut: list[bool] = []
+            want = pattern.strip().lower().replace("\\", "/")
+            found = []
+            for p in _walk(base, cut):
+                rel = _rel(base, p)
+                if fnmatch.fnmatch(p.name.lower(), want) or ("/" in want and fnmatch.fnmatch(rel.lower(), want)):
+                    found.append(rel)
+            out = "\n".join(found[:MAX_FOUND]) + (f"\n... {len(found) - MAX_FOUND} more" if len(found) > MAX_FOUND
+                                                  else "") if found else "no files match"
+            return out + (SCAN_CUT if cut else "")
         if name == "search_text":
             needle = args.get("text")
             if not isinstance(needle, str) or not needle.strip():
                 return "error: give some text to search for"
-            needle = needle.strip().lower()
+            if args.get("regex") is True:
+                try:
+                    found_in = re.compile(needle.strip(), re.IGNORECASE).search
+                except re.error as exc:
+                    return f"error: bad regular expression ({exc})"
+            else:
+                low = needle.strip().lower()
+                found_in = lambda line: low in line.lower()  # noqa: E731
+            context = args.get("context")
+            context = context if isinstance(context, int) and not isinstance(context, bool) and 0 < context <= MAX_CONTEXT else 0
             hits: list[str] = []
-            for path in _walk(base):
-                if _SECRET.search(path.name) or not fnmatch.fnmatch(path.name.lower(), pattern.strip().lower()):
+            cut, secret = [], 0
+            for path in _walk(base, cut):
+                if not fnmatch.fnmatch(path.name.lower(), pattern.strip().lower()):
                     continue
-                text = _text(path)
-                for n, line in enumerate((text or "").splitlines(), 1):
-                    if needle in line.lower():
-                        hits.append(f"{_rel(base, path)}:{n}: {line.strip()[:200]}")
+                if _SECRET.search(path.name):
+                    secret += 1
+                    continue
+                lines = (_text(path) or "").splitlines()
+                for n, line in enumerate(lines, 1):
+                    if found_in(line):
+                        rel = _rel(base, path)
+                        hits.append("\n".join(f"{rel}:{i}{':' if i == n else '-'} {lines[i - 1].strip()[:200]}"
+                                               for i in range(max(1, n - context), min(len(lines), n + context) + 1)))
                         if len(hits) >= MAX_MATCHES:
-                            return "\n".join(hits) + "\n... more matches, narrow the search"
-            return "\n".join(hits) or "no matches"
+                            return ("\n--\n" if context else "\n").join(hits) + "\n... more matches, narrow the search"
+            notes = (f"\n({secret} secret-looking files not searched)" if secret else "") + (SCAN_CUT if cut else "")
+            return (("\n--\n" if context else "\n").join(hits) or "no matches") + notes
     except ValueError as exc:
         return f"error: {exc}"
     except OSError as exc:
@@ -323,8 +363,9 @@ class Edit:
     removed: int = 0
 
 
-def plan_edit(root: Path | None, args: dict[str, Any]) -> Edit:
-    """The edit edit_file asks for, with its diff, or ValueError. Nothing is written here."""
+def plan_edit(root: Path | None, args: dict[str, Any], prior: Edit | None = None) -> Edit:
+    """The edit edit_file asks for, with its diff, or ValueError. Nothing is written here. With `prior` (an
+    earlier edit of the same file in one edit_files call) it applies to that edit's result, and the diff covers both."""
     rel_arg, old, new = args.get("path"), args.get("old_text"), args.get("new_text")
     if not isinstance(rel_arg, str) or not rel_arg.strip() or not isinstance(old, str) or not isinstance(new, str):
         raise ValueError("give path, old_text and new_text")
@@ -333,7 +374,13 @@ def plan_edit(root: Path | None, args: dict[str, Any]) -> Edit:
     if len(new) > MAX_SAVE_CHARS:
         raise ValueError(f"new_text is longer than {MAX_SAVE_CHARS} characters")
     bom = False
-    if not old and path.is_file() and path.stat().st_size == 0:  # an empty file has no text to match: fill it
+    if prior is not None and not old:
+        raise ValueError("an empty old_text creates a file, but this file already has an edit in this call")
+    if prior is not None:
+        before, crlf, bom = prior.before, prior.crlf, prior.after.startswith("\ufeff")
+        text = prior.after.removeprefix("\ufeff")
+        after = _replace_once(text, old.replace("\r\n", "\n"), new)
+    elif not old and path.is_file() and path.stat().st_size == 0:  # an empty file has no text to match: fill it
         before, after, crlf = "", new, False
     elif not old:
         if path.exists():
@@ -348,29 +395,34 @@ def plan_edit(root: Path | None, args: dict[str, Any]) -> Edit:
             before = path.read_bytes().decode("utf-8")
         except UnicodeDecodeError:
             raise ValueError("not a UTF-8 text file") from None
-        crlf = "\r\n" in before
+        crlf = "\r\n" in before and "\n" not in before.replace("\r\n", "")  # mixed endings stay exactly as they are
         bom = before.startswith("\ufeff")  # read_file shows line 1 without it, so match without it
         text = before.removeprefix("\ufeff")
         text = text.replace("\r\n", "\n") if crlf else text
-        old = old.replace("\r\n", "\n")
-        first = text.find(old)
-        # a second find from first + 1 also catches overlapping matches, which str.count misses
-        count = 0 if first < 0 else 1 if text.find(old, first + 1) < 0 else max(2, text.count(old))
-        if count != 1:
-            raise ValueError("old_text was not found; read the file again" if not count else
-                             f"old_text appears {count} times; include more surrounding lines")
-        after = text[:first] + new.replace("\r\n", "\n") + text[first + len(old):]
-        if after == text:
-            raise ValueError("new_text is the same as old_text; nothing would change")
+        after = _replace_once(text, old.replace("\r\n", "\n"), new)
     lines = list(difflib.unified_diff(
         (before or "").removeprefix("\ufeff").replace("\r\n", "\n").splitlines(keepends=True),
-        after.splitlines(keepends=True), f"a/{rel}", f"b/{rel}", n=2))
+        after.replace("\r\n", "\n").splitlines(keepends=True), f"a/{rel}", f"b/{rel}", n=2))
     added = sum(1 for x in lines if x.startswith("+") and not x.startswith("+++"))
     removed = sum(1 for x in lines if x.startswith("-") and not x.startswith("---"))
     diff = "".join(x if x.endswith("\n") else x + "\n\\ No newline at end of file\n" for x in lines)
     if len(diff) > MAX_DIFF_CHARS:
         diff = diff[:MAX_DIFF_CHARS] + f"\n... diff cut, {len(diff) - MAX_DIFF_CHARS} more characters"
     return Edit(path, rel, before, "\ufeff" + after if bom else after, crlf, diff or "(no change)", added, removed)
+
+
+def _replace_once(text: str, old: str, new: str) -> str:
+    """`text` with its one `old` replaced by `new`, or ValueError (missing, ambiguous, or no change)."""
+    first = text.find(old)
+    # a second find from first + 1 also catches overlapping matches, which str.count misses
+    count = 0 if first < 0 else 1 if text.find(old, first + 1) < 0 else max(2, text.count(old))
+    if count != 1:
+        raise ValueError("old_text was not found; read the file again" if not count else
+                         f"old_text appears {count} times; include more surrounding lines")
+    after = text[:first] + new.replace("\r\n", "\n") + text[first + len(old):]
+    if after == text:
+        raise ValueError("new_text is the same as old_text; nothing would change")
+    return after
 
 
 def plan_edits(root: Path | None, args: dict[str, Any]) -> list[Edit]:
@@ -382,13 +434,17 @@ def plan_edits(root: Path | None, args: dict[str, Any]) -> list[Edit]:
         raise ValueError(f"at most {MAX_EDITS} edits at a time")
     edits: list[Edit] = []
     for n, item in enumerate(items, 1):
+        at = None
         try:
-            edit = plan_edit(root, item)
+            path = resolve(root, item["path"]) if isinstance(item.get("path"), str) and item["path"].strip() else None
+            at = next((i for i, other in enumerate(edits) if other.path == path), None)
+            edit = plan_edit(root, item, edits[at] if at is not None else None)
         except ValueError as exc:
             raise ValueError(f"edit {n}: {exc}") from None
-        if any(edit.path == other.path for other in edits):
-            raise ValueError(f"edit {n}: {edit.rel} appears twice; put its changes in one edit")
-        edits.append(edit)
+        if at is None:
+            edits.append(edit)
+        else:
+            edits[at] = edit  # one write per file, holding every change to it
     return edits
 
 
@@ -406,7 +462,7 @@ def apply_edits(edits: list[Edit]) -> str:
     for edit in edits:
         try:
             edit.path.parent.mkdir(parents=True, exist_ok=True)
-            edit.path.write_text(edit.after, encoding="utf-8", newline="\r\n" if edit.crlf else "\n")
+            edit.path.write_text(edit.after, encoding="utf-8", newline="\r\n" if edit.crlf else "")
             done.append(edit)
         except OSError as exc:
             for back in done:  # shortcut: folders made for a new file stay, only files are restored
@@ -567,13 +623,26 @@ def run_command(root: Path | None, command: Any, cancel: threading.Event | None 
                 head += " (an Office app is probably waiting on an open dialog: read_screen, press esc, retry)"
         sink.seek(0)
         raw = sink.read()
-    out = raw.decode("utf-8", "replace").replace("\r\n", "\n").strip()
+    out = console_text(raw).replace("\r\n", "\n").strip()
     if len(out) > MAX_COMMAND_CHARS:  # the end usually holds the verdict (test summary, error)
         half = MAX_COMMAND_CHARS // 2
         out = f"{out[:half]}\n... {len(out) - MAX_COMMAND_CHARS} characters cut ...\n{out[-half:]}"
     if re.match(r"\s*start\b", command, re.I) and proc.returncode == 0:  # exit 0 only says the shell handed it off
         out += "\n(launched; the app may still show an error dialog, so check with read_screen)"
     return f"{head}\n{out or '(no output)'}"
+
+
+def console_text(raw: bytes) -> str:
+    """Command output as text: UTF-8 when it is valid UTF-8, else the console (OEM) code page that cmd.exe and
+    its built-ins such as dir write in, so non-ASCII paths and messages are not garbled."""
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    try:
+        return raw.decode(f"cp{ctypes.windll.kernel32.GetOEMCP()}", "replace")
+    except (AttributeError, LookupError, OSError):
+        return raw.decode("utf-8", "replace")
 
 
 def _kill_tree(pid: int) -> None:

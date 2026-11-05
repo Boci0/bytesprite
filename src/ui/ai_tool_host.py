@@ -194,7 +194,8 @@ class AiToolHost(QObject):
                 return "error: give a command"
             cwd = self._project() or Path.home()
             where = "the Project Folder" if self._project() else f"your home folder ({cwd})"
-            if not self._allowed("run_command", f"The model wants to start this in the background in {where}. It keeps "
+            # its own key: allowing background starts for this chat must not also allow every foreground command
+            if not self._allowed("start_background", f"The model wants to start this in the background in {where}. It keeps "
                                  f"running until you stop it:\n\n{command.strip()}", "background commands",
                                  destructive_reason(command)):
                 return "error: the user declined this command"

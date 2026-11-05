@@ -37,7 +37,7 @@ def test_file_tools_reach_any_path_and_gate_secrets(repo: Path) -> None:
         assert run_file_tool(repo, "read_file", {"path": out}) == "1: private"
     outside = str(repo.parent)
     assert run_file_tool(repo, "find_files", {"pattern": "outside*", "path": outside}) == "outside.txt"
-    assert run_file_tool(repo, "search_text", {"text": "private", "path": outside}) == "outside.txt:1: private"
+    assert run_file_tool(repo, "search_text", {"text": "private", "path": outside}).splitlines()[0] == "outside.txt:1: private"
     assert "did not allow" in run_file_tool(repo, "read_file", {"path": ".env"})
     assert run_file_tool(repo, "read_file", {"path": ".env"}, secrets=True) == "1: TOKEN=abc"
     assert "TOKEN" not in run_file_tool(repo, "search_text", {"text": "token"})
@@ -108,7 +108,8 @@ def test_claude_runs_local_tools_on_tool_use(monkeypatch: pytest.MonkeyPatch) ->
     assert reply.text == "You have src/." and host.calls == [("list_files", {})]
     names = [t["name"] for t in sent[0]["tools"]]
     assert names[:2] == ["web_search", "web_fetch"] and "read_file" in names and "input_schema" in sent[0]["tools"][3]
-    assert sent[1]["messages"][-1]["content"] == [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]
+    assert sent[1]["messages"][-1]["content"] == [{"type": "tool_result", "tool_use_id": "t1", "content": "ok",
+                                                   "cache_control": {"type": "ephemeral"}}]  # the moving cache mark
 
 
 def test_tool_host_runs_pet_tools_on_the_qt_thread(repo: Path) -> None:
@@ -455,8 +456,9 @@ def test_both_loops_end_with_an_answer_when_the_tool_budget_runs_out(monkeypatch
     assert all(s["tools"] == sent[0]["tools"] for s in sent)  # one tool list for the whole answer
     assert [s.get("tool_choice") for s in sent] == [None, None, None, {"type": "none"}]
     assert sent[3]["messages"][-1]["content"][-2:] == [
-        {"type": "tool_result", "tool_use_id": "t3", "content": "ok"},
-        {"type": "text", "text": ai_assist.BUDGET_NOTE.strip()}]  # its own block, after the tool results
+        {"type": "tool_result", "tool_use_id": "t3", "content": "ok", "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": ai_assist.BUDGET_NOTE.strip()}]
+    assert all("cache_control" not in b for b in sent[3]["messages"][2]["content"])  # the mark moved on  # its own block, after the tool results
     assert all(out == "ok" for _note, out in reply.tools)  # the chat history keeps the plain output
 
     def openai(body):
@@ -647,8 +649,10 @@ def test_screenshots_ride_along_with_tool_results_and_only_the_newest_stays() ->
     kept = _drop_old_shots(turns)
     assert kept[1]["content"][0]["content"] == "map" and kept[1]["content"][1]["content"] == "plain"
     assert kept[0] == turns[0] and kept[3] == turns[3]  # the newest result keeps its screenshot
-    # thinking is signed against the turns before it, which just changed
-    assert [b["type"] for b in kept[2]["content"]] == ["tool_use"]
+    # the newest assistant turn keeps its thinking: the API needs it while that turn's tool calls are answered
+    assert [b["type"] for b in kept[2]["content"]] == ["thinking", "tool_use"]
+    older = _drop_old_shots([turns[2], *turns])  # ...but an older one's thinking goes, since earlier turns changed
+    assert [b["type"] for b in older[0]["content"]] == ["tool_use"]
 
 
 def test_global_rules_reach_every_system_prompt_ahead_of_memory(tmp_path: Path, monkeypatch) -> None:
@@ -855,9 +859,10 @@ def test_stop_ends_the_tool_loop_and_kills_a_running_command(repo: Path, monkeyp
             cancel.set()  # the user presses Stop while the first tool runs
             return super().run(name, args)
 
-    claude = {"stop_reason": "tool_use", "content": [{"type": "tool_use", "id": "t", "name": "list_files", "input": {}}] * 2}
+    # read_file runs one call at a time (list_files would run both at once, see _run_calls)
+    claude = {"stop_reason": "tool_use", "content": [{"type": "tool_use", "id": "t", "name": "read_file", "input": {"path": "a"}}] * 2}
     openai = {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
-        {"id": "c", "function": {"name": "list_files", "arguments": "{}"}}] * 2}}]}
+        {"id": "c", "function": {"name": "read_file", "arguments": '{"path": "a"}'}}] * 2}}]}
     for post, reply in ((lambda h: ai_assist._post_anthropic("https://api.anthropic.com/v1", "k", "m", [
             {"role": "user", "content": "go"}], "off", 5, h, cancel=cancel), claude),
                         (lambda h: ai_assist._post("https://api.example/v1", "k", "m", [
