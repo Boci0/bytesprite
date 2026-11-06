@@ -445,7 +445,7 @@ class AiToolHost(QObject):
     def _save_file(self, file_name: str, content: str) -> str:
         """Nothing is written unless the user picks a path; the dialog itself confirms overwrites."""
         downloads = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DownloadLocation)
-        path, _filter = QFileDialog.getSaveFileName(self._win._ai_chat, "Save file from ByteSprite AI",
+        path, _filter = QFileDialog.getSaveFileName(self._win._ai_chat, "Save file from Paperduck AI",
                                                     str(Path(downloads) / file_name))
         if not path:
             return "the user cancelled the save"

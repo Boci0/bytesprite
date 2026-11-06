@@ -26,7 +26,7 @@ from PyQt6.QtWidgets import (QAbstractButton, QComboBox, QFileDialog, QFormLayou
                              QStackedWidget, QTextBrowser, QVBoxLayout, QWidget)
 
 from src.storage.recent_files import format_age
-from src.tools.ai_assist import (BRAVE_KEY_PAGE, BRAVE_URL, COMPACT_AT, COMPACT_MARK, KEY_PAGES, MAX_INPUT_CHARS, PRESETS,
+from src.tools.ai_assist import (BRAVE_KEY_PAGE, BRAVE_URL, COMPACT_AT, COMPACT_PREFIX, KEY_PAGES, MAX_INPUT_CHARS, PRESETS,
                                  compact_history, history_chars, summary_turns, DEEPSEEK_TOP_UP, deepseek_balance, is_deepseek,
                                  THINKING_LEVELS, AiAssistPlugin, fit_thinking, thinking_levels, AiJob, AiReply, ModelInfo, ToolHost, ask, chat_messages, delete_key, list_models, load_key, save_key, valid_key,
                                  valid_model, validate_base_url)
@@ -1762,7 +1762,7 @@ class AiChat(QWidget):
                 if content.startswith("Noted. Continuing from that summary."):
                     continue
                 self._add_row("assistant", content, markdown=True)
-            elif content.startswith(COMPACT_MARK):
+            elif content.startswith(COMPACT_PREFIX):
                 self._add_row("note", "Earlier messages were compacted into a summary.")
             else:
                 text = re.split(r"\n*\[(?:File|Image \(attached; its text read by OCR\)): ", content, maxsplit=1)[0]

@@ -124,10 +124,10 @@ TOOL_SPECS: list[dict[str, Any]] = [
         "up, one notch each (max 20).", {"amount": {"type": "integer"}, "x": {"type": "integer"},
                                         "y": {"type": "integer"}}, ("amount",)),
     _fn("pet_status", "The pet's tool readouts: CPU/RAM, focus timer, Project Folder and git status, clipboard vault."),
-    _fn("pet_action", "Run one ByteSprite action.",
+    _fn("pet_action", "Run one Paperduck action.",
         {"action": {"type": "string", "enum": list(PET_ACTIONS),
                     "description": "; ".join(f"{k}: {v}" for k, v in PET_ACTIONS.items())}}, ("action",)),
-    _fn("run_macro", "Run one of the user's saved ByteSprite macros by name.", {"name": {"type": "string"}}, ("name",)),
+    _fn("run_macro", "Run one of the user's saved Paperduck macros by name.", {"name": {"type": "string"}}, ("name",)),
     _fn("save_file", "Give the user a text file (code, CSV, Markdown, JSON...). They choose where to save it in a "
         "Save dialog, or cancel.", {"name": {"type": "string", "description": "Suggested file name, e.g. report.md"},
                                     "content": {"type": "string", "description": "The whole file's text"}},
@@ -1009,11 +1009,11 @@ def plan_skill_update(root: Path, name: Any, description: Any, instructions: Any
 
 
 MAX_MEMORY_CHARS = 8000  # all notes together; they ride along in every chat's system prompt
-MEMORY_HEADER = "# ByteSprite memory\n\nOne note per line starting with \"- \". The AI chat reads these in every chat.\n\n"
+MEMORY_HEADER = "# Paperduck memory\n\nOne note per line starting with \"- \". The AI chat reads these in every chat.\n\n"
 
 
 MAX_RULES_CHARS = 4000
-RULES_HEADER = ("<!-- Your global rules for the ByteSprite AI chat. Write plain sentences, one rule per line. They go "
+RULES_HEADER = ("<!-- Your global rules for the Paperduck AI chat. Write plain sentences, one rule per line. They go "
                 "into every chat and outrank memory and skills. Only you edit this file; the AI cannot. -->\n\n")
 
 

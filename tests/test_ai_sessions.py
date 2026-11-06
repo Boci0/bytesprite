@@ -157,3 +157,20 @@ def test_resume_shows_compaction_and_attachments_cleanly() -> None:
         assert chat._thread_layout.count() == 3  # note, attachment-only bubble, reply (the ack is not shown)
     finally:
         chat.close()
+
+
+def test_chat_saved_before_the_rename_still_shows_its_summary() -> None:
+    from src.tools.ai_sessions import new_id, save_session
+    sid = new_id()
+    save_session(sid, [{"role": "user", "content": "[Earlier conversation, compacted by ByteSprite into this summary:]\nold"},
+                       {"role": "assistant", "content": "Noted. Continuing from that summary."},
+                       {"role": "user", "content": "next"}, {"role": "assistant", "content": "ok"}])
+    chat = _chat()
+    try:
+        assert chat.resume(sid)
+        from src.ui.ai_chat import ChatText
+        rows = [chat._thread_layout.itemAt(i).widget() for i in range(chat._thread_layout.count())]
+        shown = " | ".join(w.toPlainText() for row in rows for w in row.findChildren(ChatText))
+        assert "compacted into a summary" in shown and "compacted by ByteSprite" not in shown
+    finally:
+        chat.close()

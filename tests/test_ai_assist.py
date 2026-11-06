@@ -770,7 +770,7 @@ def test_claude_native_request_pause_turn_sources_and_thinking(api: str, monkeyp
     first, second = _Api.seen[0], _Api.seen[1]
     assert first["path"] == "/v1/messages" and first["auth"] is None  # x-api-key, never a Bearer header
     body = first["body"]
-    assert body["system"].startswith("You are ByteSprite") and body["messages"][0]["content"][1] == {
+    assert body["system"].startswith("You are Paperduck") and body["messages"][0]["content"][1] == {
         "type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"},
         "cache_control": {"type": "ephemeral"}}
     assert [t["name"] for t in body["tools"]] == ["web_search", "web_fetch"]
