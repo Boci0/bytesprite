@@ -355,6 +355,9 @@ def test_long_press_wheel_hold_drag_release_runs_slice(qapp: QApplication) -> No
         win.mouseMoveEvent(_mouse(QEvent.Type.MouseMove, win, target, Qt.MouseButton.LeftButton))
         assert wheel.hovered_index == target_idx
         win.mouseReleaseEvent(_mouse(QEvent.Type.MouseButtonRelease, win, target, Qt.MouseButton.NoButton))
+        assert fired == [] and win._wheel_release_timer.isActive()  # waits out a possible bounce
+        win._wheel_release_timer.stop()
+        win._finish_wheel_release()
         assert fired == ["snip:text"]
         assert not wheel.isVisible()
         assert not win._click_timer.isActive()  # a hold never also cycles the HUD
@@ -376,7 +379,36 @@ def test_long_press_wheel_release_on_hub_closes(qapp: QApplication) -> None:
         assert wheel is not None and wheel.isVisible()
         hub = wheel.mapToGlobal(wheel.hub_center_point())
         win.mouseReleaseEvent(_mouse(QEvent.Type.MouseButtonRelease, win, hub, Qt.MouseButton.LeftButton))
+        win._wheel_release_timer.stop()
+        win._finish_wheel_release()
         assert not wheel.isVisible() and fired == []
+    finally:
+        win.shutdown()
+        win.close()
+
+
+def test_a_quick_repress_during_a_wheel_hold_keeps_one_wheel_and_no_double_click(qapp: QApplication) -> None:
+    sm = PetStateMachine(PetStats())
+    win = PetWindow(state_machine=sm, animation_controller=AnimationController(size=32), auto_wander=False)
+    fired: list[str] = []
+    win.trigger_tool_action = fired.append  # type: ignore[method-assign]
+    win.trigger_snip = fired.append  # type: ignore[method-assign]  # the default double-click action
+    try:
+        start = win.mapToGlobal(win.sprite_center_point())
+        win.mousePressEvent(_mouse(QEvent.Type.MouseButtonPress, win, start, Qt.MouseButton.LeftButton))
+        win._on_hold_timeout()
+        wheel = win.tool_wheel
+        win.mouseReleaseEvent(_mouse(QEvent.Type.MouseButtonRelease, win, start, Qt.MouseButton.NoButton))
+        win.mousePressEvent(_mouse(QEvent.Type.MouseButtonPress, win, start, Qt.MouseButton.LeftButton))  # bounce
+        win.mouseDoubleClickEvent(_mouse(QEvent.Type.MouseButtonDblClick, win, start, Qt.MouseButton.LeftButton))
+        assert wheel.isVisible() and not win._wheel_release_timer.isActive() and not win._hold_timer.isActive()
+        assert win._wheel_holding and fired == []
+        target = wheel.mapToGlobal(wheel.slice_center_point([o.label for o in wheel.options].index("OCR")))
+        win.mouseMoveEvent(_mouse(QEvent.Type.MouseMove, win, target, Qt.MouseButton.LeftButton))
+        win.mouseReleaseEvent(_mouse(QEvent.Type.MouseButtonRelease, win, target, Qt.MouseButton.NoButton))
+        win._wheel_release_timer.stop()
+        win._finish_wheel_release()
+        assert fired == ["snip:text"] and not wheel.isVisible()
     finally:
         win.shutdown()
         win.close()

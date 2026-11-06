@@ -41,7 +41,7 @@ from PyQt6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMenu, QToo
 from src.engine.models import PetState, PetStats
 from src.engine.pet_state import PetStateMachine
 from src.graphics.animation_controller import AnimationController
-from src.graphics.duck import Pose, render_icon, render_pose
+from src.graphics.duck import render_icon, render_pose
 from src.tools.file_forge import ForgeMode, ForgeWheelOption, get_wheel_options_for_paths
 from src.tools.ai_assist import AiAssistPlugin, AiJob, AiReply, fit_thinking, load_key, thinking_levels
 from src.tools.ai_tools import skills_dir
@@ -68,7 +68,7 @@ from src.ui.quick_tools import (HOTKEY_ACTIONS, OcrJob, SnipSession, default_hot
 from src.ui.sfx import play_cue, preload_tick_sounds, prewarm as prewarm_ticks
 from src.ui.tool_wheel import WEB_SHORTCUTS, ToolWheel, ToolWheelOption, WheelLayout, google_search_url
 from src.updater import APP_DIR, FROZEN, FROZEN_EXE, RELEASES_URL, UpdateJob, is_installed
-from src.ui.theme import (DANGER_HEX, GLASS_RGBA, HAIRLINE_RGBA, HOVER_RGBA, SLEEP_HEX, TEXT_DIM_HEX, TEXT_HEX,
+from src.ui.theme import (DANGER_HEX, HAIRLINE_RGBA, HOVER_RGBA, SLEEP_HEX, TEXT_DIM_HEX, TEXT_HEX,
                           THEME_CHOICES, paint_panel, pet_accent, qcolor, save_theme, saved_theme, ui_font)
 
 
@@ -286,6 +286,7 @@ class PetWindow(QWidget):
     DEFAULT_PET_SCALE: int = 2  # Small until the user picks another size (a saved size wins)
     DRAG_THRESHOLD_PX: int = 5
     HOLD_TO_WHEEL_MS: int = 450
+    WHEEL_RELEASE_GRACE_MS: int = 90
     # First-run tips on the hint card: (title, how-to line), one at a time, TIP_GAP_S apart
     TIPS: tuple[tuple[str, str], ...] = (
         ("Hold me for tools", "Press, wait, slide, release"),
@@ -346,8 +347,6 @@ class PetWindow(QWidget):
 
         # Gentle autonomous walk steps
         self._walk_dx: int = 0
-        self._walk_dy: int = 0
-        self._walk_target: QPoint | None = None  # a walk to a spot (the dropped chat) ends exactly here
         self._walk_steps_remaining: int = 0
         self._perch: tuple[int, int] | None = None  # (hwnd, sprite centre x minus the edge's left) while sitting
         self._fall_to: int | None = None  # window y a perch fall ends at
@@ -374,6 +373,13 @@ class PetWindow(QWidget):
         self._hold_timer.setSingleShot(True)
         self._hold_timer.setInterval(self.HOLD_TO_WHEEL_MS)
         self._hold_timer.timeout.connect(self._on_hold_timeout)
+        # A release that ends a wheel hold waits this long: a press inside it (a quick re-press, or a worn switch
+        # bouncing) keeps the same hold, instead of closing the wheel and opening a second one plus a double-click
+        self._wheel_release_timer = QTimer(self)
+        self._wheel_release_timer.setSingleShot(True)
+        self._wheel_release_timer.setInterval(self.WHEEL_RELEASE_GRACE_MS)
+        self._wheel_release_timer.timeout.connect(self._finish_wheel_release)
+        self._wheel_release_pos = QPoint()
         self._ocr_jobs: list[OcrJob] = []
         self._ai_chat: AiChat | None = None  # built hidden soon after launch (_prebuild_ai_chat) or on first open
         QTimer.singleShot(self.PREBUILD_CHAT_MS, self._prebuild_ai_chat)
@@ -704,7 +710,7 @@ class PetWindow(QWidget):
         elif roll < 0.72 and self._auto_wander and not self._hovered:
             # Gentle short hop left or right
             direction = random.choice((-1, 1))
-            self._walk_dx, self._walk_dy, self._walk_target = direction * 4, 0, None
+            self._walk_dx = direction * 4
             self._walk_steps_remaining = random.randint(6, 10)
             self._anim.facing_left = direction < 0
             self._anim.set_state("walk")
@@ -732,13 +738,9 @@ class PetWindow(QWidget):
                 moved_on = self._follow_perch(self._walk_dx)  # a hop along the edge; False: a fall replaced it
             else:
                 moved_on = True
-                if self._walk_steps_remaining == 0 and self._walk_target is not None:
-                    self.move_clamped(self._walk_target.x(), self._walk_target.y())  # no rounding drift at the end
-                else:
-                    self.move_clamped(before.x() + self._walk_dx, before.y() + self._walk_dy)
+                self.move_clamped(before.x() + self._walk_dx, before.y())
             if moved_on and (self.pos() == before or self._walk_steps_remaining == 0):
                 self._walk_steps_remaining = 0
-                self._walk_target = None
                 self._sync_animation_to_pet_state(self._state_machine.state)  # a walk may run in any state
                 self._schedule_next_anim_tick()
             needs_repaint = True
@@ -868,7 +870,7 @@ class PetWindow(QWidget):
         floor = scr.availableGeometry().bottom() + 1
         self._fall_x, fall_to = self._clamp_feet(self.x(), floor - fy)
         self._fall_y, self._fall_v = float(self.y()), 0.0
-        self._walk_steps_remaining, self._walk_target = 0, None
+        self._walk_steps_remaining = 0
         if fall_to <= self.y():
             self.move(self._fall_x, fall_to)
             self._land_fall()
@@ -1786,7 +1788,6 @@ class PetWindow(QWidget):
             errands.probes.bg = host.procs.peek
         self._ai_chat.thinking_changed.connect(self._on_ai_thinking)
         self._ai_chat.answered.connect(self._on_ai_answered)
-        self._ai_chat.moved.connect(self.walk_to_sprite)
 
     def ensure_ai_chat(self) -> AiChat | None:
         """Open the chat if it is closed (never toggles it shut, unlike open_ai_chat)."""
@@ -1812,26 +1813,6 @@ class PetWindow(QWidget):
             elif self.macros.double_click == name:
                 self.macros.double_click = ""
         self._show_toast(toast, QColor("#38B764" if toast in ("ADDED", "SAVED") else "#EF7D57"))
-
-    WALK_TO_STEP_PX = 10  # per 90ms overlay tick, about 110px a second
-
-    def walk_to_sprite(self, anchor: QRect) -> None:
-        """Walk (walk clip, facing the way it goes) until the sprite stands centred on `anchor` (global)."""
-        target = self.pos() + anchor.center() - self._sprite_global_rect().center()
-        dx, dy = target.x() - self.x(), target.y() - self.y()
-        steps = -(-max(abs(dx), abs(dy)) // self.WALK_TO_STEP_PX)
-        if steps == 0 or self._press_global_pos is not None:
-            return
-        self._perch = self._fall_to = None
-        self._walk_target, self._walk_steps_remaining = target, steps
-        self._walk_dx, self._walk_dy = round(dx / steps), round(dy / steps)
-        if dx:
-            self._anim.facing_left = dx < 0
-        self._anim.set_state("walk")
-        self._schedule_next_anim_tick()
-        if not self._overlay_timer.isActive():
-            self._overlay_timer.start()
-        self.update()
 
     def _sprite_global_rect(self) -> QRect:
         return QRect(self.mapToGlobal(self._sprite_rect.topLeft()), self._sprite_rect.size())
@@ -2135,6 +2116,10 @@ class PetWindow(QWidget):
     def mousePressEvent(self, event: QMouseEvent | None) -> None:
         if event is None:
             return
+        if event.button() == Qt.MouseButton.LeftButton and self._wheel_release_timer.isActive():
+            self._wheel_release_timer.stop()  # pressed again right away: the same hold goes on
+            event.accept()
+            return
         local_pos = event.position().toPoint()
         if not self._is_interactive_hit(local_pos):
             event.ignore()
@@ -2208,13 +2193,8 @@ class PetWindow(QWidget):
         if event.button() == Qt.MouseButton.LeftButton and self._press_global_pos is not None:
             self._hold_timer.stop()
             if self._wheel_holding:
-                self._wheel_holding = False
-                self._press_global_pos = None
-                self._last_drag_global_pos = None
-                self._drag_offset = None
-                self._did_drag = False
-                if self._tool_wheel is not None and self._tool_wheel.isVisible():
-                    self._tool_wheel.release_at(event.globalPosition().toPoint())
+                self._wheel_release_pos = event.globalPosition().toPoint()
+                self._wheel_release_timer.start()
                 event.accept()
                 return
             was_drag = self._did_drag
@@ -2233,8 +2213,20 @@ class PetWindow(QWidget):
             return
         super().mouseReleaseEvent(event)
 
+    def _finish_wheel_release(self) -> None:
+        self._wheel_holding = False
+        self._press_global_pos = None
+        self._last_drag_global_pos = None
+        self._drag_offset = None
+        self._did_drag = False
+        if self._tool_wheel is not None and self._tool_wheel.isVisible():
+            self._tool_wheel.release_at(self._wheel_release_pos)
+
     def mouseDoubleClickEvent(self, event: QMouseEvent | None) -> None:
         if event is None:
+            return
+        if self._wheel_holding:  # the second press of a bounce inside a wheel hold, not a double-click
+            event.accept()
             return
         if event.button() == Qt.MouseButton.LeftButton and self._is_interactive_hit(
             event.position().toPoint()

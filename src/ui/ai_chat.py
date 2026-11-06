@@ -651,7 +651,6 @@ class AiChat(QWidget):
 
     thinking_changed = pyqtSignal(bool)
     answered = pyqtSignal(bool)  # an answer landed (True) or failed (False); not sent when stopped
-    moved = pyqtSignal(QRect)  # dragged by its header: where the pet's sprite should now stand (global)
 
     WIDTH = 380
     THREAD_MAX_H = 320
@@ -1954,7 +1953,7 @@ class AiChat(QWidget):
             y = anchor.bottom() + self.GAP
         self.move(x, max(area.top() + 8, min(y, area.bottom() - self.height() - 8)))
 
-    # Header drag: the card stays where it is dropped (its anchor moves with it) and the pet walks over to it
+    # Header drag: the card stays where it is dropped (its anchor moves with it)
     def mousePressEvent(self, event: QMouseEvent | None) -> None:
         if (event is not None and event.button() == Qt.MouseButton.LeftButton
                 and event.position().y() < self._header_sep.mapTo(self, QPoint(0, 0)).y()):
@@ -1983,11 +1982,10 @@ class AiChat(QWidget):
         self.releaseMouse()
         event.accept()
         self._anchor = self.dropped_anchor()
-        self.moved.emit(QRect(self._anchor))
 
     def dropped_anchor(self) -> QRect:
         """A sprite-sized rect GAP under the card (over it when the card sits below the pet, or when there is no
-        room under it), so _relayout keeps this spot and the pet has somewhere to stand."""
+        room under it), so _relayout keeps the card at this spot."""
         size = self._anchor.size() if self._anchor is not None else QSize(128, 128)
         geo = self.geometry()
         area = (QGuiApplication.screenAt(geo.center()) or self.screen()).availableGeometry()

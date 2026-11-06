@@ -12,7 +12,7 @@ from collections.abc import Callable
 from ctypes import wintypes
 from pathlib import Path
 
-from PyQt6.QtCore import QObject, QPoint, QRect, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QObject, QPoint, QRect, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QGuiApplication, QImage, QKeyEvent, QMouseEvent, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import QWidget
 

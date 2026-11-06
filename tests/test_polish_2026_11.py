@@ -1,4 +1,4 @@
-"""Chat drag + pet walk, fullscreen yield, edge-safe computer use and file edit edge cases."""
+"""Chat drag, fullscreen yield, edge-safe computer use and file edit edge cases."""
 
 from __future__ import annotations
 
@@ -26,31 +26,6 @@ def qapp() -> QApplication:
     return QApplication.instance() or QApplication([])
 
 
-# --- pet walks to a spot -----------------------------------------------------------------------------------
-
-def test_pet_walks_to_the_dropped_chat_and_stops_exactly_there(qapp: QApplication) -> None:
-    win = PetWindow(state_machine=PetStateMachine(PetStats()), animation_controller=AnimationController(size=32),
-                    auto_wander=False)
-    try:
-        win.move(300, 300)
-        win.show()
-        qapp.processEvents()
-        sprite = win._sprite_global_rect()
-        goal = sprite.translated(-157, -43)
-        win.walk_to_sprite(goal)
-        assert win._anim.base_state == "walk" and win._anim.facing_left
-        ticks = 0
-        while win._walk_steps_remaining and ticks < 100:
-            win._on_overlay_tick()
-            ticks += 1
-        assert ticks == 16  # 157 px at 10 px a tick
-        assert win._sprite_global_rect().center() == goal.center()
-        assert win._anim.base_state == "idle" and win._walk_target is None
-    finally:
-        win.shutdown()
-        win.close()
-
-
 # --- chat header drag --------------------------------------------------------------------------------------
 
 def _mouse(kind: QEvent.Type, local: QPoint, glob: QPoint) -> QMouseEvent:
@@ -58,7 +33,7 @@ def _mouse(kind: QEvent.Type, local: QPoint, glob: QPoint) -> QMouseEvent:
                        Qt.KeyboardModifier.NoModifier)
 
 
-def test_dragging_the_chat_header_moves_it_and_reports_where_the_pet_should_stand(
+def test_dragging_the_chat_header_moves_it_and_keeps_it_there(
         qapp: QApplication, monkeypatch: pytest.MonkeyPatch) -> None:
     from src.tools.ai_assist import AiAssistPlugin
     from src.ui.ai_chat import AiChat
@@ -73,15 +48,12 @@ def test_dragging_the_chat_header_moves_it_and_reports_where_the_pet_should_stan
         chat.open_near(QRect(area.center().x() - 64, area.bottom() - 200, 128, 128))
         qapp.processEvents()
         start = chat.pos()
-        seen: list[QRect] = []
-        chat.moved.connect(seen.append)
         grip = QPoint(150, 8)  # in the header, left of the buttons
         chat.mousePressEvent(_mouse(QEvent.Type.MouseButtonPress, grip, start + grip))
         chat.mouseMoveEvent(_mouse(QEvent.Type.MouseMove, grip, start + grip + QPoint(-120, -60)))
         chat.mouseReleaseEvent(_mouse(QEvent.Type.MouseButtonRelease, grip, start + grip + QPoint(-120, -60)))
-        assert chat.pos() == start + QPoint(-120, -60) and len(seen) == 1
-        assert seen[0].top() == chat.geometry().bottom() + 1 + chat.GAP  # the pet stands just under the card
-        assert seen[0].center().x() == chat.x() + chat.WIDTH // 2
+        assert chat.pos() == start + QPoint(-120, -60) and not hasattr(chat, "moved")  # the pet stays put
+        assert chat._anchor.top() == chat.geometry().bottom() + 1 + chat.GAP
         chat._relayout()  # content changes keep the dropped spot instead of snapping back to the pet
         assert chat.pos() == start + QPoint(-120, -60)
         below = QPoint(150, chat._header_sep.mapTo(chat, QPoint(0, 0)).y() + 20)  # the thread: no drag

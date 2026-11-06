@@ -204,11 +204,11 @@ class RadialDropWheel(QWidget):
             local = initial_global_cursor - window_top_left
             self._hovered_index = self.hit_test_option_index(QPointF(local))
 
+        self._open_anim.stop()
+        self._open_t = 0.0  # before show: the first frame on screen must be the start of the pop-in
         self.show()
         self.raise_()
         self.restack_topmost()
-        self._open_anim.stop()
-        self._open_t = 0.0
         self._open_anim.start()
         self.update()
         if self._enable_watchdog:
@@ -225,12 +225,16 @@ class RadialDropWheel(QWidget):
 
     def dismiss(self) -> None:
         self._open_anim.stop()
-        self._open_t = 1.0
         self._watchdog_timer.stop()
         self._ticks.sleep()
         self._hovered_index = -1
         if self.isVisible():
+            # Windows keeps a hidden layered window's last frame and flashes it on the next show (the wheel
+            # appeared, vanished and popped in again), so leave an empty frame behind
+            self._open_t = 0.0
+            self.repaint()
             self.hide()
+        self._open_t = 1.0
 
     def _rebuild_geometry_cache(self) -> None:
         self._normal_polys.clear()

@@ -476,6 +476,20 @@ def test_both_loops_end_with_an_answer_when_the_tool_budget_runs_out(monkeypatch
     assert sent[3]["messages"][-1]["content"] == "ok" + ai_assist.BUDGET_NOTE
     assert sent[2]["messages"][-1]["content"] == "ok"
 
+    def deepseek(body):  # DeepSeek keeps the tool list (cached prefix) and gets tool_choice none instead
+        if body.get("tool_choice") == "none":
+            return {"choices": [{"message": {"role": "assistant", "content": "Done so far: 3 files."}}]}
+        return openai(body)
+
+    sent.clear()
+    host = _Host()
+    monkeypatch.setattr(ai_assist, "_request", lambda *a: sent.append(json.loads(json.dumps(a[3]))) or deepseek(a[3]))
+    reply = ai_assist._post("https://api.deepseek.com/v1", "k", "deepseek-flash", [{"role": "user", "content": "big job"}],
+                            "off", 5, True, host)
+    assert reply.text == "Done so far: 3 files." and len(host.calls) == 3
+    assert all(s["tools"] == sent[0]["tools"] for s in sent)
+    assert [s.get("tool_choice") for s in sent] == [None, None, None, "none"]
+
 
 def test_memory_notes_add_remove_and_keep_the_users_own_lines(tmp_path: Path) -> None:
     from src.tools.ai_tools import MAX_MEMORY_CHARS, memory_prompt, plan_memory, read_memory, write_memory
@@ -618,6 +632,7 @@ def test_computer_tools_parse_and_flag_risky_actions() -> None:
     assert computer_action("type_text", {"text": "del /q *.*"})[1]  # a destructive command typed into a terminal
     assert computer_action("press_key", {"keys": "ctrl+s"})[1] == ""
     assert computer_action("press_key", {"keys": "Alt+F4"})[1] and computer_action("press_key", {"keys": "delete"})[1]
+    assert computer_action("press_key", {"keys": "shift+delete"})[1] == "shift+delete"
     for name, args in (("mouse_click", {"x": "1", "y": 2}), ("mouse_click", {"x": True, "y": 2}),
                        ("type_text", {"text": ""}), ("scroll", {})):
         with pytest.raises(ValueError):

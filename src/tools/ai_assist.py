@@ -993,8 +993,11 @@ def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], t
         body: dict[str, Any] = {"model": model, "messages": messages,
                                 "max_tokens": MAX_THINKING_TOKENS if thinks else MAX_REPLY_TOKENS,
                                 **thinking_params(base_url, thinking)}
-        if tools and round_ < MAX_TOOL_ROUNDS and not _stuck(fails) and paid < MAX_ANSWER_TOKENS:
+        offer = tools and round_ < MAX_TOOL_ROUNDS and not _stuck(fails) and paid < MAX_ANSWER_TOKENS
+        if offer or (tools and used and is_deepseek(base_url)):
             body["tools"] = [*((SEARCH_TOOL, FETCH_TOOL) if web else ()), *(host.specs if host else [])]
+            if not offer:  # same tools, answer only: dropping them would change DeepSeek's cached prefix (a full miss)
+                body["tool_choice"] = "none"
         streams = progress is not None and (base_url, model) not in _NO_STREAM
         wait = timeout or (DEEPSEEK_SILENCE_S if streams and is_deepseek(base_url)
                            else THINKING_TIMEOUT_S if thinks else TIMEOUT_S)
@@ -1043,7 +1046,7 @@ def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], t
             paid += (_billable(_int(usage.get("prompt_tokens")) - hit, hit, _int(usage.get("completion_tokens")))
                      if usage.get("prompt_tokens") or usage.get("completion_tokens") else _int(usage.get("total_tokens")))
             calls = message.get("tool_calls") or []
-            if calls and "tools" in body:  # never run calls this round did not offer tools for (last round, stuck, budget)
+            if calls and "tools" in body and "tool_choice" not in body:  # never run calls this round did not offer tools for (last round, stuck, budget)
                 # echo the model's own turn (DeepSeek also wants its reasoning back), then answer each call
                 messages.append({k: v for k, v in message.items()
                                  if k in ("role", "content", "tool_calls", "reasoning_content") and v is not None})

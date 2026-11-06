@@ -8,7 +8,6 @@ import csv
 import datetime as dt
 import gzip
 import hashlib
-import io
 import json
 import lzma
 import os
@@ -812,7 +811,7 @@ def convert_image_file(
     output_path: Path | None = None,
 ) -> ForgeResult:
     """Convert or optimize an image using Qt's native C++ QImageReader/QImageWriter."""
-    from PyQt6.QtCore import QFile, QIODevice, Qt
+    from PyQt6.QtCore import QFile, QIODevice
     from PyQt6.QtGui import QColor, QGuiApplication, QImage, QImageReader, QImageWriter, QPainter
 
     src = Path(src_path)

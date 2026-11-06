@@ -654,9 +654,10 @@ def computer_action(name: str, args: dict[str, Any]) -> tuple[str, str]:
             raise ValueError(f"at most {MAX_TYPE_CHARS} characters at a time")
         return f"type: {text}", destructive_reason(text)
     if name == "press_key":
-        codes = parse_keys(args.get("keys"))
+        parse_keys(args.get("keys"))  # raises on a bad combo
         keys = str(args["keys"]).strip().lower().replace(" ", "")
-        risky = keys.split("+")[0] in ("delete", "del") or keys == "alt+f4" or "win" in keys.split("+")
+        parts = keys.split("+")
+        risky = bool({"delete", "del", "win"} & set(parts)) or keys == "alt+f4"  # shift+delete skips the Recycle Bin
         return f"press {keys}", keys if risky else ""
     amount = num("amount")
     if ("x" in args) != ("y" in args):
