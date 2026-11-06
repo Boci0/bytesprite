@@ -11,6 +11,7 @@ from src.tools.base import ToolPlugin, ToolRegistry
 from src.tools.ai_assist import AiAssistPlugin
 from src.tools.clip_vault import ClipVaultPlugin
 from src.tools.file_forge import FileForgePlugin, ForgeMode
+from src.tools.errands import ErrandsPlugin
 from src.tools.hints import HintsPlugin
 from src.tools.pomodoro import PomodoroPhase, PomodoroPlugin
 from src.tools.project import ProjectPlugin
@@ -46,7 +47,7 @@ class PetStateMachine:
             forge = FileForgePlugin()
             clipvault = ClipVaultPlugin()
             self._registry = ToolRegistry([sysmon, pomodoro, forge, clipvault, ProjectPlugin(),
-                                           HintsPlugin(), AiAssistPlugin()])
+                                           HintsPlugin(), AiAssistPlugin(), ErrandsPlugin()])
 
         self._sync_stats_from_tools()
 

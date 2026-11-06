@@ -15,7 +15,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from PyQt6.QtCore import QDateTime, QElapsedTimer, QPoint, QProcess, QRect, QRectF, QStandardPaths, Qt, QTimer, QUrl
+from PyQt6.QtCore import QDateTime, QElapsedTimer, QPoint, QPointF, QProcess, QRect, QRectF, QStandardPaths, Qt, QTimer, QUrl
 from PyQt6.QtGui import (
     QCloseEvent,
     QColor,
@@ -45,6 +45,7 @@ from src.graphics.duck import Pose, render_icon, render_pose
 from src.tools.file_forge import ForgeMode, ForgeWheelOption, get_wheel_options_for_paths
 from src.tools.ai_assist import AiAssistPlugin, AiJob, AiReply, fit_thinking, load_key, thinking_levels
 from src.tools.ai_tools import skills_dir
+from src.tools.errands import MAX_ERRAND_RUNS, ErrandsPlugin
 from src.tools.macros import MacroBook
 from src.tools.hints import HintsPlugin, Suggestion, foreground_app, foreground_title, idle_seconds, display_kept_on
 from src.tools.watch import (ACTION_LABELS, EDITORS, LABELS as WATCH_LABELS, SOURCES as WATCH_SOURCES, WatchReply,
@@ -138,6 +139,25 @@ def fullscreen_in_front(own: set[int], pet_hwnd: int) -> bool:
         return False
     front, pet = computer.window_on_monitor(fg), computer.window_on_monitor(pet_hwnd)
     return front is not None and pet is not None and front[0] == pet[0] and front[1] == (0, 0, *front[2])
+
+
+# What the duck acts out while the chat model runs a tool (body language); anything else reads as thinking
+READING_TOOLS = frozenset({"list_files", "read_file", "find_files", "search_text", "read_clipboard", "read_screen",
+                           "screen_map", "load_skill", "read_background", "pet_status"})
+WORKING_TOOLS = frozenset({"run_command", "start_background", "edit_file", "edit_files", "mouse_click", "type_text",
+                           "press_key", "scroll", "computer_batch", "save_file"})
+LOOKING_TOOLS = frozenset({"web_search", "fetch_page", "open_link", "find_mcp_servers"})
+
+
+def activity_clip(tool: str) -> str:
+    """The base clip for what the chat model does now: reading, typing, looking around, or waiting on the user."""
+    if tool == "approval":
+        return "wait"
+    if tool in WORKING_TOOLS:
+        return "type"
+    if tool in LOOKING_TOOLS or "__" in tool:  # web tools and MCP servers (server__tool)
+        return "scan"
+    return "focus"  # reading tools and plain thinking: head over its work
 
 
 def clamp_position_to_screens(
@@ -345,6 +365,8 @@ class PetWindow(QWidget):
         QTimer.singleShot(self.PREBUILD_CHAT_MS, self._prebuild_ai_chat)
         self._ai_thinking: bool = False
         self._ai_since: float = 0.0  # when the pending AI answer started
+        self._ai_activity = ""  # the tool the chat model runs now (body language), "approval" while one waits
+        self._errand_running = False  # the chat's pending answer is a fired errand
         self._away: bool = False  # no input for AWAY_AFTER_S: idle naps (visual only, never DND)
         self._glows: list[ScreenGlow] = []
         # Image dragged out of a browser (URL or raw image), fetched only once a slice is chosen
@@ -593,7 +615,7 @@ class PetWindow(QWidget):
             return "dangle"  # held in the air, whatever the state
         clip = mapping.get(state, "idle")
         if self._ai_thinking and clip == "idle":
-            return "focus"
+            return activity_clip(self._ai_activity)
         return "sleep" if clip == "idle" and self._away else clip
 
     def _sync_animation_to_pet_state(self, state: PetState) -> None:
@@ -754,6 +776,7 @@ class PetWindow(QWidget):
 
     def _poll_hint(self) -> None:
         self._check_away()
+        self._poll_errands()
         app = foreground_app()  # ~0.03ms per 3s tick
         if (hints := self._hints_plugin()) is not None:
             hints.note_app(app)
@@ -805,6 +828,11 @@ class PetWindow(QWidget):
         self._hint = None  # not _clear_hint: a running Watch answer is kept for the click
         self.update()
         if hint is None or hint.rule == "tip":  # a tip's click just closes it
+            return
+        if hint.rule.startswith("errand"):
+            if hint.rule == "errand_ready":
+                self._run_errand()
+            self.ensure_ai_chat()
             return
         if hints is not None:
             hints.mark_used()
@@ -1050,6 +1078,8 @@ class PetWindow(QWidget):
     def _dismiss_hint(self) -> None:
         hint, hints = self._hint, self._hints_plugin()
         self._clear_hint()
+        if hint is not None and hint.rule.startswith("errand"):
+            return  # closes the card; an errand_ready one shows again on the next tick
         if hint is not None and hint.rule == "tip":
             self.tips_seen = len(self.TIPS)
             self._show_toast("TIPS OFF", QColor("#8A9AF2"))
@@ -1598,7 +1628,11 @@ class PetWindow(QWidget):
 
     def _make_ai_chat(self, plugin: AiAssistPlugin) -> None:
         """Build the chat card hidden (about 0.4s of widget setup on the Qt thread)."""
-        self._ai_chat = AiChat(plugin, on_attach_screen=lambda: self.trigger_snip("ask"), tool_host=AiToolHost(self))
+        host = AiToolHost(self)
+        self._ai_chat = AiChat(plugin, on_attach_screen=lambda: self.trigger_snip("ask"), tool_host=host)
+        host.activity.connect(self._on_ai_activity)
+        if (errands := self._errands()) is not None:
+            errands.probes.bg = host.procs.peek
         self._ai_chat.thinking_changed.connect(self._on_ai_thinking)
         self._ai_chat.answered.connect(self._on_ai_answered)
         self._ai_chat.moved.connect(self.walk_to_sprite)
@@ -1666,7 +1700,80 @@ class PetWindow(QWidget):
         self._anim.play_oneshot(clip)
         self._schedule_next_anim_tick()
 
+    def _on_ai_activity(self, name: str) -> None:
+        """Act out what the chat model does: a new base clip per tool, and facing the chat while it waits."""
+        self._ai_activity = name
+        if name == "approval" and self._ai_chat is not None and self._ai_chat.isVisible():
+            self._anim.facing_left = self._ai_chat.geometry().center().x() < self._sprite_global_rect().center().x()
+        if not self._is_shutting_down and self._walk_steps_remaining == 0:
+            clip = self._base_clip(self._state_machine.state)
+            if self._anim.base_state != clip:
+                self._anim.set_state(clip)
+                self._schedule_next_anim_tick()
+                self.update()
+
+    # Errands: the plugin checks triggers on the hint tick; a fired one runs in the chat that set it
+
+    def _errands(self) -> ErrandsPlugin | None:
+        plugin = self._state_machine.registry.get_plugin("errands")
+        return plugin if isinstance(plugin, ErrandsPlugin) else None
+
+    def _poll_errands(self) -> None:
+        errands = self._errands()
+        if errands is None:
+            return
+        if errands.poll():
+            self.update()  # the tag count
+        if not errands.fired or self._is_shutting_down:
+            return
+        if self._ai_chat is None:
+            self._prebuild_ai_chat()  # a next_startup errand can fire before the chat is built
+        chat = self._ai_chat
+        if chat is None or chat._job is not None or (self._hint is not None and self._hint.rule == "errand_ready"):
+            return
+        errand, _evidence = errands.fired[0]
+        procs = getattr(chat._tool_host, "procs", None)
+        if chat._sid != errand.sid and procs is not None and procs.snapshot():
+            # switching chats would kill this chat's background commands: the user decides
+            self._show_errand_hint("errand_ready", "Errand ready. Click to run it", errand.instruction)
+            return
+        self._run_errand()
+
+    def _run_errand(self) -> None:
+        errands, chat = self._errands(), self._ai_chat
+        if errands is None or chat is None or not errands.fired or chat._job is not None:
+            return
+        errand, evidence = errands.fired.pop(0)
+        if not errands.take_run():
+            chat.add_note(f"Errand {errand.id} fired, but today's {MAX_ERRAND_RUNS} errand runs are used up.")
+            self._show_toast("ERRAND CAP", QColor("#EF7D57"))
+            return
+        if chat.run_errand(errand, evidence):
+            self._errand_running = True
+            self._anim.play_oneshot("spin")
+            self._schedule_next_anim_tick()
+            if not chat.isVisible():
+                self._show_errand_hint("errand_busy", "Errand: working on it", errand.instruction)
+            self.update()
+
+    def _show_errand_hint(self, rule: str, text: str, detail: str) -> None:
+        self._drop_watch()
+        self._hint = Suggestion(rule, text, "", detail[:60])
+        self._hint_until = time.monotonic() + (20.0 if rule == "errand_done" else 3600.0)
+        self.update()
+
     def _on_ai_answered(self, ok: bool) -> None:
+        if self._errand_running:
+            self._errand_running = False
+            if (errands := self._errands()) is not None and ok:
+                errands.done += 1
+            if self._hint is not None and self._hint.rule == "errand_busy":
+                self._clear_hint()
+            if self._ai_chat is not None and not self._ai_chat.isVisible():
+                self._show_errand_hint("errand_done", "Errand done. Click to see" if ok else "Errand failed. Click",
+                                   "Right-click closes")
+            self._react(self.SUCCESS_HEX if ok else "#EF7D57", big=ok)
+            return
         # A quick answer is just a chat; only a long job (an agentic task) earns a cheer
         if not ok:
             self._react("#EF7D57")
@@ -2143,6 +2250,9 @@ class PetWindow(QWidget):
 
         # Rendered at device pixels already, so this is a 1:1 blit
         painter.drawImage(self._sprite_rect.topLeft(), self._current_qimage())
+        errands = self._errands()
+        if errands is not None and errands.errands:
+            self._paint_errand_tag(painter, len(errands.errands))
 
         if self._hint is not None:
             self._paint_hint(painter)
@@ -2237,7 +2347,24 @@ class PetWindow(QWidget):
         painter.setFont(ui_font(6.5))
         painter.setPen(QColor(TEXT_DIM_HEX))
         painter.drawText(QRect(r.left() + 8, r.top() + 22, r.width() - 16, 12), center,
-                         self._hint.data if self._hint.rule == "tip" else "Click: do it   Right-click: mute")
+                         self._hint.data if self._hint.rule == "tip" or self._hint.rule.startswith("errand")
+                         else "Click: do it   Right-click: mute")
+        painter.restore()
+
+    def _paint_errand_tag(self, painter: QPainter, count: int) -> None:
+        """A small folded paper tag on a string at the duck's neck: errands it is carrying (the count)."""
+        s = self._sprite_rect
+        neck_x = s.left() + (s.width() * 0.36 if self._anim.facing_left else s.width() * 0.64)
+        neck = QPointF(neck_x, s.top() + s.height() * 0.5)
+        tag = QRectF(neck.x() - 8 + (-10 if self._anim.facing_left else 10), neck.y() + 6, 16, 13)
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(QPen(QColor(TEXT_DIM_HEX), 1))
+        painter.drawLine(neck, QPointF(tag.center().x(), tag.top()))
+        paint_panel(painter, tag.toRect(), radius=3, fold=False)
+        painter.setFont(ui_font(6.5, bold=True))
+        painter.setPen(QColor(TEXT_HEX))
+        painter.drawText(tag, Qt.AlignmentFlag.AlignCenter, str(count))
         painter.restore()
 
     def _paint_toast(self, painter: QPainter) -> None:
