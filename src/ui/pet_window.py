@@ -62,6 +62,7 @@ from src.ui.context_menu import PetContextMenu, style_menu
 from src.ui.drop_wheel import RadialDropWheel
 from src.ui.macro_editor import MacroEditor
 from src.ui.macro_runner import MacroRunner
+from src.ui import perch
 from src.ui.quick_tools import (HOTKEY_ACTIONS, OcrJob, SnipSession, default_hotkey, hotkey_label, open_folder_in_background,
                                  parse_hotkey)
 from src.ui.sfx import play_cue, preload_tick_sounds, prewarm as prewarm_ticks
@@ -298,6 +299,8 @@ class PetWindow(QWidget):
     BIG_WINS: frozenset[str] = frozenset({"FOCUS DONE", "PUSHED"})  # cheer plus the pixel-star burst
     LONG_TASK_S: float = 30.0  # an AI answer that took this long cheers when it lands
     AWAY_AFTER_S: float = 300.0  # no keyboard or mouse input this long: the idle clip becomes a nap
+    PERCH_TICK_MS: int = 16  # perch follow and fall frame time (about 60 fps)
+    FALL_ACCEL: float = 2400.0  # px/s^2: a flutter, a bit gentler than a drop
     PREWARM_DELAY_MS: int = 150  # a drag has usually passed DRAG_THRESHOLD_PX by now; still before the wheel opens
 
     def __init__(
@@ -345,6 +348,15 @@ class PetWindow(QWidget):
         self._walk_dy: int = 0
         self._walk_target: QPoint | None = None  # a walk to a spot (the dropped chat) ends exactly here
         self._walk_steps_remaining: int = 0
+        self._perch: tuple[int, int] | None = None  # (hwnd, sprite centre x minus the edge's left) while sitting
+        self._fall_to: int | None = None  # window y a perch fall ends at
+        self._fall_x, self._fall_y, self._fall_v = 0, 0.0, 0.0  # x, exact y, speed in px/s
+        # Perch follow and falls run at display rate (the 90ms overlay tick looked choppy); only while needed
+        self._perch_timer = QTimer(self)
+        self._perch_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._perch_timer.setInterval(self.PERCH_TICK_MS)
+        self._perch_timer.timeout.connect(self._on_perch_tick)
+        self._perch_clock = QElapsedTimer()
         self._is_shutting_down: bool = False
         self._drop_wheel: RadialDropWheel | None = None
         self._snip_session: SnipSession | None = None
@@ -590,6 +602,7 @@ class PetWindow(QWidget):
         self.move(cx, cy)
 
     def reset_to_default_position(self) -> None:
+        self._perch = self._fall_to = None
         primary = QGuiApplication.primaryScreen()
         if primary is None:
             self.move(120, 120)
@@ -667,7 +680,7 @@ class PetWindow(QWidget):
     def _on_ambient_tick(self) -> None:
         if self._press_global_pos is not None:
             return
-        if self._open_wheels() or self._walk_steps_remaining > 0:
+        if self._open_wheels() or self._walk_steps_remaining > 0 or self._fall_to is not None:
             return  # a hop or blink must not move the pet out from under an open wheel, or interrupt a walk
         if self._state_machine.state != PetState.IDLE or self._away:
             return
@@ -713,11 +726,15 @@ class PetWindow(QWidget):
         if self._walk_steps_remaining > 0:
             self._walk_steps_remaining -= 1
             before = self.pos()
-            if self._walk_steps_remaining == 0 and self._walk_target is not None:
-                self.move_clamped(self._walk_target.x(), self._walk_target.y())  # no rounding drift at the end
+            if self._perch is not None:
+                moved_on = self._follow_perch(self._walk_dx)  # a hop along the edge; False: a fall replaced it
             else:
-                self.move_clamped(before.x() + self._walk_dx, before.y() + self._walk_dy)
-            if self.pos() == before or self._walk_steps_remaining == 0:
+                moved_on = True
+                if self._walk_steps_remaining == 0 and self._walk_target is not None:
+                    self.move_clamped(self._walk_target.x(), self._walk_target.y())  # no rounding drift at the end
+                else:
+                    self.move_clamped(before.x() + self._walk_dx, before.y() + self._walk_dy)
+            if moved_on and (self.pos() == before or self._walk_steps_remaining == 0):
                 self._walk_steps_remaining = 0
                 self._walk_target = None
                 self._sync_animation_to_pet_state(self._state_machine.state)  # a walk may run in any state
@@ -733,6 +750,111 @@ class PetWindow(QWidget):
 
         if needs_repaint:
             self.update()
+
+    # ------------------------------------------------------------------
+    # Perching on other windows (src/ui/perch.py)
+    # ------------------------------------------------------------------
+
+    def _feet_local(self) -> tuple[int, int]:
+        """(sprite centre x, feet y) in window coordinates."""
+        r = self._sprite_rect
+        return r.center().x(), r.top() + r.height() * 53 // 64  # lowest opaque row of the standing poses
+
+    def _clamp_feet(self, x: int, y: int) -> tuple[int, int]:
+        """clamp_position_to_screens, but the window may hang below the work area by the gap under the feet, so
+        they touch the taskbar instead of hovering over it."""
+        gap = self.height() - self._feet_local()[1]
+        screens = [ScreenRect(s.x, s.y, s.width, s.height + gap) for s in self.available_screen_rects()]
+        return clamp_position_to_screens(x, y, self.width(), self.height(), screens)
+
+    @staticmethod
+    def _qt_screens() -> list[tuple[perch.Rect, float]]:
+        out = []
+        for scr in QGuiApplication.screens():
+            g = scr.geometry()
+            out.append(((g.x(), g.y(), g.x() + g.width(), g.y() + g.height()), scr.devicePixelRatio()))
+        return out
+
+    def _try_perch(self) -> None:
+        """On release: sit on the window (or taskbar) whose top edge is within reach of the feet."""
+        if QGuiApplication.platformName() != "windows":
+            return  # offscreen tests: never perch on the real desktop's windows
+        screens = self._qt_screens()
+        wins = perch.top_level_windows()
+        rects = [perch.to_logical(r, screens) for _, r in wins]
+        sx, fy = self._feet_local()
+        i = perch.pick_perch(rects, self.x() + sx, self.y() + fy)
+        if i is None:
+            return
+        self._perch = (wins[i][0], self.x() + sx - rects[i][0])
+        if self._follow_perch(fall=False):
+            self._start_perch_timer()
+
+    def _start_perch_timer(self) -> None:
+        if not self._perch_timer.isActive():
+            self._perch_clock.start()
+            self._perch_timer.start()
+
+    def _on_perch_tick(self) -> None:
+        dt = min(0.1, self._perch_clock.restart() / 1000.0)  # measured; a stall never teleports the fall
+        if self._fall_to is not None:
+            self._fall_v += self.FALL_ACCEL * dt
+            self._fall_y = min(float(self._fall_to), self._fall_y + self._fall_v * dt)
+            self.move(self._fall_x, round(self._fall_y))
+            if self.y() >= self._fall_to:
+                self._land_fall()
+        elif self._perch is not None and self._walk_steps_remaining <= 0:
+            self._follow_perch()  # a hop steps along the edge on the overlay tick instead
+        if self._perch is None and self._fall_to is None:
+            self._perch_timer.stop()
+
+    def _follow_perch(self, dx: int = 0, *, fall: bool = True) -> bool:
+        """Stand on the perch's top edge (dx: a wander step along it). False when it is gone, then fall
+        (unless `fall` is off: a drop where there is no room to sit stays where it was dropped)."""
+        assert self._perch is not None
+        hwnd, offset = self._perch
+        screens = self._qt_screens()
+        phys = perch.window_rect(hwnd)
+        rect = perch.to_logical(phys, screens) if phys is not None else None
+        sx, fy = self._feet_local()
+        lost = rect is None or perch.perch_lost(rect, [g for g, _ in screens], rect[0] + offset)
+        if rect is not None and not lost:
+            x, y = perch.perch_position(rect, rect[0] + offset + dx, sx, fy, self._sprite_rect.width() // 4)
+            cx, cy = self._clamp_feet(x, y)
+            lost = cy != y  # pushed off the edge (window dragged to the screen top, maximized)
+        if rect is None or lost:
+            self._perch = None
+            if fall:
+                self._start_fall()
+            return False
+        if (cx, cy) != (self.x(), self.y()):
+            self.move(cx, cy)
+        self._perch = (hwnd, cx + sx - rect[0])
+        return True
+
+    def _start_fall(self) -> None:
+        """Flutter down (dangle clip, accelerating) to the work-area floor under the duck."""
+        sx, fy = self._feet_local()
+        scr = QGuiApplication.screenAt(QPoint(self.x() + sx, self.y() + fy)) or self.screen()
+        floor = scr.availableGeometry().bottom() + 1
+        self._fall_x, fall_to = self._clamp_feet(self.x(), floor - fy)
+        self._fall_y, self._fall_v = float(self.y()), 0.0
+        self._walk_steps_remaining, self._walk_target = 0, None
+        if fall_to <= self.y():
+            self.move(self._fall_x, fall_to)
+            self._land_fall()
+            return
+        self._fall_to = fall_to
+        self._anim.set_state("dangle")
+        self._schedule_next_anim_tick()
+        self._start_perch_timer()
+
+    def _land_fall(self) -> None:
+        self._fall_to = None
+        self._sync_animation_to_pet_state(self._state_machine.state)
+        self._anim.play_oneshot("land")
+        self._schedule_next_anim_tick()
+        self.update()
 
     def _pin_hud(self, steps: int = 35) -> None:
         self._hud_pinned_until_ticks = max(self._hud_pinned_until_ticks, steps)
@@ -1671,6 +1793,7 @@ class PetWindow(QWidget):
         steps = -(-max(abs(dx), abs(dy)) // self.WALK_TO_STEP_PX)
         if steps == 0 or self._press_global_pos is not None:
             return
+        self._perch = self._fall_to = None
         self._walk_target, self._walk_steps_remaining = target, steps
         self._walk_dx, self._walk_dy = round(dx / steps), round(dy / steps)
         if dx:
@@ -1999,6 +2122,7 @@ class PetWindow(QWidget):
             self._last_drag_global_pos = global_pos
             self._drag_offset = global_pos - self.frameGeometry().topLeft()
             self._did_drag = False
+            self._perch = self._fall_to = None  # picked up
             self._wheel_holding = False  # a hold whose release never arrived (wheel watchdog closed it)
             self._walk_steps_remaining = 0
             self._hold_timer.start()
@@ -2075,6 +2199,7 @@ class PetWindow(QWidget):
                 self._sync_animation_to_pet_state(self._state_machine.state)
                 self._anim.play_oneshot("land")
                 self._schedule_next_anim_tick()
+                self._try_perch()
             event.accept()
             return
         super().mouseReleaseEvent(event)
@@ -2396,6 +2521,7 @@ class PetWindow(QWidget):
             self._anim_timer.isActive()
             or self._ambient_timer.isActive()
             or self._overlay_timer.isActive()
+            or self._perch_timer.isActive()
         )
 
     def shutdown(self) -> None:
@@ -2405,6 +2531,7 @@ class PetWindow(QWidget):
         self._ambient_timer.stop()
         self._topmost_timer.stop()
         self._overlay_timer.stop()
+        self._perch_timer.stop()
         self._hint_timer.stop()
         if self._ai_chat is not None:
             self._ai_chat.close()
