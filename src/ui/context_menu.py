@@ -1,4 +1,4 @@
-"""Pixel-framed right-click context menu for ByteSprite Multi-Tool."""
+"""Folded-paper right-click context menu for ByteSprite Multi-Tool."""
 
 from __future__ import annotations
 
@@ -22,24 +22,29 @@ from src.ui.theme import (
     FONT_FAMILY,
     HAIRLINE_RGBA,
     HOVER_RGBA,
+    SHADOW,
     SLEEP_HEX,
     TEXT_DIM_HEX,
     TEXT_HEX,
-    install_pixel_frame,
+    THEME_CHOICES,
+    install_panel_frame,
     rgba_css,
 )
 
+# Padding holds the panel's soft shadow (SHADOW) plus 6px of paper around the rows
 MENU_STYLESHEET = f"""
 QMenu {{
     background: transparent;
     color: {TEXT_HEX};
     border: none;
-    padding: 8px;
+    padding: {6 + SHADOW // 2}px {6 + SHADOW}px {6 + SHADOW * 3 // 2}px {6 + SHADOW}px;
     font-family: "{FONT_FAMILY}";
     font-size: 10pt;
 }}
 QMenu::item {{
-    padding: 6px 28px 6px 10px;
+    padding: 6px 30px 6px 12px;
+    margin: 1px 0;
+    border-radius: 6px;
     background: transparent;
 }}
 QMenu::item:selected {{
@@ -52,17 +57,17 @@ QMenu::item:disabled {{
 QMenu::separator {{
     height: 1px;
     background: {rgba_css(HAIRLINE_RGBA)};
-    margin: 5px 2px;
+    margin: 5px 10px;
 }}
 QMenu::indicator {{
     width: 14px;
     height: 14px;
-    margin-left: 4px;
+    margin-left: 6px;
 }}
 QMenu::right-arrow {{
     width: 8px;
     height: 8px;
-    margin-right: 8px;
+    margin-right: 10px;
 }}
 """
 
@@ -81,7 +86,7 @@ _STATE_LABELS: dict[PetState, tuple[str, str]] = {
 
 
 def style_menu(menu: QMenu) -> QMenu:
-    """Apply the frameless pixel-frame look (stepped corners need a clear backdrop)."""
+    """Apply the frameless folded-paper look (rounded corners and the shadow need a clear backdrop)."""
     menu.setWindowFlags(
         menu.windowFlags()
         | Qt.WindowType.FramelessWindowHint
@@ -89,7 +94,7 @@ def style_menu(menu: QMenu) -> QMenu:
     )
     menu.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
     menu.setStyleSheet(MENU_STYLESHEET)
-    install_pixel_frame(menu)
+    install_panel_frame(menu)
     return menu
 
 
@@ -120,6 +125,7 @@ class PetContextMenu(QMenu):
         pet_scale: int = 4,
         hotkeys: Sequence[tuple[str, str, str]] = (),
         pet_scales: dict[int, str] | None = None,
+        theme: str = "system",
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -131,7 +137,7 @@ class PetContextMenu(QMenu):
 
         # Header card: name + status dot on line one, live telemetry on line two
         header = QLabel(
-            f'<div style="font-size:10.5pt; font-weight:600; color:{TEXT_HEX};">ByteSprite'
+            f'<div style="font-size:10.5pt; font-weight:600; color:{TEXT_HEX};">Paperduck'
             f'&nbsp;&nbsp;<span style="color:{state_color}; font-size:9pt;">&#9679; {state_text}</span></div>'
             f'<div style="font-size:8.5pt; color:{TEXT_DIM_HEX};">'
             f"CPU {int(round(stats.cpu_usage))}%&nbsp;&nbsp;&middot;&nbsp;&nbsp;"
@@ -327,6 +333,14 @@ class PetContextMenu(QMenu):
                 act.triggered.connect(lambda _checked=False, c=f"size:{scale}": on_tool_action(c))
                 self.size_menu.addAction(act)
             self.settings_menu.addMenu(self.size_menu)
+            self.theme_menu = style_menu(QMenu("Theme", self.settings_menu))
+            for key, label in THEME_CHOICES.items():
+                act = QAction(label, self.theme_menu)
+                act.setCheckable(True)
+                act.setChecked(key == theme)
+                act.triggered.connect(lambda _checked=False, c=f"theme:{key}": on_tool_action(c))
+                self.theme_menu.addAction(act)
+            self.settings_menu.addMenu(self.theme_menu)
 
         # Shortcut hints elsewhere in the menu follow rebound hotkeys (snip:<mode>, and the AI chat's ai:chat)
         for _label, combo, mode in hotkeys:
@@ -385,6 +399,6 @@ class PetContextMenu(QMenu):
 
         self.addSeparator()
 
-        self.quit_action = QAction("Quit ByteSprite", self)
+        self.quit_action = QAction("Quit Paperduck", self)
         self.quit_action.triggered.connect(lambda _checked=False: on_quit())
         self.addAction(self.quit_action)

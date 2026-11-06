@@ -562,8 +562,8 @@ def test_pet_size_keeps_feet_in_place_and_persists(qapp: QApplication, tmp_path)
         assert win.pet_scale == 2 and win._sprite_rect.width() == 64
         assert win.height() == PetWindow.WINDOW_HEIGHT - 64
         assert win.mapToGlobal(win._sprite_rect.bottomLeft()).y() == feet
-        on_wire = win._sprite_rect.topLeft() + QPoint(13 * 2 + 1, 20 * 2 + 1)  # first wire cell, scaled 2x
-        assert win.hit_test_point(on_wire) and not win.hit_test_point(win._sprite_rect.topLeft())
+        on_body = win._sprite_rect.topLeft() + QPoint(70 // 2, 84 // 2)  # duck hull, 128-unit box at half size
+        assert win.hit_test_point(on_body) and not win.hit_test_point(win._sprite_rect.topLeft())
         win.trigger_tool_action("size:9")  # unknown sizes are ignored
         assert win.pet_scale == 2
         menu = win.build_context_menu()

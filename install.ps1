@@ -125,7 +125,7 @@ $Standalone = $false
 # Any failure below still removes the download folder; break re-throws the error
 trap { if ($Temp) { Remove-Item $Temp -Recurse -Force -ErrorAction SilentlyContinue }; break }
 if (-not $Source -or -not (Test-Path (Join-Path $Source "src\main.py"))) {
-    Write-Host "Downloading the latest ByteSprite release..."
+    Write-Host "Downloading the latest Paperduck release..."
     $release = Invoke-RestMethod "https://api.github.com/repos/$Repo/releases/latest"
     $Temp = Join-Path $env:TEMP ("bytesprite_" + [guid]::NewGuid())
     New-Item -ItemType Directory -Path $Temp | Out-Null
@@ -227,14 +227,20 @@ function New-Shortcut([string]$Path) {
     $lnk.Arguments = $TargetArgs
     $lnk.WorkingDirectory = $WorkDir
     $lnk.IconLocation = $Icon
-    $lnk.Description = "ByteSprite desktop companion"
+    $lnk.Description = "Paperduck desktop companion"
     $lnk.Save()
 }
-New-Shortcut (Join-Path ([Environment]::GetFolderPath("Programs")) "ByteSprite.lnk")
-$desktopLnk = Join-Path ([Environment]::GetFolderPath("Desktop")) "ByteSprite.lnk"
-if ($DesktopShortcut -or ((Test-Path $desktopLnk) -and
-        $shell.CreateShortcut($desktopLnk).TargetPath.StartsWith($Root, [StringComparison]::OrdinalIgnoreCase))) {
-    New-Shortcut $desktopLnk
+function Test-OurShortcut([string]$Path) {
+    (Test-Path $Path) -and $shell.CreateShortcut($Path).TargetPath.StartsWith($Root, [StringComparison]::OrdinalIgnoreCase)
+}
+$programs = [Environment]::GetFolderPath("Programs")
+foreach ($dir in $programs, [Environment]::GetFolderPath("Desktop")) {
+    $old = Join-Path $dir "ByteSprite.lnk"  # the app's former name: ours is replaced by Paperduck.lnk
+    $lnk = Join-Path $dir "Paperduck.lnk"
+    $hadOld = Test-OurShortcut $old
+    $hadOne = $hadOld -or (Test-OurShortcut $lnk)
+    if ($hadOld) { Remove-Item $old }
+    if ($dir -eq $programs -or $DesktopShortcut -or $hadOne) { New-Shortcut $lnk }
 }
 
 # 5. Apps & features entry (HKCU, so no admin)
@@ -242,7 +248,7 @@ $key = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\ByteSprite"
 New-Item -Path $key -Force | Out-Null
 $uninstall = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$App\uninstall.ps1`""
 @{
-    DisplayName = "ByteSprite"; DisplayVersion = $version; Publisher = "ByteSprite"
+    DisplayName = "Paperduck"; DisplayVersion = $version; Publisher = "Paperduck"
     DisplayIcon = $Icon; InstallLocation = $Root
     UninstallString = $uninstall; URLInfoAbout = "https://github.com/$Repo"
 }.GetEnumerator() | ForEach-Object { Set-ItemProperty -Path $key -Name $_.Key -Value $_.Value }
@@ -257,7 +263,7 @@ if ($StartWithWindows -or ($current -and $current.Contains($Root))) {
 }
 
 if ($Temp) { Remove-Item $Temp -Recurse -Force -ErrorAction SilentlyContinue }
-Write-Host "ByteSprite $version installed. Start Menu: ByteSprite"
+Write-Host "Paperduck $version installed. Start Menu: Paperduck"
 if (-not $NoLaunch) {
     if ($TargetArgs) { Start-Process $Target -ArgumentList $TargetArgs -WorkingDirectory $WorkDir }
     else { Start-Process $Target -WorkingDirectory $WorkDir }

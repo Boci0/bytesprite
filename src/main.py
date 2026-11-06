@@ -125,7 +125,7 @@ class ByteSpriteApp:
         self.tray_icon: QSystemTrayIcon | None = None
         if enable_tray and QSystemTrayIcon.isSystemTrayAvailable():
             tray = QSystemTrayIcon(build_app_icon(64), self.window)
-            tray.setToolTip("ByteSprite Desktop Multi-Tool")
+            tray.setToolTip("Paperduck")
             tray.activated.connect(self._on_tray_activated)
             tray.show()
             self.tray_icon = tray
@@ -146,7 +146,7 @@ class ByteSpriteApp:
 
     def _show_tray_message(self, text: str) -> None:
         if self.tray_icon is not None:
-            self.tray_icon.showMessage("ByteSprite", text, build_app_icon(64), 4_000)
+            self.tray_icon.showMessage("Paperduck", text, build_app_icon(64), 4_000)
 
     def _desired_tick_interval_ms(self) -> int:
         return self.state_machine.registry.min_active_tick_interval_ms(self._base_tick_ms)
@@ -352,7 +352,7 @@ def main(argv: list[str] | None = None) -> int:
     install_crash_guard()  # startup errors are logged too
     args = argv if argv is not None else sys.argv
     app = QApplication(args)
-    app.setApplicationName("ByteSprite")
+    app.setApplicationName("Paperduck")
     app.setWindowIcon(build_app_icon(64))
     app.setStyleSheet(APP_STYLESHEET)
 

@@ -1,65 +1,56 @@
-"""Unit tests for procedural sprite matrices and AnimationController."""
+"""Unit tests for the vector duck rig and AnimationController."""
 
 from __future__ import annotations
 
 import pytest
+from PyQt6.QtWidgets import QApplication
 
 from src.graphics.animation_controller import AnimationClip, AnimationController
-from src.graphics.sprite_matrix import (
-    ALL_ANIMATIONS,
-    REQUIRED_ANIMATIONS,
-    flip_frame_horizontal,
-    get_sprite_frames,
-)
+from src.graphics.duck import (ALL_ANIMATIONS, REQUIRED_ANIMATIONS, Pose, get_poses, get_sprite_frames, render_icon,
+                              render_pose)
 
 
-class TestSpriteMatrix:
-    @pytest.mark.parametrize("size", [16, 32])
+@pytest.fixture(scope="module", autouse=True)
+def _qapp() -> QApplication:
+    return QApplication.instance() or QApplication([])
+
+
+class TestDuckSprite:
+    @pytest.mark.parametrize("size", [16, 32, 128])
     @pytest.mark.parametrize("state", ALL_ANIMATIONS)
-    def test_frame_dimensions_and_rgba_validity(self, size: int, state: str) -> None:
+    def test_frames_render_clear_corners_and_a_solid_body(self, size: int, state: str) -> None:
         frames = get_sprite_frames(state, size=size)
-        assert len(frames) >= 2, f"{state} ({size}x{size}) must have at least 2 animation frames"
-
-        for frame_idx, frame in enumerate(frames):
-            assert len(frame) == size, f"{state}[{frame_idx}] row count != {size}"
-            visible_count = 0
-            for y, row in enumerate(frame):
-                assert len(row) == size, f"{state}[{frame_idx}] row {y} length != {size}"
-                for pixel in row:
-                    assert len(pixel) == 4
-                    r, g, b, a = pixel
-                    assert 0 <= r <= 255
-                    assert 0 <= g <= 255
-                    assert 0 <= b <= 255
-                    assert 0 <= a <= 255
-                    # Frosted palette is translucent by design; count clearly visible texels
-                    if a >= 100:
-                        visible_count += 1
-
-            # Corner pixels must remain transparent for window click pass-through
-            assert frame[0][0][3] == 0
-            assert frame[0][size - 1][3] == 0
-            assert visible_count > (size * size) // 10
+        assert len(frames) >= 2, f"{state} must have at least 2 frames"
+        for idx, img in enumerate(frames):
+            assert (img.width(), img.height()) == (size, size)
+            # Top corners stay clear so the layered window passes clicks through there
+            assert img.pixelColor(0, 0).alpha() == 0 and img.pixelColor(size - 1, 0).alpha() == 0
+            solid = sum(img.pixelColor(x, y).alpha() >= 100 for y in range(size) for x in range(size))
+            assert solid > size * size // 10, f"{state}[{idx}] too faint"
 
     @pytest.mark.parametrize("state", ALL_ANIMATIONS)
-    def test_consecutive_frames_animate_distinct_pixels(self, state: str) -> None:
+    def test_every_clip_moves(self, state: str) -> None:
         assert set(REQUIRED_ANIMATIONS) <= set(ALL_ANIMATIONS)
         frames = get_sprite_frames(state, size=32)
         assert any(frames[i] != frames[0] for i in range(1, len(frames)))
+        # Acting, not one rigid transform: some joint besides the whole body moves in every clip
+        poses = get_poses(state)
+        joints = ("hx", "hy", "hr", "beak", "wing", "tail", "fdx", "flift", "ndx", "nlift")
+        assert any(getattr(p, j) != getattr(poses[0], j) for p in poses for j in joints) or             any(p.eye != poses[0].eye for p in poses)
 
-    def test_invalid_size_or_state_raises_value_error(self) -> None:
+    def test_invalid_size_or_state_raises(self) -> None:
         with pytest.raises(ValueError):
-            get_sprite_frames("idle", size=24)
+            get_sprite_frames("idle", size=8)
         with pytest.raises(KeyError):
             get_sprite_frames("nonexistent_state", size=32)
 
-    def test_horizontal_flip_reverses_rows_and_preserves_shape(self) -> None:
-        frame = get_sprite_frames("walk", size=16)[0]
-        flipped = flip_frame_horizontal(frame)
-        assert len(flipped) == 16
-        assert all(len(row) == 16 for row in flipped)
-        for y in range(16):
-            assert flipped[y] == list(reversed(frame[y]))
+    def test_mirrored_render_flips_the_duck(self) -> None:
+        plain, flipped = render_pose(Pose(), 128), render_pose(Pose(), 128, mirrored=True)
+        assert plain != flipped
+        # The beak tip (units 108..118 at row 36) points right normally, left when mirrored
+        beak_right = all(plain.pixelColor(x, 36).alpha() > 0 for x in range(108, 118))
+        beak_left = all(flipped.pixelColor(127 - x, 36).alpha() > 0 for x in range(108, 118))
+        assert beak_right and beak_left
 
 
 class TestAnimationController:
@@ -67,7 +58,7 @@ class TestAnimationController:
         controller = AnimationController(size=16)
         clip = AnimationClip(
             name="custom",
-            frames=get_sprite_frames("walk", size=16)[:3],
+            frames=get_poses("walk")[:3],
             durations_ms=[100, 200, 150],
             loop=True,
         )
@@ -115,7 +106,7 @@ class TestAnimationController:
         controller.play_oneshot("blink")
         assert controller.active_clip_name == "blink"
 
-        blink_frames = get_sprite_frames("blink", size=32)
+        blink_frames = get_poses("blink")
         for _ in range(len(blink_frames) + 1):
             controller.advance(controller.current_frame_duration_ms())
             if controller.active_clip_name == "idle":
@@ -123,3 +114,11 @@ class TestAnimationController:
 
         assert controller.active_clip_name == "idle"
         assert controller.frame_index == 0
+
+
+def test_icon_fills_its_square() -> None:
+    img = render_icon(64)
+    cols = [x for x in range(64) if any(img.pixelColor(x, y).alpha() > 40 for y in range(64))]
+    rows = [y for y in range(64) if any(img.pixelColor(x, y).alpha() > 40 for x in range(64))]
+    assert cols[0] <= 3 and cols[-1] >= 60  # the duck spans the width: no empty canvas around it
+    assert rows[0] >= 2 and rows[-1] <= 61 and (rows[0] + rows[-1]) / 2 == pytest.approx(31.5, abs=3)  # centred

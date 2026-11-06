@@ -4,38 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from src.graphics.sprite_matrix import (
-    ALL_ANIMATIONS,
-    FrameMatrix,
-    flip_frame_horizontal,
-    get_sprite_frames,
-)
-
-DEFAULT_FRAME_DURATIONS_MS: dict[str, list[int]] = {
-    "idle": [750, 450, 750, 450],
-    "blink": [90, 130, 90],
-    "walk": [150, 150, 150, 150],
-    "sleep": [850, 850, 850, 850],
-    "focus": [130] * 12,
-    "spin": [90, 55, 50, 50, 60, 50, 50, 55, 200],
-    "hungry": [500, 500, 500, 500],
-    "eating": [180, 180, 180, 220],
-    "music": [260, 260, 260, 260],
-    "cheer": [180, 70, 120, 120, 80, 90, 120, 380],
-    "yawn": [160, 520, 620, 200, 220],
-    "dangle": [180, 180, 180, 180],
-    "land": [60, 80, 110, 90, 140],
-    "flinch": [80, 60, 60, 60, 280, 260],
-    "shine": [45] * 10 + [120, 160],
-}
+from src.graphics.duck import ALL_ANIMATIONS, ONESHOT_ANIMATIONS, Pose, get_durations, get_poses
 
 
 @dataclass(frozen=True)
 class AnimationClip:
-    """Immutable sequence of pixel frames paired with per-frame durations."""
+    """Immutable sequence of duck poses (any frame objects) paired with per-frame durations."""
 
     name: str
-    frames: list[FrameMatrix]
+    frames: list[Pose]
     durations_ms: list[int]
     loop: bool = True
 
@@ -67,18 +44,9 @@ class AnimationController:
 
     def _load_default_clips(self, size: int) -> None:
         for name in ALL_ANIMATIONS:
-            frames = get_sprite_frames(name, size=size)
-            raw_durations = DEFAULT_FRAME_DURATIONS_MS.get(name, [250] * len(frames))
-            durations = (
-                raw_durations[: len(frames)]
-                if len(raw_durations) >= len(frames)
-                else raw_durations + [raw_durations[-1]] * (len(frames) - len(raw_durations))
-            )
             self._clips[name] = AnimationClip(
-                name=name,
-                frames=frames,
-                durations_ms=durations,
-                loop=(name not in {"blink", "eating", "spin", "cheer", "yawn", "land", "flinch", "shine"}),
+                name=name, frames=get_poses(name), durations_ms=get_durations(name),
+                loop=name not in ONESHOT_ANIMATIONS,
             )
 
     @property
@@ -138,10 +106,9 @@ class AnimationController:
         clip = self.current_clip()
         return clip.durations_ms[self._frame_index]
 
-    def current_frame(self) -> FrameMatrix:
-        clip = self.current_clip()
-        frame = clip.frames[self._frame_index]
-        return flip_frame_horizontal(frame) if self._facing_left else frame
+    def current_frame(self) -> Pose:
+        """The pose to draw; the renderer mirrors it when `facing_left`."""
+        return self.current_clip().frames[self._frame_index]
 
     def advance(self, elapsed_ms: int) -> bool:
         """Advance playback clock by elapsed_ms; returns True if visible frame changed."""
