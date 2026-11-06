@@ -93,16 +93,24 @@ def reply_details(reply: AiReply, asked_model: str, thinking: str, name: str = "
         parts.append(f"thinking {thinking}")
     if reply.total_tokens:
         cached = min(reply.cached_tokens, reply.prompt_tokens)
-        split = [f"{reply.prompt_tokens:,} in" + (f" ({cached * 100 // reply.prompt_tokens}% cached)" if cached else "")]
+        split = [f"{reply.prompt_tokens:,} in"] + ([f"{cached * 100 // reply.prompt_tokens}% cached"] if cached else [])
         if reply.reasoning_tokens:
             split.append(f"{reply.reasoning_tokens:,} thinking")
         split.append(f"{max(0, reply.completion_tokens - reply.reasoning_tokens):,} answer")
         parts.append(f"{reply.total_tokens:,} tokens ({', '.join(split)})")
     if reply.cost:
         parts.append(f"${reply.cost:.4f}")
+    elif reply.cost_estimate:
+        parts.append(f"~${reply.cost_estimate:.4f}")
     if reply.cut_off:
         parts.append("cut off at the limit")
     return "  -  ".join(parts)
+
+
+def balance_note(start: tuple[str, float], now: tuple[str, float]) -> str:
+    """DeepSeek reports whole cents, so one reply rarely moves it; the spend since the pet started adds up."""
+    spent = start[1] - now[1] if start[0] == now[0] else 0.0
+    return f"balance {now[1]:,.2f} {now[0]}" + (f" ({spent:,.2f} spent since start)" if spent >= 0.005 else "")
 
 
 def model_label(model: ModelInfo) -> str:
@@ -659,6 +667,7 @@ class AiChat(QWidget):
         self._models: dict[str, list[ModelInfo]] = {}  # base URL -> its /models list, fetched on first open
         self._balance_job: AiJob | None = None
         self._balance: tuple[str, float] | None = None  # DeepSeek (currency, total), refreshed after each reply
+        self._balance_start: tuple[str, float] | None = None  # the first balance this run, for spend so far
         self._last_info: QLabel | None = None  # the newest reply's details line, where its balance drop is added
         self._testing = False
         self._asked = ("", "off")  # model and thinking level of the request in flight
@@ -1480,11 +1489,12 @@ class AiChat(QWidget):
         self._balance_job = None
         if error or got is None:
             return
-        before, self._balance = self._balance, got
-        spent = before[1] - got[1] if before and before[0] == got[0] else 0.0
-        if info is not None and spent > 0 and info is self._last_info:
+        self._balance = got
+        if self._balance_start is None or self._balance_start[0] != got[0]:
+            self._balance_start = got
+        if info is not None and info is self._last_info:
             try:
-                info.setText(f"{info.text()}  -  ~{spent:.4f} {got[0]} from balance")
+                info.setText(f"{info.text()}  -  {balance_note(self._balance_start, got)}")
             except RuntimeError:  # the row was cleared (New chat) while the fetch ran
                 pass
         self._refresh_title()

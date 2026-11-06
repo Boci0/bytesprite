@@ -1126,7 +1126,7 @@ def test_cache_hits_cost_screenshot_batches_and_deepseek_balance(monkeypatch: py
     reply = ask("https://api.example/v1", KEY, "m-batch", T, host=Host(), web=False)
     assert reply.cached_tokens == 480 and abs(reply.cost - 0.006) < 1e-9
     line = reply_details(reply, "m-batch", "off")
-    assert "600 in (80% cached)" in line and "$0.0060" in line
+    assert "600 in, 80% cached" in line and "$0.0060" in line
 
     def shots(messages: list[dict]) -> int:
         return sum(1 for m in messages if isinstance(m.get("content"), list))
@@ -1138,3 +1138,24 @@ def test_cache_hits_cost_screenshot_batches_and_deepseek_balance(monkeypatch: py
     monkeypatch.setattr(ai_assist, "_request", lambda *a, **k: {"balance_infos": [{"currency": "<b>", "total_balance": "1"}]})
     with pytest.raises(ValueError, match="bad reply"):
         ai_assist.deepseek_balance(KEY)
+
+
+def test_balance_note_shows_balance_and_spend_since_start() -> None:
+    from src.ui.ai_chat import balance_note
+    assert balance_note(("USD", 3.51), ("USD", 3.51)) == "balance 3.51 USD"  # one reply rarely moves whole cents
+    assert balance_note(("USD", 3.51), ("USD", 3.48)) == "balance 3.48 USD (0.03 spent since start)"
+    assert balance_note(("CNY", 20.0), ("USD", 3.0)) == "balance 3.00 USD"  # a currency switch is not spend
+
+
+def test_deepseek_cost_estimate_uses_the_price_table_and_peak_hours() -> None:
+    from datetime import datetime, timezone
+    from src.ui.ai_chat import reply_details
+    off = datetime(2026, 11, 7, 12, tzinfo=timezone.utc)  # Saturday: off-peak all day
+    peak = datetime(2026, 11, 6, 2, tzinfo=timezone.utc)  # Friday 02:00 UTC
+    flash = ai_assist.deepseek_cost("deepseek-flash", 1_000_000, 1_000_000, 1_000_000, off)
+    assert abs(flash - (0.003 + 0.15 + 0.6)) < 1e-9
+    assert abs(ai_assist.deepseek_cost("deepseek-flash", 0, 0, 1_000_000, peak) - 1.2) < 1e-9
+    assert ai_assist.deepseek_cost("deepseek-flash-1017", 0, 1_000_000, 0, off) == 0.15  # dated version names
+    assert ai_assist.deepseek_cost("some-other-model", 1, 1, 1, off) == 0.0
+    reply = ai_assist.AiReply(text="hi", total_tokens=10, prompt_tokens=8, completion_tokens=2, cost_estimate=0.00123)
+    assert reply_details(reply, "deepseek-flash", "off").endswith("~$0.0012")

@@ -35,7 +35,7 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timezone
 import html
 import ipaddress
 import socket
@@ -212,6 +212,7 @@ class AiReply:
     total_tokens: int = 0
     cached_tokens: int = 0  # part of prompt_tokens the provider served from its prompt cache (billed far lower)
     cost: float = 0.0  # what the provider says the answer cost (OpenRouter's usage.cost); 0 when it does not say
+    cost_estimate: float = 0.0  # USD from token counts and DEEPSEEK_PRICES when the provider reports no cost
     cut_off: bool = False  # hit max_tokens
     compacted: int = 0  # oldest history turns replaced by `summary` before this answer (auto-compact)
     summary: str = ""
@@ -962,7 +963,7 @@ def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], t
     paid = 0  # billable tokens (see _billable)
     used: list[tuple[str, str]] = []
     shot_at: list[int] = []  # indexes in `messages` of the screenshot messages still sent
-    cached, cost = 0, 0.0
+    cached, cost, estimate = 0, 0.0, 0.0
     fails: list[Any] = [0, 0, None]
     for round_ in range(MAX_TOOL_ROUNDS + 1):
         _check(cancel)
@@ -1014,6 +1015,9 @@ def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], t
             hit = min(hit, _int(usage.get("prompt_tokens")))
             cached += hit
             cost += usage["cost"] if isinstance(usage.get("cost"), (int, float)) and usage["cost"] > 0 else 0.0
+            if is_deepseek(base_url):  # it reports no cost; priced per round, since a long job can cross into peak
+                estimate += deepseek_cost(served if isinstance(served, str) else model, hit,
+                                          _int(usage.get("prompt_tokens")) - hit, _int(usage.get("completion_tokens")))
             paid += (_billable(_int(usage.get("prompt_tokens")) - hit, hit, _int(usage.get("completion_tokens")))
                      if usage.get("prompt_tokens") or usage.get("completion_tokens") else _int(usage.get("total_tokens")))
             calls = message.get("tool_calls") or []
@@ -1059,7 +1063,7 @@ def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], t
                 model=served if isinstance(served, str) and valid_model(served) else "",
                 reasoning=reasoning.strip() if isinstance(reasoning, str) else "",
                 prompt_tokens=spent[0], completion_tokens=spent[1], reasoning_tokens=spent[2], total_tokens=spent[3],
-                cached_tokens=cached, cost=cost, cut_off=choice.get("finish_reason") == "length", tools=used,
+                cached_tokens=cached, cost=cost, cost_estimate=estimate, cut_off=choice.get("finish_reason") == "length", tools=used,
             )
         except (KeyError, IndexError, TypeError, AttributeError):
             raise ValueError("bad reply") from None
@@ -1458,6 +1462,23 @@ def list_models(base_url: str, key: str, timeout: float = TIMEOUT_S) -> list[Mod
 
 
 DEEPSEEK_TOP_UP = "https://platform.deepseek.com/top_up"
+
+
+# shortcut: copied from api-docs.deepseek.com/quick_start/pricing on 2026-11-06, update it when DeepSeek reprices.
+# USD per 1M tokens at off-peak (cache hit, cache miss, output); peak is double. Legacy aliases bill as Flash.
+DEEPSEEK_PRICES = {"deepseek-v4-pro": (0.022, 0.66, 1.98), "deepseek-flash": (0.003, 0.15, 0.6),
+                   "deepseek-v4-flash": (0.003, 0.15, 0.6), "deepseek-chat": (0.003, 0.15, 0.6)}
+_PEAK_HOURS_UTC = frozenset((1, 2, 3, 6, 7, 8, 9))  # Monday to Friday (Chinese public holidays are off-peak, not known here)
+
+
+def deepseek_cost(model: str, hit: int, miss: int, output: int, now: datetime | None = None) -> float:
+    """Estimated USD for one DeepSeek request (0.0 for a model not in DEEPSEEK_PRICES)."""
+    prices = next((p for name, p in DEEPSEEK_PRICES.items() if model == name or model.startswith(name + "-")), None)
+    if prices is None:
+        return 0.0
+    now = now or datetime.now(timezone.utc)
+    peak = 2.0 if now.weekday() < 5 and now.hour in _PEAK_HOURS_UTC else 1.0
+    return peak * (hit * prices[0] + miss * prices[1] + output * prices[2]) / 1_000_000
 
 
 def deepseek_balance(key: str, timeout: float = TIMEOUT_S) -> tuple[str, float]:
