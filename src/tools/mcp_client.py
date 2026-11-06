@@ -29,6 +29,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus
 
+from src.tools.ai_tools import scratch_dir
+
 logger = logging.getLogger(__name__)
 
 CONFIG_PATH = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "ByteSprite" / "mcp.json"
@@ -132,7 +134,7 @@ class McpServer:
         command = shutil.which(cfg["command"]) or cfg["command"]  # finds npx.cmd and the like
         self._proc = subprocess.Popen(
             [command, *cfg["args"]], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, env=child_env(cfg["env"]),
+            stderr=subprocess.DEVNULL, env=child_env(cfg["env"]), cwd=scratch_dir(),  # not the app's data folder
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         threading.Thread(target=self._read, daemon=True).start()
 

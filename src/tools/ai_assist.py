@@ -47,7 +47,7 @@ from urllib.parse import parse_qs, quote_plus, urljoin, urlsplit
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from src.engine.models import CompanionState, HudBar, HudData, ToolMenuItem
-from src.tools.ai_tools import (MEMORY_HEADER, LOCAL_DATA_TOOLS, RULES_HEADER, memory_path, memory_prompt, rules_path,
+from src.tools.ai_tools import (CHAIN_NOTE, MEMORY_HEADER, scratch_dir, LOCAL_DATA_TOOLS, RULES_HEADER, memory_path, memory_prompt, rules_path,
                                 rules_prompt, skills_dir, skills_prompt)
 from src.tools.mcp_client import SEP as MCP_SEP, ensure_config
 
@@ -339,7 +339,9 @@ def chat_messages(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
             {"type": "text", "text": content}, *({"type": "image_url", "image_url": {"url": u}} for u in images),
         ] if images else content})
         total += len(content)
-    system = f"{SYSTEM_PROMPT} Today is {date.today()}."
+    system = (f"{SYSTEM_PROMPT} Today is {date.today()}. Put helper scripts, screenshots and drafts in your scratch "
+              f"folder {scratch_dir()}, never in {skills_dir().parent} (the app's own data); save what the user "
+              "asked for where they asked, else in the Project Folder.")
     extra = [block for block in (rules_prompt(rules_path()), memory_prompt(memory_path()), skills_prompt(skills_dir()))
              if block]
     return [{"role": "system", "content": "\n\n".join([system, *extra])}, *reversed(kept)]
@@ -1086,6 +1088,8 @@ def _failed(result: str) -> bool:
     head = result.lstrip()
     if head.startswith("[MCP server"):  # its data label comes first; the server's own error follows
         head = head.partition("\n")[2]
+    if head.partition("\n")[0].endswith(CHAIN_NOTE):  # an & probe chain that printed what was asked for
+        return False
     head = head[:60]
     return head.startswith(("error", "stopped after")) or (head.startswith("exit code") and not head.startswith("exit code 0"))
 
@@ -1120,7 +1124,7 @@ KEEP_RESULTS = 4  # newest tool results a trim keeps whole (one trim frees room 
 TRIM_HEAD = 300  # characters a trimmed result keeps
 TRIMMED = "\n[ByteSprite: older output trimmed to save room; run the tool again if you need it]"
 # Read-only tools that may run at the same time when one reply asks for several
-PARALLEL_SAFE = frozenset({"list_files", "find_files", "search_text", "web_search", "fetch_page"})
+PARALLEL_SAFE = frozenset({"list_files", "find_files", "search_text", "web_search", "fetch_page", "calculate"})
 MAX_PARALLEL = 4
 
 

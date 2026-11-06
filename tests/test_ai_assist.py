@@ -1159,3 +1159,11 @@ def test_deepseek_cost_estimate_uses_the_price_table_and_peak_hours() -> None:
     assert ai_assist.deepseek_cost("some-other-model", 1, 1, 1, off) == 0.0
     reply = ai_assist.AiReply(text="hi", total_tokens=10, prompt_tokens=8, completion_tokens=2, cost_estimate=0.00123)
     assert reply_details(reply, "deepseek-flash", "off").endswith("~$0.0012")
+
+
+def test_system_prompt_names_the_scratch_folder() -> None:
+    from src.tools.ai_assist import chat_messages
+    from src.tools.ai_tools import scratch_dir, skills_dir
+    system = chat_messages([{"role": "user", "content": "hi"}])[0]["content"]
+    assert str(scratch_dir()) in system and f"never in {skills_dir().parent}" in system
+    assert scratch_dir().is_dir()

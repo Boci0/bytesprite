@@ -250,3 +250,21 @@ def test_close_kills_the_whole_server_tree_and_idle_servers_close(tmp_path: Path
         assert hub.specs()  # the next answer starts them again
     finally:
         hub.close()
+
+
+def test_servers_start_in_the_scratch_folder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # Playwright saved screenshots into the pet's working folder (the app's data) and then refused to open them
+    import src.tools.mcp_client as mcp_client
+    seen = {}
+
+    class _Stop(Exception):
+        pass
+
+    def fake_popen(*_a, **kw):
+        seen.update(kw)
+        raise _Stop
+    monkeypatch.setattr(mcp_client, "scratch_dir", lambda: tmp_path)
+    monkeypatch.setattr(mcp_client.subprocess, "Popen", fake_popen)
+    with pytest.raises(_Stop):
+        mcp_client.McpServer("fake", {"command": sys.executable, "args": [FAKE], "env": {}})
+    assert seen["cwd"] == tmp_path

@@ -21,7 +21,10 @@ Security:
 
 from __future__ import annotations
 
+import ast
 import codecs
+import math
+import operator
 import ctypes
 import difflib
 import fnmatch
@@ -194,6 +197,12 @@ TOOL_SPECS: list[dict[str, Any]] = [
         ("note",)),
     _fn("forget", "Remove a note from your memory that is wrong or stale. The user allows or declines it.",
         {"note": {"type": "string", "description": "Text from the note to remove"}}, ("note",)),
+    _fn("calculate", "Exact arithmetic. Use it for every number you report or rely on (sums, counts, percentages, "
+        "unit conversions, WCAG contrast) instead of working it out in your head. Operators + - * / // % **, "
+        "parentheses, and min max abs round sqrt log pow sum, plus contrast('#rrggbb', '#rrggbb') for the WCAG "
+        "contrast ratio of two colors. Lists for sum, e.g. sum([0, 1, 2, 3]) * 3.",
+        {"expression": {"type": "string", "description": "e.g. contrast('#4a90e2', '#11243d') or 12.5 * 3 / 4"}},
+        ("expression",)),
 ]
 # the user allows each call in the chat (or all of them for a chat)
 COMPUTER_TOOLS = {"mouse_click", "type_text", "press_key", "scroll"}  # computer_batch runs these as its steps
@@ -613,6 +622,8 @@ def run_command(root: Path | None, command: Any, cancel: threading.Event | None 
                 pass
         if proc.poll() is not None:
             head = f"exit code {proc.returncode}"
+            if proc.returncode and _probe_chain(command):
+                head += f" {CHAIN_NOTE}"
         else:
             _kill_tree(proc.pid)
             proc.wait()
@@ -629,7 +640,48 @@ def run_command(root: Path | None, command: Any, cancel: threading.Event | None 
         out = f"{out[:half]}\n... {len(out) - MAX_COMMAND_CHARS} characters cut ...\n{out[-half:]}"
     if re.match(r"\s*start\b", command, re.I) and proc.returncode == 0:  # exit 0 only says the shell handed it off
         out += "\n(launched; the app may still show an error dialog, so check with read_screen)"
-    return f"{head}\n{out or '(no output)'}"
+    if CHAIN_NOTE in head and (not out or _ERROR_LINE.search(out.splitlines()[-1])):
+        head = head.replace(f" {CHAIN_NOTE}", "")  # nothing useful came back, or it ended on an error: a real failure
+    hint = shell_hint(command, out) if proc.returncode else ""
+    return f"{head}\n{out or '(no output)'}" + (f"\nhint: {hint}" if hint else "")
+
+
+CHAIN_NOTE = "(from the last part only: & runs every part, so read each part's output)"
+_ERROR_LINE = re.compile(r"not found|cannot find|not recognized|denied|error|exception|invalid|failed", re.I)
+
+
+def _probe_chain(command: str) -> bool:
+    """A cmd line joined by a bare & (each part runs whatever the last did), as opposed to && or 2>&1."""
+    bare = re.sub(r'"[^"]*"', '""', command)
+    return bool(re.search(r"(?<![&>^])&(?!&)", bare))
+
+
+_UNIX = {"tail": "powershell -Command \"... | Select-Object -Last N\"", "head": "powershell -Command \"... | "
+         "Select-Object -First N\"", "grep": "findstr", "ls": "dir /b", "cat": "type", "rm": "del (or rmdir /s)",
+         "cp": "copy", "mv": "move", "touch": "type nul > file", "which": "where", "wc": "find /c /v \"\"",
+         "sed": "powershell -Command \"(Get-Content f) -replace 'a','b'\"", "export": "set NAME=value",
+         "wmic": "powershell -Command \"Get-CimInstance ...\" (wmic is gone from Windows 11)"}
+
+
+def shell_hint(command: str, out: str) -> str:
+    """Why a failed command was probably the wrong shell's syntax, and the cmd.exe way; "" when it does not look like that.
+    Found in the user's chats: Unix tools in cmd, grep's \\| in findstr, $env: outside PowerShell, and a
+    powershell -Command whose quoted script cmd split at a | or &."""
+    unknown = re.search(r"^'(.+?)' is not recognized as an internal or external command", out, re.M)
+    if unknown:
+        name = unknown.group(1).strip().lower()
+        if name in _UNIX:
+            return f"run_command runs cmd.exe, which has no {name}; use {_UNIX[name]}"
+        if not re.fullmatch(r"[\w.-]+", name) and "powershell" in command.lower():
+            return ("cmd.exe split the quoted PowerShell script at a | or & inside it; write the script to a .ps1 "
+                    "file with edit_file and run powershell -NoProfile -ExecutionPolicy Bypass -File script.ps1")
+    if re.search(r"\bfindstr\b[^&|]*\\\|", command, re.I):
+        return 'findstr has no \\| alternation; findstr /i "one two" matches lines with either word'
+    if "$env:" in command and "powershell" not in command.lower():
+        return "cmd.exe reads variables as %NAME%, not $env:NAME"
+    if "Input redirection is not supported" in out:  # commands get no console input, which timeout needs
+        return 'timeout cannot run here; wait with powershell -NoProfile -Command "Start-Sleep -Seconds N"'
+    return ""
 
 
 def console_text(raw: bytes) -> str:
@@ -849,6 +901,17 @@ MAX_SKILL_CHARS = 24000
 _SKILL_NAME = re.compile(r"^[\w.-]{1,64}$")
 
 
+def scratch_dir() -> Path:
+    """The AI's own folder for helper scripts, screenshots and drafts, so they stay out of the app's data folder
+    (where they piled up and broke paths: Playwright refuses files outside its working folder)."""
+    path = Path(tempfile.gettempdir()) / "ByteSprite" / "work"
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass  # the prompt still names it; a tool that writes there reports the real error
+    return path
+
+
 def skills_dir() -> Path:
     return Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "ByteSprite" / "skills"
 
@@ -1043,3 +1106,69 @@ def load_skill(root: Path, name: Any) -> str:
     if len(body) > MAX_SKILL_CHARS:
         body = body[:MAX_SKILL_CHARS] + "\n... (skill cut off)"
     return body or "(the skill is empty)"
+
+
+MAX_EXPRESSION_CHARS = 500
+MAX_POWER = 1000  # exponents past this could hang the worker (10 ** 10 ** 9)
+
+
+def _luminance(color: str) -> float:
+    rgb = [int(color[i:i + 2], 16) / 255 for i in (0, 2, 4)]
+    lin = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in rgb]
+    return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]
+
+
+def contrast(a: str, b: str) -> float:
+    """WCAG 2 contrast ratio of two #rrggbb colors (1 to 21)."""
+    hexes = [c.strip().lstrip("#") for c in (a, b)]
+    if not all(re.fullmatch(r"[0-9a-fA-F]{6}", h) for h in hexes):
+        raise ValueError("contrast takes two colors like '#4a90e2'")
+    hi, lo = sorted(map(_luminance, hexes), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def _power(base: float, exp: float) -> float:
+    if abs(exp) > MAX_POWER or (abs(base) > 1 and abs(exp) * math.log10(abs(base)) > 300):
+        raise ValueError("number too large")
+    return operator.pow(base, exp)
+
+
+_BINOPS = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul, ast.Div: operator.truediv,
+           ast.FloorDiv: operator.floordiv, ast.Mod: operator.mod, ast.Pow: _power}
+_FUNCS = {"min": min, "max": max, "abs": abs, "round": round, "sqrt": math.sqrt, "log": math.log, "pow": _power,
+          "sum": sum, "contrast": contrast}
+
+
+def _value(node: ast.AST) -> Any:
+    if isinstance(node, ast.Constant) and type(node.value) in (int, float, str):
+        return node.value
+    if isinstance(node, (ast.List, ast.Tuple)):
+        return [_value(e) for e in node.elts]
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        value = _value(node.operand)
+        return -value if isinstance(node.op, ast.USub) else +value
+    if isinstance(node, ast.BinOp) and type(node.op) in _BINOPS:
+        left, right = _value(node.left), _value(node.right)
+        if isinstance(left, (str, list)) or isinstance(right, (str, list)):
+            raise ValueError("arithmetic works on numbers only")
+        if type(node.op) is ast.Mult and max(abs(left), abs(right)) > 1e300:
+            raise ValueError("number too large")
+        return _BINOPS[type(node.op)](left, right)
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _FUNCS and not node.keywords:
+        return _FUNCS[node.func.id](*(_value(a) for a in node.args))
+    raise ValueError(f"not allowed: {ast.unparse(node)[:60]}")
+
+
+def calculate(expression: Any) -> str:
+    """The value of a plain math expression, parsed with ast and walked by hand: no eval, names or attributes."""
+    if not isinstance(expression, str) or not expression.strip():
+        return "error: give an expression"
+    if len(expression) > MAX_EXPRESSION_CHARS:
+        return f"error: keep it under {MAX_EXPRESSION_CHARS} characters"
+    try:
+        value = _value(ast.parse(expression.strip(), mode="eval").body)
+    except (SyntaxError, ValueError, TypeError, ZeroDivisionError, OverflowError, RecursionError) as exc:
+        return f"error: {exc or type(exc).__name__}"
+    if isinstance(value, float):
+        return f"{value:.6g}" if abs(value) < 1e15 else repr(value)
+    return str(value)

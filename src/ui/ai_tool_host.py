@@ -25,7 +25,7 @@ from PyQt6.QtGui import QCursor, QGuiApplication, QImage
 from PyQt6.QtWidgets import QFileDialog
 
 from src.tools import computer
-from src.tools.ai_tools import (COMPUTER_TOOLS, MAX_BATCH_STEPS, FILE_TOOLS, PET_ACTIONS, TOOL_SPECS, BackgroundProcs, apply_edits,
+from src.tools.ai_tools import (calculate, COMPUTER_TOOLS, MAX_BATCH_STEPS, FILE_TOOLS, PET_ACTIONS, TOOL_SPECS, BackgroundProcs, apply_edits,
                                 computer_action, destructive_reason, is_secret, load_skill, memory_path, parse_boxes, plan_edit,
                                 plan_edits, plan_memory, plan_skill_update, resolve, run_command, run_file_tool, save_args,
                                 skill_text, skills_dir, task_list, write_memory, write_skill)
@@ -170,6 +170,8 @@ class AiToolHost(QObject):
             if not self._allowed("edit_file", ask, "file edits"):
                 return "error: the user declined this edit"
             return apply_edits(edits)
+        if name == "calculate":  # pure arithmetic, nothing to allow
+            return calculate(args.get("expression"))
         if name == "plan_tasks":
             try:
                 tasks = task_list(args)

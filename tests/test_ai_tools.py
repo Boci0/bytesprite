@@ -900,3 +900,61 @@ def test_computer_batch_runs_steps_in_order_and_stops_at_an_error() -> None:
     assert AiToolHost._batch(fake, []).startswith("error")
     fake.cancel.set()
     assert AiToolHost._batch(fake, steps) == "error: stopped by the user"
+
+
+def test_calculate_does_math_and_contrast() -> None:
+    from src.tools.ai_tools import calculate
+    assert calculate("sum([0, 1, 2, 3]) * 3") == "18"
+    assert calculate("(2 + 3) * 4 / 8") == "2.5"
+    assert calculate("contrast('#ffffff', '#000000')") == "21"
+    assert calculate("round(contrast('#4a90e2', '#ffffff'), 2)") == "3.29"  # white text fails AA on that blue
+    assert calculate("-2 ** 2 + sqrt(16)") == "0"
+
+
+def test_calculate_refuses_code_and_huge_numbers() -> None:
+    from src.tools.ai_tools import calculate
+    for bad in ("__import__('os').system('dir')", "open('x')", "(1).__class__", "x + 1", "[1] * 10**9",
+                "'a' * 10**9", "10 ** 10 ** 9", "9 ** 9999", "lambda: 1", "sum(x for x in [1])", "1 / 0",
+                "contrast('red', '#000000')", "1" * 600):
+        assert calculate(bad).startswith("error"), bad
+
+
+def test_shell_hint_on_real_failures() -> None:
+    from src.tools.ai_tools import shell_hint
+    nr = "'{}' is not recognized as an internal or external command,\noperable program or batch file."
+    assert "Select-Object -Last" in shell_hint("python -m pip install x 2>&1 | tail -3", nr.format("tail"))
+    assert "Get-CimInstance" in shell_hint("wmic logicaldisk get size", nr.format("wmic"))
+    split = nr.format("\\\" + $l[$i] }\"")
+    assert "-File" in shell_hint('powershell -NoProfile -Command "$l=Get-Content x | % { $_ }"', split)
+    assert "either word" in shell_hint(r'findstr /n /i "name:\|price" a.txt', "(no output)")
+    assert "%NAME%" in shell_hint("dir $env:TEMP", "File Not Found")
+    assert shell_hint("powershell -Command \"$env:TEMP\"", "x") == ""  # $env: is right inside PowerShell
+    assert shell_hint("dir missing", "File Not Found") == ""  # an ordinary failure gets no hint
+    assert shell_hint("frobnicate", nr.format("frobnicate")) == ""
+
+
+def test_run_command_adds_hint_only_on_failure(tmp_path) -> None:
+    from src.tools.ai_tools import run_command
+    # fakes cmd's own message, since Git for Windows may put a real tail on PATH
+    out = run_command(tmp_path, "echo 'tail' is not recognized as an internal or external command & exit /b 1")
+    assert out.startswith("exit code 1") and "hint: run_command runs cmd.exe, which has no tail" in out
+    assert "hint" not in run_command(tmp_path, "echo ok")
+
+
+def test_probe_chain_exit_is_not_a_failure(tmp_path) -> None:
+    from src.tools.ai_assist import _failed
+    from src.tools.ai_tools import _probe_chain, run_command
+    assert _probe_chain('dir /b x 2>nul & echo --- & where foo')
+    assert not _probe_chain('cd /d x && dir 2>&1')  # && and 2>&1 are not bare &
+    assert not _probe_chain('findstr "a & b" f.txt')  # inside quotes
+    useful = run_command(tmp_path, "echo one & echo two & echo three & exit /b 1")
+    assert useful.startswith("exit code 1 (from the last part") and not _failed(useful)
+    broke = run_command(tmp_path, "echo one & dir /b nothing_here_xyz")
+    assert _failed(broke) and "last part" not in broke  # it ended on File Not Found: still a failure
+    assert _failed(run_command(tmp_path, "echo one && exit /b 1"))  # && stops on failure: a real one
+
+
+def test_timeout_hint() -> None:
+    from src.tools.ai_tools import shell_hint
+    assert "Start-Sleep" in shell_hint("timeout /t 60 /nobreak >nul & dir",
+                                       "ERROR: Input redirection is not supported, exiting the process immediately.")
