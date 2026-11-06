@@ -1,14 +1,14 @@
-"""Build, sign and publish a ByteSprite release.
+"""Build, sign and publish a Paperduck release.
 
     python scripts/release.py keygen            create the signing key (once) and print its public key
-    python scripts/release.py build vX.Y.Z      from a clean git HEAD: dist/bytesprite.zip (source) and
-                                                dist/bytesprite-win64.zip (PyInstaller build, launched once
+    python scripts/release.py build vX.Y.Z      from a clean git HEAD: dist/paperduck.zip (source) and
+                                                dist/paperduck-win64.zip (PyInstaller build, launched once
                                                 as a smoke test), each with a .sig
     python scripts/release.py publish vX.Y.Z    build, tag HEAD, push branch + tag, then `gh release create`
 
 The standalone build bundles the Python that runs this script, so run it with Python 3.12 (the app's runtime).
 
-The private key lives at ~/.bytesprite-signing/release_ed25519.key, outside the repo, and must
+The private key lives at ~/.paperduck-signing/release_ed25519.key, outside the repo, and must
 never be committed or uploaded. Back it up offline: losing it means installed copies can only be
 updated by re-running install.ps1 after a new key is shipped.
 """
@@ -32,7 +32,7 @@ sys.path.insert(0, str(ROOT))
 from src.signing import public_key, sign, verify  # noqa: E402
 from src.updater import FROZEN_ASSET, FROZEN_EXE, RELEASE_PUBLIC_KEY, SOURCE_ASSET, parse_version, zip_version  # noqa: E402
 
-KEY_FILE = Path.home() / ".bytesprite-signing" / "release_ed25519.key"
+KEY_FILE = Path.home() / ".paperduck-signing" / "release_ed25519.key"
 DIST = ROOT / "dist"
 BUNDLE_PATHS = ["src", "assets", "requirements.txt", "install.ps1", "uninstall.ps1", "README.md", "LICENSE"]
 
@@ -110,8 +110,8 @@ def smoke_test(exe: Path, work: Path) -> None:
 
 
 def build_frozen(tag: str, secret: bytes) -> tuple[Path, Path]:
-    """PyInstaller build of HEAD in a fresh hash-checked venv, zipped as ByteSprite/ plus a VERSION file."""
-    with tempfile.TemporaryDirectory(prefix="bytesprite_build_") as tmp:
+    """PyInstaller build of HEAD in a fresh hash-checked venv, zipped as Paperduck/ plus a VERSION file."""
+    with tempfile.TemporaryDirectory(prefix="paperduck_build_") as tmp:
         work = Path(tmp)
         tree = work / "tree"
         git("archive", "--format=zip", "-o", str(work / "head.zip"), "HEAD")  # committed files only
@@ -122,15 +122,15 @@ def build_frozen(tag: str, secret: bytes) -> tuple[Path, Path]:
         subprocess.run([str(venv_py), "-m", "pip", "install", "--disable-pip-version-check", "-q",
                         "-r", str(tree / "requirements-build.txt")], check=True)
         dist = work / "dist"
-        subprocess.run([str(venv_py), "-m", "PyInstaller", "bytesprite.spec", "--noconfirm",
+        subprocess.run([str(venv_py), "-m", "PyInstaller", "paperduck.spec", "--noconfirm",
                         "--distpath", str(dist), "--workpath", str(work / "build")], cwd=tree, check=True)
-        app = dist / "ByteSprite"
+        app = dist / "Paperduck"
         (app / "VERSION").write_text(tag.lstrip("v") + "\n", encoding="ascii")
         shutil.copy2(tree / "uninstall.ps1", app)  # an update replaces the whole folder, so it ships inside
         smoke_test(app / FROZEN_EXE, work)
         zip_path = DIST / FROZEN_ASSET
         zip_path.unlink(missing_ok=True)
-        shutil.make_archive(str(zip_path.with_suffix("")), "zip", dist, "ByteSprite")
+        shutil.make_archive(str(zip_path.with_suffix("")), "zip", dist, "Paperduck")
     return zip_path, sign_bundle(secret, zip_path, tag)
 
 
@@ -142,7 +142,7 @@ def build(tag: str) -> list[Path]:
     secret = load_secret()
     DIST.mkdir(exist_ok=True)
     zip_path = DIST / SOURCE_ASSET
-    git("archive", "--format=zip", "--prefix=bytesprite/", "-o", str(zip_path), "HEAD", *BUNDLE_PATHS)
+    git("archive", "--format=zip", "--prefix=paperduck/", "-o", str(zip_path), "HEAD", *BUNDLE_PATHS)
     sig_path = sign_bundle(secret, zip_path, tag)
     print(f"Building the standalone app with Python {sys.version.split()[0]}...")
     return [zip_path, sig_path, *build_frozen(tag, secret)]

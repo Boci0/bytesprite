@@ -560,7 +560,7 @@ def main() -> int:
         return 1
     real_memory = memory_path()  # before LOCALAPPDATA points at the sandbox
     current = [n[len(TAG):] for n in read_memory(real_memory) if n.startswith(TAG)]
-    sandbox = Path(tempfile.mkdtemp(prefix="bytesprite_rsi_"))
+    sandbox = Path(tempfile.mkdtemp(prefix="paperduck_rsi_"))
     history: list[dict[str, Any]] = []
     try:
         lessons, _best = improve(current, args.rounds, args.max_cost, ask, args.base_url, key, args.model, sandbox,

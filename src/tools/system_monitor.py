@@ -143,7 +143,7 @@ def _metric_color(val: float, default_hex: str) -> str:
 
 
 class SystemMonitorPlugin:
-    """Live CPU, RAM, and Disk telemetry tool plugin for ByteSprite."""
+    """Live CPU, RAM, and Disk telemetry tool plugin for Paperduck."""
 
     ALERT_THRESHOLD: float = 90.0
     PORTS_SUBMENU: str = "Ports"

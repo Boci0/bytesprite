@@ -1,4 +1,4 @@
-"""Integration tests for ByteSpriteApp wiring, auto-save, and graceful shutdown."""
+"""Integration tests for PaperduckApp wiring, auto-save, and graceful shutdown."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import pytest
 from PyQt6.QtWidgets import QApplication
 
 from src.engine.models import PetState, PetStats
-from src.main import AUTO_SAVE_INTERVAL_MS, ByteSpriteApp
+from src.main import AUTO_SAVE_INTERVAL_MS, PaperduckApp
 from src.storage.storage_manager import StorageManager
 
 
@@ -23,7 +23,7 @@ def qapp() -> QApplication:
     return app  # type: ignore[return-value]
 
 
-class TestByteSpriteAppIntegration:
+class TestPaperduckAppIntegration:
     def test_restores_saved_state_and_persists_on_shutdown(
         self, qapp: QApplication, tmp_path: Path
     ) -> None:
@@ -39,7 +39,7 @@ class TestByteSpriteAppIntegration:
             tools_data={"pomodoro": {"completed_sessions": 8, "remaining_seconds": 1200}},
         )
 
-        controller = ByteSpriteApp(
+        controller = PaperduckApp(
             app=qapp,
             storage=storage,
             enable_tray=False,
@@ -67,7 +67,7 @@ class TestByteSpriteAppIntegration:
         self, qapp: QApplication, tmp_path: Path
     ) -> None:
         storage = StorageManager(tmp_path / "close_state.json")
-        controller = ByteSpriteApp(app=qapp, storage=storage, enable_tray=False)
+        controller = PaperduckApp(app=qapp, storage=storage, enable_tray=False)
         controller.window.trigger_pet()
         # Simulate user pressing Alt+F4 on PetWindow directly
         controller.window.close()
@@ -83,7 +83,7 @@ class TestByteSpriteAppIntegration:
 
         # Pin IDLE: live CPU above 90% would otherwise put the pet in ALERT
         monkeypatch.setattr(PetStateMachine, "state", property(lambda _self: PetState.IDLE))
-        controller = ByteSpriteApp(app=qapp, storage=StorageManager(tmp_path / "s.json"), enable_tray=False)
+        controller = PaperduckApp(app=qapp, storage=StorageManager(tmp_path / "s.json"), enable_tray=False)
         window, sm = controller.window, controller.state_machine
         window._handle_stats_change(sm.stats)
         assert window._anim.base_state == "idle"
@@ -96,7 +96,7 @@ class TestByteSpriteAppIntegration:
     def test_hud_only_opens_for_user_actions(self, qapp: QApplication, tmp_path: Path) -> None:
         from PyQt6.QtGui import QColor
 
-        controller = ByteSpriteApp(app=qapp, storage=StorageManager(tmp_path / "h.json"), enable_tray=False)
+        controller = PaperduckApp(app=qapp, storage=StorageManager(tmp_path / "h.json"), enable_tray=False)
         window = controller.window
         window._hovered = False
         # RAM crossing the 90% alert line flips state by itself; that must not pop the card
@@ -133,7 +133,7 @@ def test_customize_wheel_extras_custom_and_persist(qapp: QApplication, tmp_path:
     from src.ui.tool_wheel import MAX_SLICES
 
     storage = StorageManager(tmp_path / "wheel.json")
-    controller = ByteSpriteApp(app=qapp, storage=storage, enable_tray=False)
+    controller = PaperduckApp(app=qapp, storage=storage, enable_tray=False)
     win = controller.window
     base = [o.callback_id for o in win.all_tool_wheel_options()]
     assert [o.callback_id for o in win.tool_wheel_options()] == base + ["macro:Snap Ask"]  # extras start off
@@ -159,7 +159,7 @@ def test_customize_wheel_extras_custom_and_persist(qapp: QApplication, tmp_path:
     assert len(win.tool_wheel_options()) <= MAX_SLICES
     controller.quit()
 
-    again = ByteSpriteApp(app=qapp, storage=storage, enable_tray=False)
+    again = PaperduckApp(app=qapp, storage=storage, enable_tray=False)
     assert again.window.wheel.custom == win.wheel.custom
     assert again.window.tool_wheel_options() == win.tool_wheel_options()
     assert again.window.wheel.remove_custom(0) and len(again.window.wheel.custom) == 1

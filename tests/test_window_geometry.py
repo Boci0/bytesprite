@@ -318,7 +318,7 @@ class TestPetWindowAndContextMenu:
     def test_export_windows_ico_writes_valid_multires_ico_header(
         self, qapp: QApplication, tmp_path
     ) -> None:
-        ico_file = export_windows_ico(tmp_path / "bytesprite.ico")
+        ico_file = export_windows_ico(tmp_path / "paperduck.ico")
         assert ico_file.exists()
         raw = ico_file.read_bytes()
         # ICO magic header: 00 00 01 00 + 6 images (06 00)
@@ -534,14 +534,14 @@ def test_first_run_tips_show_in_order_and_right_click_stops_them(qapp: QApplicat
 
 
 def test_tips_are_skipped_for_installs_from_before_tips(qapp: QApplication, tmp_path) -> None:
-    from src.main import ByteSpriteApp
+    from src.main import PaperduckApp
     from src.storage.storage_manager import StorageManager
 
     old = tmp_path / "old.json"
     StorageManager(old).save(stats=PetStats(), state=PetState.IDLE, position=(100, 100), always_on_top=False,
                              auto_wander=False, active_tool="sysmon", tools_data={"macros": {}})
     for path, seen in ((old, len(PetWindow.TIPS)), (tmp_path / "new.json", 0)):
-        app = ByteSpriteApp(app=qapp, storage=StorageManager(path), enable_tray=False)
+        app = PaperduckApp(app=qapp, storage=StorageManager(path), enable_tray=False)
         try:
             assert app.window.tips_seen == seen
         finally:
@@ -549,11 +549,11 @@ def test_tips_are_skipped_for_installs_from_before_tips(qapp: QApplication, tmp_
 
 
 def test_pet_size_keeps_feet_in_place_and_persists(qapp: QApplication, tmp_path) -> None:
-    from src.main import ByteSpriteApp
+    from src.main import PaperduckApp
     from src.storage.storage_manager import StorageManager
 
     path = tmp_path / "s.json"
-    app = ByteSpriteApp(app=qapp, storage=StorageManager(path), enable_tray=False)
+    app = PaperduckApp(app=qapp, storage=StorageManager(path), enable_tray=False)
     try:
         win = app.window
         win.move_clamped(300, 300)
@@ -572,7 +572,7 @@ def test_pet_size_keeps_feet_in_place_and_persists(qapp: QApplication, tmp_path)
         app.save_state()
     finally:
         app.shutdown()
-    app = ByteSpriteApp(app=qapp, storage=StorageManager(path), enable_tray=False)
+    app = PaperduckApp(app=qapp, storage=StorageManager(path), enable_tray=False)
     try:
         assert app.window.pet_scale == 2
     finally:

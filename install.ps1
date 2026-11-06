@@ -1,14 +1,14 @@
-# ByteSprite installer / updater for Windows 10 and 11 (per-user, no admin).
+# Paperduck installer / updater for Windows 10 and 11 (per-user, no admin).
 #
 #   From a clone:   powershell -ExecutionPolicy Bypass -File .\install.ps1
-#   One line:       irm https://raw.githubusercontent.com/Boci0/bytesprite/main/install.ps1 | iex
+#   One line:       irm https://raw.githubusercontent.com/Boci0/paperduck/main/install.ps1 | iex
 #
-# Downloads install the release's standalone build (bytesprite-win64.zip, no Python needed):
-#          %LOCALAPPDATA%\ByteSprite\app   (ByteSprite.exe, _internal, uninstall.ps1, .installed marker)
+# Downloads install the release's standalone build (paperduck-win64.zip, no Python needed):
+#          %LOCALAPPDATA%\Paperduck\app   (Paperduck.exe, _internal, uninstall.ps1, .installed marker)
 # A clone, or a release without that build, installs from source into a private Python environment:
-#          %LOCALAPPDATA%\ByteSprite\app   (src, assets, uninstall.ps1, .installed marker)
-#          %LOCALAPPDATA%\ByteSprite\venv
-# Settings and state live in %USERPROFILE%\.bytesprite and are kept across updates.
+#          %LOCALAPPDATA%\Paperduck\app   (src, assets, uninstall.ps1, .installed marker)
+#          %LOCALAPPDATA%\Paperduck\venv
+# Settings and state live in %USERPROFILE%\.paperduck and are kept across updates.
 # Re-running it updates an existing install in place; a standalone install replaces an older venv one.
 
 param(
@@ -18,11 +18,11 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$Repo = "Boci0/bytesprite"
-$Root = Join-Path $env:LOCALAPPDATA "ByteSprite"
+$Repo = "Boci0/paperduck"
+$Root = Join-Path $env:LOCALAPPDATA "Paperduck"
 $App = Join-Path $Root "app"
 $Venv = Join-Path $Root "venv"
-$StandaloneAsset = "bytesprite-win64.zip"
+$StandaloneAsset = "paperduck-win64.zip"
 # Must match RELEASE_PUBLIC_KEY in src/updater.py and sha256(src/signing.py); tests/test_updater.py checks both
 $ReleasePublicKey = "f0cc212a80d53fe877827253c020e2c01d023c4280eebf47423c6032a0259316"
 $SigningPySha256 = "B415F26BF5BA35C3BA626DCB6D22FED740714BBBC5E185B5A99B766B7B73ED15"
@@ -110,8 +110,8 @@ function Test-Ed25519Signature([byte[]]$PublicKey, [string]$File, [byte[]]$Signa
 }
 
 # Close running copies of this install (graceful first, so state.json is saved): their files are in use
-function Stop-ByteSprite {
-    $procs = Get-CimInstance Win32_Process -Filter "Name='pythonw.exe' OR Name='python.exe' OR Name='ByteSprite.exe'" |
+function Stop-Paperduck {
+    $procs = Get-CimInstance Win32_Process -Filter "Name='pythonw.exe' OR Name='python.exe' OR Name='Paperduck.exe'" |
         Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($Root, [StringComparison]::OrdinalIgnoreCase) }
     foreach ($p in $procs) { taskkill /PID $p.ProcessId 2>$null | Out-Null }
     foreach ($p in $procs) { Wait-Process -Id $p.ProcessId -Timeout 10 -ErrorAction SilentlyContinue }
@@ -127,10 +127,10 @@ trap { if ($Temp) { Remove-Item $Temp -Recurse -Force -ErrorAction SilentlyConti
 if (-not $Source -or -not (Test-Path (Join-Path $Source "src\main.py"))) {
     Write-Host "Downloading the latest Paperduck release..."
     $release = Invoke-RestMethod "https://api.github.com/repos/$Repo/releases/latest"
-    $Temp = Join-Path $env:TEMP ("bytesprite_" + [guid]::NewGuid())
+    $Temp = Join-Path $env:TEMP ("paperduck_" + [guid]::NewGuid())
     New-Item -ItemType Directory -Path $Temp | Out-Null
     $Standalone = [bool]($release.assets | Where-Object name -eq $StandaloneAsset)
-    $assetName = if ($Standalone) { $StandaloneAsset } else { "bytesprite.zip" }
+    $assetName = if ($Standalone) { $StandaloneAsset } else { "paperduck.zip" }
     $zip = Join-Path $Temp $assetName
     $sig = "$zip.sig"
     foreach ($pair in @(@($assetName, $zip), @("$assetName.sig", $sig))) {
@@ -144,13 +144,13 @@ if (-not $Source -or -not (Test-Path (Join-Path $Source "src\main.py"))) {
             throw "Release signature check failed; nothing was installed"
         }
         Expand-Archive $zip -DestinationPath $Temp
-        $Source = Join-Path $Temp "ByteSprite"
+        $Source = Join-Path $Temp "Paperduck"
         $versionFile = Join-Path $Source "VERSION"
         # An older signed zip re-attached to a new tag must not install (same rule as the updater)
         if (-not (Test-Path $versionFile) -or (Get-Content $versionFile -Raw).Trim() -ne $release.tag_name.TrimStart("v")) {
             throw "Release $($release.tag_name) contains a different version; nothing was installed"
         }
-        if (-not (Test-Path (Join-Path $Source "ByteSprite.exe"))) { throw "Release $($release.tag_name) has no ByteSprite.exe" }
+        if (-not (Test-Path (Join-Path $Source "Paperduck.exe"))) { throw "Release $($release.tag_name) has no Paperduck.exe" }
     } else {
         $py = Find-Python
         $verifier = Join-Path $Temp "signing.py"
@@ -163,7 +163,7 @@ if (-not $Source -or -not (Test-Path (Join-Path $Source "src\main.py"))) {
         & $py[0] @pyArgs -I -c $check $verifier $zip $sig $ReleasePublicKey
         if ($LASTEXITCODE -ne 0) { throw "Release signature check failed; nothing was installed" }
         Expand-Archive $zip -DestinationPath $Temp
-        $Source = Join-Path $Temp "bytesprite"
+        $Source = Join-Path $Temp "paperduck"
         $init = Get-Content (Join-Path $Source "src\__init__.py") -Raw
         if ($init -notmatch '__version__\s*=\s*["'']([^"'']+)' -or $Matches[1] -ne $release.tag_name.TrimStart("v")) {
             throw "Release $($release.tag_name) contains a different version; nothing was installed"
@@ -174,15 +174,15 @@ if (-not $Source -or -not (Test-Path (Join-Path $Source "src\main.py"))) {
 Write-Host "Installing to $Root"
 if ($Standalone) {
     # 2. Replace the app folder with the standalone build (mirrored, so an older venv install's src goes too)
-    Stop-ByteSprite
+    Stop-Paperduck
     robocopy $Source $App /MIR /NFL /NDL /NJH /NJS /NP | Out-Null
     if ($LASTEXITCODE -ge 8) { throw "Copying the app failed (robocopy $LASTEXITCODE)" }
     # Leftovers of an in-app update, and the Python environment a standalone install no longer uses
     foreach ($old in "$App.old", "$App.new", $Venv) { Remove-Item $old -Recurse -Force -ErrorAction SilentlyContinue }
     Set-Content (Join-Path $App ".installed") "installed by install.ps1" -Encoding ascii
-    $Target = Join-Path $App "ByteSprite.exe"
+    $Target = Join-Path $App "Paperduck.exe"
     $TargetArgs = ""
-    $WorkDir = $Root  # outside app\, so an in-app update can rename it while ByteSprite runs
+    $WorkDir = $Root  # outside app\, so an in-app update can rename it while Paperduck runs
     $Icon = $Target
     $RunValue = "`"$Target`""
     $version = (Get-Content (Join-Path $App "VERSION") -Raw).Trim()
@@ -193,9 +193,9 @@ if ($Standalone) {
     robocopy (Join-Path $Source "src") (Join-Path $App "src") /MIR /XD __pycache__ /NFL /NDL /NJH /NJS /NP | Out-Null
     if ($LASTEXITCODE -ge 8) { throw "Copying src failed (robocopy $LASTEXITCODE)" }
     robocopy (Join-Path $Source "assets") (Join-Path $App "assets") /MIR /NFL /NDL /NJH /NJS /NP | Out-Null
-    foreach ($f in "requirements.txt", "uninstall.ps1", "README.md", "bytesprite.pyw") {
+    foreach ($f in "requirements.txt", "uninstall.ps1", "README.md", "paperduck.pyw") {
         $p = Join-Path $Source $f
-        if (Test-Path $p) { Copy-Item $p $App -Force }  # signed bundles omit the legacy bytesprite.pyw
+        if (Test-Path $p) { Copy-Item $p $App -Force }  # signed bundles omit the legacy paperduck.pyw
     }
     Set-Content (Join-Path $App ".installed") "installed by install.ps1" -Encoding ascii
 
@@ -214,7 +214,7 @@ if ($Standalone) {
     $Target = $Pythonw
     $TargetArgs = "-m src.main"
     $WorkDir = $App
-    $Icon = Join-Path $App "assets\bytesprite.ico"
+    $Icon = Join-Path $App "assets\paperduck.ico"
     $RunValue = "`"$Pythonw`" `"$App\src\autostart.pyw`""
     $version = (& $VenvPy -c "import sys;sys.path.insert(0,r'$App');import src;print(src.__version__)").Trim()
 }
@@ -235,16 +235,12 @@ function Test-OurShortcut([string]$Path) {
 }
 $programs = [Environment]::GetFolderPath("Programs")
 foreach ($dir in $programs, [Environment]::GetFolderPath("Desktop")) {
-    $old = Join-Path $dir "ByteSprite.lnk"  # the app's former name: ours is replaced by Paperduck.lnk
     $lnk = Join-Path $dir "Paperduck.lnk"
-    $hadOld = Test-OurShortcut $old
-    $hadOne = $hadOld -or (Test-OurShortcut $lnk)
-    if ($hadOld) { Remove-Item $old }
-    if ($dir -eq $programs -or $DesktopShortcut -or $hadOne) { New-Shortcut $lnk }
+    if ($dir -eq $programs -or $DesktopShortcut -or (Test-OurShortcut $lnk)) { New-Shortcut $lnk }
 }
 
 # 5. Apps & features entry (HKCU, so no admin)
-$key = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\ByteSprite"
+$key = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Paperduck"
 New-Item -Path $key -Force | Out-Null
 $uninstall = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$App\uninstall.ps1`""
 @{
@@ -257,9 +253,9 @@ Set-ItemProperty -Path $key -Name NoRepair -Value 1 -Type DWord
 
 # 6. Start with Windows (same Run value the in-app toggle writes); an existing one for this install is refreshed
 $run = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-$current = (Get-ItemProperty $run -Name ByteSprite -ErrorAction SilentlyContinue).ByteSprite
+$current = (Get-ItemProperty $run -Name Paperduck -ErrorAction SilentlyContinue).Paperduck
 if ($StartWithWindows -or ($current -and $current.Contains($Root))) {
-    Set-ItemProperty -Path $run -Name ByteSprite -Value $RunValue
+    Set-ItemProperty -Path $run -Name Paperduck -Value $RunValue
 }
 
 if ($Temp) { Remove-Item $Temp -Recurse -Force -ErrorAction SilentlyContinue }

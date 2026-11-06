@@ -1,4 +1,4 @@
-"""Headless utility state coordinator driving ByteSprite multi-tools and operational states."""
+"""Headless utility state coordinator driving Paperduck multi-tools and operational states."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ StatsChangeCallback = Callable[[PetStats], None]
 
 
 class PetStateMachine:
-    """Discrete-tick multi-tool state machine for ByteSprite."""
+    """Discrete-tick multi-tool state machine for Paperduck."""
 
     ALERT_THRESHOLD: float = 90.0
 

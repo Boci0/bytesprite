@@ -81,7 +81,7 @@ def suggest(app: str, clip: str, dwell_s: float, pomodoro_idle: bool) -> Suggest
 
 
 def foreground_app() -> str:
-    """Exe name of the foreground window ('' for none, ByteSprite itself, or off Windows)."""
+    """Exe name of the foreground window ('' for none, Paperduck itself, or off Windows)."""
     if sys.platform != "win32":
         return ""
     user32 = ctypes.windll.user32
@@ -179,7 +179,7 @@ class HintsPlugin:
 
     def note_app(self, app: str, now: float | None = None) -> None:
         """Track the front app even on ticks that skip `poll` (a card up, asleep, a wheel open), so the menu's
-        Pre-fetch item names the app the user is in. '' (ByteSprite itself, e.g. its menu) keeps the last one;
+        Pre-fetch item names the app the user is in. '' (Paperduck itself, e.g. its menu) keeps the last one;
         a private app clears it so it is never offered for pre-fetch."""
         if not app:
             return

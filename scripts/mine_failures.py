@@ -7,7 +7,7 @@ Signals per answer: failed tool calls (the same test the agent loop uses), retry
 with only numbers or a few words changed, e.g. _fix.ps1 to _fix6.ps1), answers you stopped, and your next
 message pushing back ("still wrong", "that's not it", "undo"). The worst answers come first, each with your
 request, the tool chain and what you said next, so it can be turned into a benchmark task in
-scripts/self_improve.py. Also lists stray files the AI left in the ByteSprite data folder.
+scripts/self_improve.py. Also lists stray files the AI left in the Paperduck data folder.
 The report quotes your chats, so it stays on this PC (dist/ is gitignored).
 """
 
@@ -31,7 +31,7 @@ STOPPED = "(stopped by the user"
 PUSHBACK = re.compile(r"\b(still|again|wrong|not what|that'?s not|isn'?t|doesn'?t|didn'?t|don'?t|won'?t|undo|revert|"
                       r"broke|broken|why did|stop|no,|nope|instead|you forgot|missing|try again|not working)\b", re.I)
 RETRY_RUN = 3  # the same call this many times in one answer is a retry chain
-_KNOWN = {"app", "venv", "sessions", "skills", "bytesprite.log", "crash.log", "memory.md", "rules.md", "mcp.json",
+_KNOWN = {"app", "venv", "sessions", "skills", "paperduck.log", "crash.log", "memory.md", "rules.md", "mcp.json",
           "state.json", "state.json.bak", ".installed", "update-cache"}
 
 
@@ -155,7 +155,7 @@ def main() -> int:
     sessions = list_sessions()
     found = cases(sessions)
     by_tool, by_kind = tool_failures(found)
-    logged = log_failures(data_dir / "bytesprite.log")
+    logged = log_failures(data_dir / "paperduck.log")
     strays = stray_files(data_dir)
     out = Path(args.report)
     out.parent.mkdir(parents=True, exist_ok=True)

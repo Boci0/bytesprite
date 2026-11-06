@@ -1,3 +1,3 @@
-"""ByteSprite desktop companion package."""
+"""Paperduck desktop companion package."""
 
 __version__ = "2.0.2"

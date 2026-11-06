@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -67,7 +68,8 @@ class ProjectPlugin:
         self._recent: list[str] = []
         self._status: GitStatus | None = None
         self._error: str = ""
-        self._proc: subprocess.Popen[str] | None = None
+        self._proc: subprocess.Popen[bytes] | None = None
+        self._out: Any = None  # temp file holding the running git call's stdout
         self._next_run: float = 0.0
         self._git = shutil.which("git")
         self._notice: tuple[str, str] | None = None
@@ -116,14 +118,17 @@ class ProjectPlugin:
             except OSError:
                 pass
             self._proc = None
+            self._out.close()
 
     def tick(self) -> bool:
         # Popen + poll keeps the UI thread free; git output is collected on a later tick
         if self._proc is not None:
             if self._proc.poll() is None:
                 return False
-            out, _err = self._proc.communicate()
             code = self._proc.returncode
+            self._out.seek(0)
+            out = self._out.read().decode("utf-8", "replace")
+            self._out.close()
             self._proc = None
             if code == 0:
                 old, self._status, self._error = self._status, parse_git_status(out), ""
@@ -135,12 +140,15 @@ class ProjectPlugin:
             return False
         self._next_run = time.monotonic() + self.REFRESH_SECONDS
         try:
+            self._out = tempfile.TemporaryFile()
             self._proc = subprocess.Popen(
                 [self._git, "-C", str(self._repo), "status", "--porcelain=v2", "--branch"],
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
-                text=True, encoding="utf-8", errors="replace", creationflags=_NO_WINDOW,
+                # A temp file, not a PIPE: polled-but-unread pipes fill at 4 KB on Windows and git blocks forever
+                stdout=self._out, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+                creationflags=_NO_WINDOW,
             )
         except OSError:
+            self._out.close()
             self._error = "git failed to start"
             return True
         return False

@@ -7,6 +7,8 @@ import hashlib
 import io
 import json
 import os
+import shutil
+import subprocess
 import tarfile
 import time
 import zipfile
@@ -28,7 +30,7 @@ from PyQt6.QtWidgets import QApplication
 
 from src.engine.models import PetState, PetStats
 from src.engine.pet_state import PetStateMachine
-from src.main import ByteSpriteApp
+from src.main import PaperduckApp
 from src.storage.storage_manager import StorageManager
 from src.tools.base import ToolPlugin
 from src.tools.clip_vault import ClipVaultPlugin
@@ -72,7 +74,7 @@ class TestFileForgeCompressionAndSecurity:
         src_dir = tmp_path / "project_bundle"
         src_dir.mkdir()
         (src_dir / "empty_sub").mkdir()
-        (src_dir / "readme.txt").write_text("ByteSprite " * 400, encoding="utf-8")
+        (src_dir / "readme.txt").write_text("Paperduck " * 400, encoding="utf-8")
         (src_dir / "photo.jpg").write_bytes(b"\xff\xd8\xff\xe0" + b"\x12\x34" * 200)
 
         res = compress_to_zip([src_dir])
@@ -218,13 +220,13 @@ class TestFileForgeImageAndDataConversion:
         # TOML -> JSON
         toml_path = tmp_path / "config.toml"
         toml_path.write_text(
-            'title = "ByteSprite"\nworkers = 1\nrelease = 2026-10-30\n',
+            'title = "Paperduck"\nworkers = 1\nrelease = 2026-10-30\n',
             encoding="utf-8",
         )
         toml_res = convert_data_file(toml_path)
         assert toml_res.ok is True
         parsed_toml = json.loads(toml_res.output_paths[0].read_text(encoding="utf-8"))
-        assert parsed_toml["title"] == "ByteSprite"
+        assert parsed_toml["title"] == "Paperduck"
         assert parsed_toml["workers"] == 1
         assert parsed_toml["release"] == "2026-10-30"
 
@@ -286,18 +288,18 @@ class TestClipVaultPlugin:
         assert box[0] == "hello\nworld\n\ntail"
 
         # Base64 encode <-> decode reversible toggle
-        box[0] = "ByteSprite Pixel Companion"
+        box[0] = "Paperduck Pixel Companion"
         ok, toast, _ = vault.execute_action("clipvault:b64_toggle")
         assert ok and toast == "B64 ENC"
-        assert box[0] != "ByteSprite Pixel Companion"
+        assert box[0] != "Paperduck Pixel Companion"
         ok, toast, _ = vault.execute_action("clipvault:b64_toggle")
         assert ok and toast == "B64 DEC"
-        assert box[0] == "ByteSprite Pixel Companion"
+        assert box[0] == "Paperduck Pixel Companion"
 
         # Streaming file SHA-256 digest
         sample_bin = tmp_path / "firmware.bin"
-        sample_bin.write_bytes(b"bytesprite-binary-payload")
-        expected_sha = hashlib.sha256(b"bytesprite-binary-payload").hexdigest()
+        sample_bin.write_bytes(b"paperduck-binary-payload")
+        expected_sha = hashlib.sha256(b"paperduck-binary-payload").hexdigest()
         paths_box.append(sample_bin)
         ok, toast, _ = vault.execute_action("clipvault:sha256")
         assert ok and toast == "FILE SHA"
@@ -309,7 +311,7 @@ class TestDragDropAndMenuIntegration:
         self, qapp: QApplication, tmp_path: Path
     ) -> None:
         storage = StorageManager(tmp_path / "app_state.json")
-        controller = ByteSpriteApp(app=qapp, storage=storage, enable_tray=False)
+        controller = PaperduckApp(app=qapp, storage=storage, enable_tray=False)
         try:
             win: PetWindow = controller.window
             assert win.acceptDrops() is True
@@ -360,7 +362,7 @@ class TestDragDropAndMenuIntegration:
         self, qapp: QApplication, tmp_path: Path
     ) -> None:
         storage = StorageManager(tmp_path / "wheel_state.json")
-        controller = ByteSpriteApp(app=qapp, storage=storage, enable_tray=False)
+        controller = PaperduckApp(app=qapp, storage=storage, enable_tray=False)
         try:
             win: PetWindow = controller.window
             win.move(300, 300)
@@ -689,3 +691,22 @@ def test_git_notice_sees_commits_and_pushes_only() -> None:
     assert git_notice(base, GitStatus("main", 5, 1, 0)) is None  # edits only
     assert git_notice(base, GitStatus("dev", 0, 3, 0)) is None  # branch switch
     assert git_notice(base, GitStatus("main", 0, 0, 2)) is None  # behind moved: a fetch or pull, not a push
+
+
+def test_project_plugin_reads_git_status_larger_than_a_pipe_buffer(tmp_path: Path) -> None:
+    """Regression: git blocked on a full 4 KB pipe once a repo had ~30 changed files, so the HUD never updated."""
+    from src.tools.project import ProjectPlugin
+
+    git = shutil.which("git")
+    if git is None:
+        pytest.skip("git not installed")
+    subprocess.run([git, "init", "-q", str(tmp_path)], check=True)
+    for i in range(300):
+        (tmp_path / f"untracked_file_with_a_long_name_{i:04d}.txt").write_text("x")
+    plugin = ProjectPlugin()
+    plugin.set_repo(tmp_path)
+    deadline = time.monotonic() + 10
+    while plugin.status is None and time.monotonic() < deadline:
+        plugin.tick()
+        time.sleep(0.05)
+    assert plugin.status is not None and plugin.status.changed == 300

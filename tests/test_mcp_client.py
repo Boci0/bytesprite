@@ -21,7 +21,7 @@ def hub(tmp_path: Path):
     path = tmp_path / "mcp.json"
     path.write_text(json.dumps({"mcpServers": {
         "fake": {"command": sys.executable, "args": [FAKE]},
-        "missing": {"command": "no-such-command-bytesprite"},
+        "missing": {"command": "no-such-command-paperduck"},
         "bad": {"args": ["x"]},
     }}), encoding="utf-8")
     hub = McpHub(path)
@@ -151,7 +151,7 @@ def test_registry_search_gives_stdio_commands_only() -> None:
 
 
 def test_add_server_keeps_the_config_and_never_overwrites(tmp_path: Path) -> None:
-    path = tmp_path / "ByteSprite" / "mcp.json"
+    path = tmp_path / "Paperduck" / "mcp.json"
     assert mcp_client.add_server("git", "npx", ["-y", "git-mcp"], {"TOKEN": "t"}, path) == 'added MCP server "git"'
     assert load_config(path) == {"git": {"command": "npx", "args": ["-y", "git-mcp"], "env": {"TOKEN": "t"}}}
     assert mcp_client.add_server("git", "evil", [], {}, path).startswith("error: a server named")

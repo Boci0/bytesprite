@@ -1,12 +1,12 @@
-"""GitHub release check and in-place source update for an installed ByteSprite.
+"""GitHub release check and in-place source update for an installed Paperduck.
 
-Updates must be signed: a release carries `bytesprite.zip` plus `bytesprite.zip.sig`, an Ed25519
+Updates must be signed: a release carries `paperduck.zip` plus `paperduck.zip.sig`, an Ed25519
 signature made with the maintainer's offline key (scripts/release.py). HTTPS only proves the file
 came from GitHub; the signature proves it came from the key holder, so a hijacked GitHub account
 or an intercepted download cannot ship code. The version inside the zip must match the tag and be
 newer, so an old signed release cannot be replayed under a new tag to downgrade an install.
 
-A frozen (PyInstaller) build updates from `bytesprite-win64.zip` instead: the whole app folder, runtime
+A frozen (PyInstaller) build updates from `paperduck-win64.zip` instead: the whole app folder, runtime
 included. Windows will not rename a folder whose exe or DLLs are loaded, so the new build is staged as
 `app.new` and the swap runs from there (`--finish-update`) once the old process has exited.
 """
@@ -35,17 +35,17 @@ from src.signing import verify
 
 logger = logging.getLogger(__name__)
 
-REPO = "Boci0/bytesprite"
+REPO = "Boci0/paperduck"
 LATEST_API = f"https://api.github.com/repos/{REPO}/releases/latest"
 RELEASES_URL = f"https://github.com/{REPO}/releases"
 FROZEN = bool(getattr(sys, "frozen", False))
-# Frozen: the folder holding ByteSprite.exe (`<root>/app`); source: the folder holding src/
+# Frozen: the folder holding Paperduck.exe (`<root>/app`); source: the folder holding src/
 APP_DIR = Path(sys.executable).parent if FROZEN else Path(__file__).resolve().parents[1]
 # install.ps1 writes this marker; a git checkout has none, so the updater never overwrites dev work
 INSTALL_MARKER = ".installed"
-SOURCE_ASSET = "bytesprite.zip"
-FROZEN_ASSET = "bytesprite-win64.zip"
-FROZEN_EXE = "ByteSprite.exe"
+SOURCE_ASSET = "paperduck.zip"
+FROZEN_ASSET = "paperduck-win64.zip"
+FROZEN_EXE = "Paperduck.exe"
 _MAX_ZIP_BYTES = (80 if FROZEN else 20) * 1024 * 1024
 ASSET_NAME = FROZEN_ASSET if FROZEN else SOURCE_ASSET
 SIG_NAME = ASSET_NAME + ".sig"
@@ -70,7 +70,7 @@ def is_installed(app_dir: Path = APP_DIR) -> bool:
 
 def _get(url: str, limit: int, progress: Callable[[int], None] | None = None) -> bytes:
     """Download up to `limit` bytes; `progress` gets the percent done whenever it changes (needs Content-Length)."""
-    req = urllib.request.Request(url, headers={"User-Agent": f"ByteSprite/{__version__}"})
+    req = urllib.request.Request(url, headers={"User-Agent": f"Paperduck/{__version__}"})
     chunks: list[bytes] = []
     size, shown = 0, -1
     with urllib.request.urlopen(req, timeout=_TIMEOUT_S) as resp:
@@ -185,7 +185,7 @@ def install_source_zip(data: bytes, app_dir: Path = APP_DIR) -> None:
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         for info in zf.infolist():
             parts = Path(info.filename).parts
-            # Bundles wrap everything in one top folder ('bytesprite/', or '<owner>-<repo>-<sha>/')
+            # Bundles wrap everything in one top folder ('paperduck/', or '<owner>-<repo>-<sha>/')
             if len(parts) < 3 or parts[1] != "src" or info.is_dir():
                 continue
             rel = Path(*parts[2:])
@@ -212,7 +212,7 @@ def install_source_zip(data: bytes, app_dir: Path = APP_DIR) -> None:
 
 
 def install_frozen_zip(data: bytes, app_dir: Path = APP_DIR) -> None:
-    """Stage the `ByteSprite/` folder of a verified bundle as `app.new` for `finish_frozen_update`.
+    """Stage the `Paperduck/` folder of a verified bundle as `app.new` for `finish_frozen_update`.
 
     The running app is not touched. No library check: a frozen bundle carries its own runtime.
     """
@@ -306,48 +306,6 @@ def remove_old_build(app_dir: Path = APP_DIR) -> None:
     """Delete the replaced `app.old` and the staged `app.new` once a frozen update has been swapped in."""
     for suffix in (".old", ".new"):
         shutil.rmtree(app_dir.with_name(app_dir.name + suffix), ignore_errors=True)
-
-
-def shortcut_dirs() -> list[Path]:
-    """The Start Menu Programs and Desktop folders (the Desktop may be redirected to OneDrive)."""
-    if sys.platform != "win32":
-        return []
-    import ctypes
-
-    out = []
-    for csidl in (0x0002, 0x0010):  # CSIDL_PROGRAMS, CSIDL_DESKTOPDIRECTORY
-        buf = ctypes.create_unicode_buffer(260)
-        if ctypes.windll.shell32.SHGetFolderPathW(None, csidl, None, 0, buf) == 0:
-            out.append(Path(buf.value))
-    return out
-
-
-def rename_old_shortcuts(dirs: list[Path], root: Path) -> int:
-    """Rename this install's ByteSprite.lnk to Paperduck.lnk, which only install.ps1 did before; returns how many."""
-    needle = str(root).lower()
-    renamed = 0
-    for folder in dirs:
-        old, new = folder / "ByteSprite.lnk", folder / "Paperduck.lnk"
-        try:
-            data = old.read_bytes().lower()
-        except OSError:
-            continue
-        # shortcut: a substring match on the stored target path, not a .lnk parser; fine for our own shortcuts
-        if needle.encode("utf-16-le") not in data and needle.encode("mbcs", "replace") not in data:
-            continue  # another copy's shortcut, e.g. a dev checkout's
-        try:
-            if new.exists():
-                old.unlink()
-            else:
-                old.rename(new)
-            renamed += 1
-        except OSError as exc:
-            logger.warning("could not rename %s: %s", old, exc)
-    if renamed and sys.platform == "win32":
-        import ctypes
-
-        ctypes.windll.shell32.SHChangeNotify(0x08000000, 0, None, None)  # SHCNE_ASSOCCHANGED: redraw cached icons
-    return renamed
 
 
 class UpdateJob(QObject):

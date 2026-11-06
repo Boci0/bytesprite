@@ -67,7 +67,7 @@ RECENT_TOOL_CHARS = 32000  # tool output kept for the newest answer that ran too
 OLD_TOOL_CHARS = 1000  # ... and per tool for older answers
 COMPACT_AT = MAX_HISTORY_CHARS * 3 // 4  # history size that makes the next send summarize older turns first
 KEEP_TURNS = 6  # newest turns kept word for word when compacting
-COMPACT_PREFIX = "[Earlier conversation, compacted by "  # chats saved before the rename say "by ByteSprite"
+COMPACT_PREFIX = "[Earlier conversation, compacted by "
 COMPACT_MARK = f"{COMPACT_PREFIX}Paperduck into this summary:]"
 COMPACT_PROMPT = ("Summarize the conversation so far so it can continue without it. Keep every fact, decision, "
                   "file path, command, number and open task the user may come back to; drop small talk. "
@@ -266,7 +266,7 @@ _CRED_TYPE_GENERIC, _CRED_PERSIST_LOCAL_MACHINE = 1, 2
 
 def credential_target(base_url: str) -> str:
     """One key per API host: a changed base URL never reuses another host's key."""
-    return "ByteSprite AI/" + (urlsplit(base_url).netloc or "").lower()
+    return "Paperduck AI/" + (urlsplit(base_url).netloc or "").lower()
 
 
 def save_key(base_url: str, key: str) -> bool:
@@ -276,7 +276,7 @@ def save_key(base_url: str, key: str) -> bool:
     buf = (ctypes.c_ubyte * len(blob)).from_buffer_copy(blob)
     cred = _CREDENTIAL(Type=_CRED_TYPE_GENERIC, TargetName=credential_target(base_url),
                        CredentialBlobSize=len(blob), CredentialBlob=buf, Persist=_CRED_PERSIST_LOCAL_MACHINE,
-                       UserName="ByteSprite")
+                       UserName="Paperduck")
     return bool(ctypes.windll.advapi32.CredWriteW(ctypes.byref(cred), 0))
 
 
@@ -549,7 +549,7 @@ def _request_once(base_url: str, key: str, path: str, body: dict[str, Any] | Non
     req = urllib.request.Request(
         validate_base_url(base_url) + path, data=None if body is None else json.dumps(body).encode("utf-8"),
         method="GET" if body is None else "POST",
-        headers={"Content-Type": "application/json", "User-Agent": "ByteSprite",
+        headers={"Content-Type": "application/json", "User-Agent": "Paperduck",
                  **({"x-api-key": key, "anthropic-version": "2023-06-01"} if is_anthropic(base_url)
                     else {"Authorization": f"Bearer {key}"})},
     )
@@ -1372,7 +1372,7 @@ def fetch_page(url: str) -> str:
     """Text of a public web page. Redirects are followed by hand so every hop is checked again."""
     for _ in range(MAX_REDIRECTS + 1):
         check_public_https(url)
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ByteSprite",
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Paperduck",
                                                    "Accept": "text/html,text/plain"})
         try:
             with _OPENER.open(req, timeout=TIMEOUT_S) as resp:
@@ -1393,7 +1393,7 @@ def fetch_page(url: str) -> str:
 
 def _brave_search(key: str, query: str) -> str:
     req = urllib.request.Request(f"{BRAVE_URL}?count={MAX_SEARCH_RESULTS}&q={quote_plus(query)}", headers={
-        "X-Subscription-Token": key, "Accept": "application/json", "User-Agent": "ByteSprite"})
+        "X-Subscription-Token": key, "Accept": "application/json", "User-Agent": "Paperduck"})
     try:
         with _OPENER.open(req, timeout=TIMEOUT_S) as resp:
             data = json.loads(resp.read(MAX_SEARCH_BYTES))
@@ -1428,7 +1428,7 @@ def web_search(query: str) -> str:
     if brave := load_key(BRAVE_URL):
         return _brave_search(brave, query)
     req = urllib.request.Request("https://html.duckduckgo.com/html/?q=" + quote_plus(query),
-                                 headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ByteSprite"})
+                                 headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Paperduck"})
     try:
         with _OPENER.open(req, timeout=TIMEOUT_S) as resp:
             page = resp.read(MAX_SEARCH_BYTES).decode("utf-8", "replace")

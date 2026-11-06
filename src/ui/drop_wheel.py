@@ -83,7 +83,7 @@ def _clamp01(v: float) -> float:
 
 
 class RadialDropWheel(QWidget):
-    """Context-aware radial wheel spawned when hovering files over ByteSprite."""
+    """Context-aware radial wheel spawned when hovering files over Paperduck."""
 
     WHEEL_WIDTH: int = 300
     WHEEL_HEIGHT: int = 316

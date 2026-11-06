@@ -16,7 +16,7 @@ def _zipball(files: dict[str, str]) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
         for name, text in files.items():
-            zf.writestr(f"Boci0-bytesprite-abc123/{name}", text)
+            zf.writestr(f"Boci0-paperduck-abc123/{name}", text)
     return buf.getvalue()
 
 
@@ -107,8 +107,8 @@ def test_ed25519_matches_rfc8032_vectors() -> None:
 def _bundle(version: str) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
-        zf.writestr("bytesprite/src/__init__.py", f'__version__ = "{version}"\n')
-        zf.writestr("bytesprite/src/main.py", f"v{version}")
+        zf.writestr("paperduck/src/__init__.py", f'__version__ = "{version}"\n')
+        zf.writestr("paperduck/src/main.py", f"v{version}")
     return buf.getvalue()
 
 
@@ -155,8 +155,8 @@ def test_update_job_installs_only_signed_releases(case: str, tmp_path: Path, mon
     base = f"http://127.0.0.1:{server.server_port}"
     data = _bundle("99.0.0")
     assets = [] if case == "unsigned" else [
-        {"name": "bytesprite.zip", "browser_download_url": f"{base}/zip"},
-        {"name": "bytesprite.zip.sig", "browser_download_url": f"{base}/sig"},
+        {"name": "paperduck.zip", "browser_download_url": f"{base}/zip"},
+        {"name": "paperduck.zip.sig", "browser_download_url": f"{base}/sig"},
     ]
     _FakeGitHub.files = {
         "/latest": json.dumps({"tag_name": "v99.0.0", "zipball_url": f"{base}/zip", "assets": assets}).encode(),
@@ -190,8 +190,8 @@ def test_startup_check_prefetches_so_install_needs_no_download(tmp_path: Path,
     threading.Thread(target=server.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{server.server_port}"
     data = _bundle("99.0.0")
-    assets = [{"name": "bytesprite.zip", "browser_download_url": f"{base}/zip"},
-              {"name": "bytesprite.zip.sig", "browser_download_url": f"{base}/sig"}]
+    assets = [{"name": "paperduck.zip", "browser_download_url": f"{base}/zip"},
+              {"name": "paperduck.zip.sig", "browser_download_url": f"{base}/sig"}]
     _FakeGitHub.files = {"/latest": json.dumps({"tag_name": "v99.0.0", "assets": assets}).encode(),
                          "/zip": data, "/sig": _sig(data)}
     app = _app(tmp_path)
@@ -212,7 +212,7 @@ def test_startup_check_prefetches_so_install_needs_no_download(tmp_path: Path,
         job._run(install=True)
         assert results[-1] == ("installed", "v99.0.0") and (app / "src" / "main.py").read_text() == "v99.0.0"
         (app / "src" / "main.py").write_text("old")
-        (cache / "v99.0.0-bytesprite.zip").write_bytes(data + b"evil")  # a tampered cache is not trusted
+        (cache / "v99.0.0-paperduck.zip").write_bytes(data + b"evil")  # a tampered cache is not trusted
         job._run(install=True)
         assert results[-1] == ("error", "HTTP Error 404: Not Found")
         assert (app / "src" / "main.py").read_text() == "old"
@@ -283,14 +283,14 @@ def _frozen_zip(files: dict[str, str]) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
         for name, text in files.items():
-            zf.writestr(f"ByteSprite/{name}", text)
+            zf.writestr(f"Paperduck/{name}", text)
     return buf.getvalue()
 
 
 def _frozen_app(tmp_path: Path) -> Path:
     app = tmp_path / "app"
     (app / "_internal").mkdir(parents=True)
-    (app / "ByteSprite.exe").write_text("old")
+    (app / "Paperduck.exe").write_text("old")
     (app / ".installed").write_text("marker")
     return app
 
@@ -303,12 +303,12 @@ def test_frozen_update_stages_then_swaps_after_exit(tmp_path: Path) -> None:
     from src.updater import finish_frozen_update, install_frozen_zip, remove_old_build, zip_version
 
     app = _frozen_app(tmp_path)
-    data = _frozen_zip({"ByteSprite.exe": "new", "_internal/x.dll": "x", "VERSION": "2.0.0\n"})
+    data = _frozen_zip({"Paperduck.exe": "new", "_internal/x.dll": "x", "VERSION": "2.0.0\n"})
     assert zip_version(data) == "2.0.0"
     install_frozen_zip(data, app)
-    assert (app / "ByteSprite.exe").read_text() == "old"  # the running copy is never touched
+    assert (app / "Paperduck.exe").read_text() == "old"  # the running copy is never touched
     staged = tmp_path / "app.new"
-    assert (staged / "ByteSprite.exe").read_text() == "new" and is_installed(staged)
+    assert (staged / "Paperduck.exe").read_text() == "new" and is_installed(staged)
     with pytest.raises(ValueError):
         finish_frozen_update(os.getpid(), app)  # only a staged folder may swap itself in
     old = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
@@ -320,9 +320,9 @@ def test_frozen_update_stages_then_swaps_after_exit(tmp_path: Path) -> None:
         old.kill()
         old.wait()
     assert finish_frozen_update(old.pid, staged, starts=lambda _d: True) == app
-    assert (app / "ByteSprite.exe").read_text() == "new" and (app / "_internal" / "x.dll").exists()
+    assert (app / "Paperduck.exe").read_text() == "new" and (app / "_internal" / "x.dll").exists()
     assert is_installed(app)  # the marker is not in the signed bundle; it follows the install
-    assert (tmp_path / "app.old" / "ByteSprite.exe").read_text() == "old"
+    assert (tmp_path / "app.old" / "Paperduck.exe").read_text() == "old"
     remove_old_build(app)
     assert not (tmp_path / "app.old").exists() and not staged.exists()
 
@@ -334,20 +334,20 @@ def test_bad_frozen_update_keeps_running_install(tmp_path: Path, monkeypatch: py
     with pytest.raises(ValueError):
         install_frozen_zip(_frozen_zip({"_internal/x.dll": "no exe"}), app)
     with pytest.raises(ValueError):
-        install_frozen_zip(_frozen_zip({"../evil.dll": "x", "ByteSprite.exe": "new"}), app)
+        install_frozen_zip(_frozen_zip({"../evil.dll": "x", "Paperduck.exe": "new"}), app)
     assert not (tmp_path / "evil.dll").exists()
-    install_frozen_zip(_frozen_zip({"ByteSprite.exe": "new"}), app)
+    install_frozen_zip(_frozen_zip({"Paperduck.exe": "new"}), app)
 
     def locked(*_args: object, **_kwargs: object) -> None:
         raise PermissionError("antivirus")
 
     with pytest.raises(OSError, match="does not start"):
         finish_frozen_update(0, tmp_path / "app.new", starts=lambda _d: False)  # a copy that cannot load
-    assert (app / "ByteSprite.exe").read_text() == "old" and not (tmp_path / "app.old").exists()
+    assert (app / "Paperduck.exe").read_text() == "old" and not (tmp_path / "app.old").exists()
     monkeypatch.setattr(shutil, "copytree", locked)
     with pytest.raises(PermissionError):
         finish_frozen_update(0, tmp_path / "app.new", starts=lambda _d: True)
-    assert (app / "ByteSprite.exe").read_text() == "old" and not (tmp_path / "app.old").exists()
+    assert (app / "Paperduck.exe").read_text() == "old" and not (tmp_path / "app.old").exists()
 
 
 @pytest.mark.skipif(shutil.which("powershell.exe") is None, reason="needs Windows PowerShell")
@@ -392,7 +392,7 @@ def test_update_helper_tells_the_old_build_a_swap_failed(monkeypatch: pytest.Mon
     import subprocess
 
     monkeypatch.setattr(subprocess, "Popen", lambda argv, **_kw: started.append(argv))
-    assert main_mod._finish_update(["ByteSprite.exe", "--finish-update", "1"]) == 0
+    assert main_mod._finish_update(["Paperduck.exe", "--finish-update", "1"]) == 0
     assert (main_mod.UPDATE_FAILED_FLAG in started[0][1:]) is fails
 
 
@@ -428,15 +428,3 @@ def test_launch_env_drops_the_parent_qt_dll_folder(monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setenv("PATH", os.pathsep.join([r"C:\app.new\_internal\PyQt6\Qt6\bin", r"C:\Windows"]))
     assert updater.launch_env()["PATH"] == r"C:\Windows"
-
-
-def test_old_shortcut_is_renamed_only_when_it_points_into_this_install(tmp_path: Path) -> None:
-    root = tmp_path / "ByteSprite"
-    ours, other = tmp_path / "desktop", tmp_path / "programs"
-    ours.mkdir()
-    other.mkdir()
-    (ours / "ByteSprite.lnk").write_bytes(b"\x4c\0\0\0" + str(root / "app" / "ByteSprite.exe").encode("utf-16-le"))
-    (other / "ByteSprite.lnk").write_bytes(b"\x4c\0\0\0" + r"C:\dev\desktop_pet\x.exe".encode("utf-16-le"))
-    assert updater.rename_old_shortcuts([ours, other, tmp_path / "missing"], root) == 1
-    assert (ours / "Paperduck.lnk").is_file() and not (ours / "ByteSprite.lnk").exists()
-    assert (other / "ByteSprite.lnk").is_file()  # a dev checkout's shortcut is left alone

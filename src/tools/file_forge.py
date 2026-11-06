@@ -1,4 +1,4 @@
-"""Streaming zero-dependency File Converter and Compressor plugin for ByteSprite."""
+"""Streaming zero-dependency File Converter and Compressor plugin for Paperduck."""
 
 from __future__ import annotations
 
@@ -1505,7 +1505,7 @@ def process_paths_sync(
 
 
 class FileForgePlugin:
-    """Async streaming File Converter and Compressor plugin for ByteSprite."""
+    """Async streaming File Converter and Compressor plugin for Paperduck."""
 
     SUBMENU_NAME: str = "File Forge (Drop / Convert)"
 
@@ -1603,7 +1603,7 @@ class FileForgePlugin:
         if self._executor is None:
             self._executor = concurrent.futures.ThreadPoolExecutor(
                 max_workers=1,
-                thread_name_prefix="bytesprite-forge",
+                thread_name_prefix="paperduck-forge",
             )
         self._executor.submit(self._run_worker, clean, mode_snapshot)
         return True

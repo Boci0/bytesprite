@@ -1,4 +1,4 @@
-"""Atomic JSON state persistence and corruption recovery for ByteSprite."""
+"""Atomic JSON state persistence and corruption recovery for Paperduck."""
 
 from __future__ import annotations
 
@@ -18,13 +18,13 @@ from src.engine.models import PetState, PetStats
 logger = logging.getLogger(__name__)
 
 _RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-_RUN_VALUE = "ByteSprite"
+_RUN_VALUE = "Paperduck"
 _FROZEN = bool(getattr(sys, "frozen", False))
 _PROJECT_ROOT = Path(sys.executable).parent if _FROZEN else Path(__file__).resolve().parents[2]
 
 
 def log_path() -> Path:
-    return Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "ByteSprite" / "bytesprite.log"
+    return Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "Paperduck" / "paperduck.log"
 
 
 def log_text(max_chars: int = 100_000) -> str:
@@ -46,7 +46,7 @@ def autostart_command() -> str:
     updates replace src/ only: a root-level file never reached updated copies, so the Run value pointed at nothing.
     """
     if _FROZEN:
-        return f'"{sys.executable}"'  # ByteSprite.exe moves to its install root itself
+        return f'"{sys.executable}"'  # Paperduck.exe moves to its install root itself
     exe = Path(sys.executable)
     gui_exe = exe.with_name("pythonw.exe")
     launcher = gui_exe if gui_exe.exists() else exe
@@ -69,7 +69,7 @@ def autostart_enabled() -> bool:
 
 def stale_autostart(value: str, root: Path, command: str) -> bool:
     """A Run value for this copy (it names `root`) that differs from today's command: the old inline -c form, or
-    the root bytesprite.pyw that updated copies never received. Another copy's value is never this copy's to fix."""
+    the root paperduck.pyw that updated copies never received. Another copy's value is never this copy's to fix."""
     return str(root).lower() in value.lower() and value != command
 
 
@@ -143,13 +143,13 @@ def _parse_position(window_dict: Any) -> tuple[int, int] | None:
 
 
 class StorageManager:
-    """Persists and restores ByteSprite state at ~/.bytesprite/state.json."""
+    """Persists and restores Paperduck state at ~/.paperduck/state.json."""
 
     SCHEMA_VERSION: int = 2
 
     def __init__(self, state_path: Path | str | None = None) -> None:
         if state_path is None:
-            self._state_path = Path.home() / ".bytesprite" / "state.json"
+            self._state_path = Path.home() / ".paperduck" / "state.json"
         else:
             self._state_path = Path(state_path)
 

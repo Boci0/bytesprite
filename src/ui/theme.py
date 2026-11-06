@@ -1,8 +1,8 @@
-"""Paper-and-ink UI tokens shared by every ByteSprite surface, matched to the origami duck.
+"""Paper-and-ink UI tokens shared by every Paperduck surface, matched to the origami duck.
 
 Panels are folded paper: rounded corners, a hairline edge, a soft shadow and one dog-eared corner. The scheme
 follows the Windows app theme at startup unless Settings > Theme picks light or dark;
-`BYTESPRITE_THEME=light|dark` overrides both.
+`PAPERDUCK_THEME=light|dark` overrides both.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ RGBA = tuple[int, int, int, int]
 
 
 # Settings > Theme. A file of its own because every module copies these tokens at import, before state.json loads
-THEME_FILE = Path.home() / ".bytesprite" / "theme.txt"
+THEME_FILE = Path.home() / ".paperduck" / "theme.txt"
 THEME_CHOICES = {"system": "Match Windows", "light": "Light", "dark": "Dark"}
 
 
@@ -40,7 +40,7 @@ def save_theme(choice: str) -> None:
 
 
 def _system_is_light() -> bool:
-    forced = os.environ.get("BYTESPRITE_THEME", "").strip().lower() or saved_theme()
+    forced = os.environ.get("PAPERDUCK_THEME", "").strip().lower() or saved_theme()
     if forced in ("light", "dark"):
         return forced == "light"
     if sys.platform != "win32":

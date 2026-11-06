@@ -30,12 +30,12 @@ def test_launcher_finds_app_root_from_inside_src(tmp_path: Path) -> None:
 
 
 def test_stale_values_are_this_copys_only() -> None:
-    root = Path(r"C:\Users\me\AppData\Local\ByteSprite\app")
+    root = Path(r"C:\Users\me\AppData\Local\Paperduck\app")
     new = f'"C:\\py\\pythonw.exe" "{root}\\src\\autostart.pyw"'
     assert not stale_autostart(new, root, new)
-    assert stale_autostart(f'"C:\\py\\pythonw.exe" "{root}\\bytesprite.pyw"', root, new)  # never shipped by updates
+    assert stale_autostart(f'"C:\\py\\pythonw.exe" "{root}\\paperduck.pyw"', root, new)  # never shipped by updates
     assert stale_autostart(f'"C:\\py\\pythonw.exe" -c "import sys;sys.path.insert(0,r\'{root}\')..."', root, new)
-    other = r'"C:\py\pythonw.exe" "C:\Users\me\Downloads\desktop_pet\bytesprite.pyw"'
+    other = r'"C:\py\pythonw.exe" "C:\Users\me\Downloads\desktop_pet\paperduck.pyw"'
     assert not stale_autostart(other, root, new)  # a dev checkout never takes over the installed copy's value
 
 
@@ -56,7 +56,7 @@ def test_repair_rewrites_only_stale_values(monkeypatch) -> None:
 
     import winreg
 
-    current = f'"x" "{storage_manager._PROJECT_ROOT}\\bytesprite.pyw"'
+    current = f'"x" "{storage_manager._PROJECT_ROOT}\\paperduck.pyw"'
     monkeypatch.setattr(winreg, "OpenKey", lambda *_a: Key(current))
     monkeypatch.setattr(winreg, "QueryValueEx", lambda key, _name: (key.value, 1))
     assert storage_manager.repair_autostart() and writes == [True]

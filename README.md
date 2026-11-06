@@ -17,33 +17,30 @@ is drawn and animated in code.
 Per-user, no admin rights. In PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/Boci0/bytesprite/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/Boci0/paperduck/main/install.ps1 | iex
 ```
 
-It downloads the latest signed release (a standalone `ByteSprite.exe` build, no Python needed) and
+It downloads the latest signed release (a standalone `Paperduck.exe` build, no Python needed) and
 refuses to install it unless the signature checks out. Re-running it over an older install replaces it.
 
 Or from a clone, which installs from source into a private Python 3.11+ environment:
 
 ```powershell
-git clone https://github.com/Boci0/bytesprite.git
-cd bytesprite
+git clone https://github.com/Boci0/paperduck.git
+cd paperduck
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -DesktopShortcut
 ```
 
 Options: `-DesktopShortcut`, `-StartWithWindows`, `-NoLaunch`. A clone install needs Python; if it is
 missing: `winget install Python.Python.3.12`.
 
-Paperduck used to be called ByteSprite; its folders and program file keep that name, so existing settings
-and updates carry on.
-
 | Location | Contents |
 | :--- | :--- |
-| `%LOCALAPPDATA%\ByteSprite\app` | Program files (`ByteSprite.exe` and `_internal`, or `src` and `assets` for a clone install, plus `uninstall.ps1`) |
-| `%LOCALAPPDATA%\ByteSprite\venv` | Private Python environment (clone installs only) |
-| `%USERPROFILE%\.bytesprite` | Settings and state (kept on update and uninstall) |
-| `Downloads\ByteSprite` | Images dropped from a browser |
-| `Pictures\ByteSprite` | Screen snips |
+| `%LOCALAPPDATA%\Paperduck\app` | Program files (`Paperduck.exe` and `_internal`, or `src` and `assets` for a clone install, plus `uninstall.ps1`) |
+| `%LOCALAPPDATA%\Paperduck\venv` | Private Python environment (clone installs only) |
+| `%USERPROFILE%\.paperduck` | Settings and state (kept on update and uninstall) |
+| `Downloads\Paperduck` | Images dropped from a browser |
+| `Pictures\Paperduck` | Screen snips |
 
 The installer adds a Start Menu shortcut and an entry in **Settings > Apps**, which runs the uninstaller.
 Launch it from the Start Menu (search "Paperduck"), or re-run the installer with `-DesktopShortcut` for a
@@ -64,7 +61,7 @@ release page there; `git pull` instead.
 **Settings > Apps > Paperduck > Uninstall**, or:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\ByteSprite\app\uninstall.ps1" -Purge
+powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Paperduck\app\uninstall.ps1" -Purge
 ```
 
 `-Purge` also deletes your settings.
@@ -130,9 +127,9 @@ python -m venv .venv
 1. Bump `__version__` in `src/__init__.py` (the single version source) and commit.
 2. Build, sign and publish with Python 3.12 (the standalone build bundles the Python that runs the
    script): `python scripts/release.py publish vX.Y.Z`. It refuses a dirty tree, builds
-   `dist/bytesprite.zip` (source) with `git archive` and `dist/bytesprite-win64.zip` (PyInstaller, from
-   `bytesprite.spec` in a fresh venv with the hash-pinned `requirements-build.txt`, launched once as a
-   smoke test), signs both with the key at `~/.bytesprite-signing/release_ed25519.key`, tags `HEAD`,
+   `dist/paperduck.zip` (source) with `git archive` and `dist/paperduck-win64.zip` (PyInstaller, from
+   `paperduck.spec` in a fresh venv with the hash-pinned `requirements-build.txt`, launched once as a
+   smoke test), signs both with the key at `~/.paperduck-signing/release_ed25519.key`, tags `HEAD`,
    pushes the branch and tag, and runs `gh release create --verify-tag` with both zips and their `.sig`
    files. A release without them cannot be installed by the updater.
 

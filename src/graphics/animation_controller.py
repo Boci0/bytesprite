@@ -1,4 +1,4 @@
-"""Frame timing and animation state playback controller for ByteSprite."""
+"""Frame timing and animation state playback controller for Paperduck."""
 
 from __future__ import annotations
 

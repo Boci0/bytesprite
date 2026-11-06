@@ -261,7 +261,7 @@ def ocr_image_file(png_path: Path, timeout_s: float = 30.0, boxes: bool = False)
 # Prints nothing when the folder already has an Explorer window; otherwise opens a hidden
 # ShellBrowserWindow (plain ShellExecute ignores SW_SHOWNOACTIVATE and steals focus) and prints its HWND
 _OPEN_FOLDER_PS = r"""
-$target = $env:BYTESPRITE_FOLDER.TrimEnd('')
+$target = $env:PAPERDUCK_FOLDER.TrimEnd('')
 $shell = New-Object -ComObject Shell.Application
 foreach ($w in $shell.Windows()) {
     try { if ($w.Document.Folder.Self.Path.TrimEnd('') -eq $target) { exit } } catch {}
@@ -284,7 +284,7 @@ def _open_folder_worker(folder: Path) -> None:
         proc = subprocess.run(
             ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", _OPEN_FOLDER_PS],
             capture_output=True, timeout=20, text=True,
-            env={**os.environ, "BYTESPRITE_FOLDER": str(folder)},  # env var: no quoting of odd names
+            env={**os.environ, "PAPERDUCK_FOLDER": str(folder)},  # env var: no quoting of odd names
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         hwnd = int(proc.stdout.strip() or 0)
@@ -314,7 +314,7 @@ class OcrJob(QObject):
                 image.width() * 2, image.height() * 2,
                 Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation,
             )
-        tmp_dir = Path(tempfile.mkdtemp(prefix="bytesprite_ocr_"))
+        tmp_dir = Path(tempfile.mkdtemp(prefix="paperduck_ocr_"))
         png = tmp_dir / "snip.png"
         image.save(str(png), "PNG")
         threading.Thread(target=self._run, args=(png,), daemon=True).start()

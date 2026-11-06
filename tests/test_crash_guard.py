@@ -19,7 +19,7 @@ import src.main as main_mod
 def test_error_in_a_slot_is_logged_and_the_app_keeps_running(tmp_path, monkeypatch: pytest.MonkeyPatch,
                                                              caplog: pytest.LogCaptureFixture) -> None:
     app = QApplication.instance() or QApplication([])
-    monkeypatch.setattr(main_mod, "log_path", lambda: tmp_path / "bytesprite.log")
+    monkeypatch.setattr(main_mod, "log_path", lambda: tmp_path / "paperduck.log")
     monkeypatch.setattr(main_mod, "_crash_file", None)
     monkeypatch.setattr(main_mod, "MAX_LOGGED_ERRORS", 2)
     monkeypatch.setattr(sys, "excepthook", sys.excepthook)  # restored after the test

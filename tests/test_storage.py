@@ -14,12 +14,12 @@ from src.storage.storage_manager import PetSaveData, StorageManager
 
 
 class TestStorageManager:
-    def test_default_path_points_to_home_bytesprite_state_json(self) -> None:
+    def test_default_path_points_to_home_paperduck_state_json(self) -> None:
         manager = StorageManager()
-        assert manager.state_path == Path.home() / ".bytesprite" / "state.json"
+        assert manager.state_path == Path.home() / ".paperduck" / "state.json"
 
     def test_load_missing_file_returns_defaults(self, tmp_path: Path) -> None:
-        state_file = tmp_path / ".bytesprite" / "state.json"
+        state_file = tmp_path / ".paperduck" / "state.json"
         manager = StorageManager(state_file)
         loaded = manager.load()
         assert isinstance(loaded, PetSaveData)

@@ -1,4 +1,4 @@
-"""Frameless translucent floating desktop window for ByteSprite."""
+"""Frameless translucent floating desktop window for Paperduck."""
 
 from __future__ import annotations
 
@@ -256,7 +256,7 @@ KEYEVENTF_KEYUP = 0x0002
 
 
 class PetWindow(QWidget):
-    """Borderless translucent desktop widget rendering ByteSprite and hover HUD."""
+    """Borderless translucent desktop widget rendering Paperduck and hover HUD."""
 
     WINDOW_WIDTH: int = 176
     WINDOW_HEIGHT: int = 222
@@ -299,7 +299,7 @@ class PetWindow(QWidget):
         self._on_quit_requested = on_quit_requested
         self._on_notification = on_notification
 
-        self.pet_scale = self.DEFAULT_PET_SCALE  # Settings > Pet Size; persisted by ByteSpriteApp
+        self.pet_scale = self.DEFAULT_PET_SCALE  # Settings > Pet Size; persisted by PaperduckApp
         self._layout_sprite()
         self._hud_rect = QRect(8, 4, self.WINDOW_WIDTH - 16, 72)
 
@@ -393,9 +393,9 @@ class PetWindow(QWidget):
         # Offline context hints (Hints tool): a clickable card over the sprite, polled every 3s
         self._hint: Suggestion | None = None
         self._hint_until: float = 0.0
-        self.hotkeys: dict[str, str] = {}  # mode -> combo text overriding a default; persisted by ByteSpriteApp
-        self.on_hotkeys_changed: Callable[[], None] | None = None  # set by ByteSpriteApp: re-register them
-        self.tips_seen: int = 0  # persisted by ByteSpriteApp; a tip counts as seen once shown
+        self.hotkeys: dict[str, str] = {}  # mode -> combo text overriding a default; persisted by PaperduckApp
+        self.on_hotkeys_changed: Callable[[], None] | None = None  # set by PaperduckApp: re-register them
+        self.tips_seen: int = 0  # persisted by PaperduckApp; a tip counts as seen once shown
         self._tip_due: float = time.monotonic() + self.TIP_FIRST_S
         self._hint_rect = QRect(8, 4, self.WINDOW_WIDTH - 16, 40)
         self._hint_timer = QTimer(self)
@@ -1163,7 +1163,7 @@ class PetWindow(QWidget):
     @staticmethod
     def _web_drop_dir() -> Path:
         downloads = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DownloadLocation)
-        for out_dir in (Path(downloads) / "ByteSprite" if downloads else None, Path.home() / ".bytesprite" / "drops"):
+        for out_dir in (Path(downloads) / "Paperduck" if downloads else None, Path.home() / ".paperduck" / "drops"):
             if out_dir is None:
                 continue
             try:
@@ -1171,7 +1171,7 @@ class PetWindow(QWidget):
                 return out_dir
             except OSError:
                 continue
-        return Path.home() / ".bytesprite" / "drops"
+        return Path.home() / ".paperduck" / "drops"
 
     def check_for_updates(self, *, install: bool = True) -> None:
         """Ask GitHub for a newer release; `install` also applies it (installed copies only)."""
@@ -1306,7 +1306,7 @@ class PetWindow(QWidget):
     @staticmethod
     def snips_dir() -> Path:
         pictures = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.PicturesLocation)
-        return Path(pictures) / "ByteSprite" if pictures else Path.home() / ".bytesprite" / "snips"
+        return Path(pictures) / "Paperduck" if pictures else Path.home() / ".paperduck" / "snips"
 
     def _spawn_drop_wheel(
         self,
@@ -1481,7 +1481,7 @@ class PetWindow(QWidget):
             return
         if mode == "ask" and self._ai_chat is not None:
             self._ai_chat.hide()  # keep the bar out of the frozen grab
-        # Hide ByteSprite and let the context menu fade so neither lands in the frozen grab
+        # Hide Paperduck and let the context menu fade so neither lands in the frozen grab
         self.hide()
         QTimer.singleShot(180, lambda: self._begin_snip(mode))
 
@@ -1529,11 +1529,11 @@ class PetWindow(QWidget):
 
     @staticmethod
     def _save_snip_png(image: QImage) -> Path | None:
-        """Save to Pictures/ByteSprite, else ~/.bytesprite/snips; never raise into Qt handlers."""
+        """Save to Pictures/Paperduck, else ~/.paperduck/snips; never raise into Qt handlers."""
         pictures = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.PicturesLocation)
         stamp = QDateTime.currentDateTime().toString("yyyyMMdd_HHmmss_zzz")
         # OneDrive-redirected or Controlled Folder Access Pictures dirs can refuse writes
-        for out_dir in (Path(pictures) / "ByteSprite" if pictures else None, Path.home() / ".bytesprite" / "snips"):
+        for out_dir in (Path(pictures) / "Paperduck" if pictures else None, Path.home() / ".paperduck" / "snips"):
             if out_dir is None:
                 continue
             try:

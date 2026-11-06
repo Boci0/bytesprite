@@ -1,4 +1,4 @@
-"""ByteSprite's companion: an origami rubber duck, drawn as smooth vector paper and animated as a rig.
+"""Paperduck's companion: an origami rubber duck, drawn as smooth vector paper and animated as a rig.
 
 Every frame is a `Pose` of jointed parts (body lean and squash, head on its neck, beak jaws, wing, tail, two
 feet, eye shape, a few sparing effects). Clips are keyframes tweened into poses; `render_pose` paints one at any

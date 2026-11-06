@@ -158,7 +158,7 @@ def _bundle(files: dict[str, str]) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
         for name, text in files.items():
-            zf.writestr(f"bytesprite/{name}", text)
+            zf.writestr(f"paperduck/{name}", text)
     return buf.getvalue()
 
 

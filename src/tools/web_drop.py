@@ -90,7 +90,7 @@ def fetch_image_bytes(
     else:
         if urllib.parse.urlsplit(url).scheme.lower() not in WEB_SCHEMES:
             raise ValueError("only http and https")
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 ByteSprite"})
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 Paperduck"})
         with opener(req, timeout=FETCH_TIMEOUT_S) as resp:  # type: ignore[operator]
             # Redirects may not leave http(s) (file:, ftp:, ...)
             if urllib.parse.urlsplit(resp.geturl()).scheme.lower() not in WEB_SCHEMES:

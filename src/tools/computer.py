@@ -327,7 +327,7 @@ def ui_elements(hwnd: int, timeout_s: float = 25.0) -> str:
 
     if not hwnd:
         return ""
-    with tempfile.TemporaryDirectory(prefix="bytesprite_uia_") as tmp:
+    with tempfile.TemporaryDirectory(prefix="paperduck_uia_") as tmp:
         script = Path(tmp) / "uia.ps1"
         script.write_text(_UIA_PS, encoding="utf-8")
         try:

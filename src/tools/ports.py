@@ -109,7 +109,7 @@ def list_listening_ports() -> list[PortEntry]:
 
 
 def can_kill(pid: int) -> bool:
-    """Refuse System Idle (0), System (4) and ByteSprite itself."""
+    """Refuse System Idle (0), System (4) and Paperduck itself."""
     return pid > 4 and pid != os.getpid()
 
 

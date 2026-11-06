@@ -1,4 +1,4 @@
-"""Saved AI chat sessions: one JSON file per conversation under %LOCALAPPDATA%\\ByteSprite\\sessions.
+"""Saved AI chat sessions: one JSON file per conversation under %LOCALAPPDATA%\\Paperduck\\sessions.
 
 Only text is stored: turns (role, content, tool notes) and the task list. Attachment image bytes are never
 written, text that looks like an API key is blanked, and keys themselves live in Credential Manager, not here.

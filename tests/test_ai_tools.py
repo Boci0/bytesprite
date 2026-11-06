@@ -387,7 +387,7 @@ def test_host_asks_before_installing_mcp_servers_and_skills(monkeypatch: pytest.
         results.append(str(load_config(hub.path)))
         results.append(host.run("add_mcp_server", add))
         results.append(host.run("add_mcp_server", {"name": "a__b", "command": "x", "args": []}))
-        results.append(host.run("add_mcp_server", {"name": "gone", "command": "no-such-command-bytesprite"}))
+        results.append(host.run("add_mcp_server", {"name": "gone", "command": "no-such-command-paperduck"}))
         results.append(host.run("add_skill", {"name": "tidy", "description": "d", "instructions": "Sort imports."}))
 
     thread = threading.Thread(target=worker)
@@ -584,7 +584,7 @@ def test_destructive_reason_flags_deletes_but_not_reads() -> None:
     for bad in ("del /s /q *.py", "rm -rf build", "Remove-Item x -Recurse", "git reset --hard HEAD~1",
                 "git push --force origin main", "rd /s /q C:/x", "reg delete HKCU/x"):
         assert destructive_reason(bad), bad
-    for ok in ('dir /a /b "%USERPROFILE%/.bytesprite" 2>nul', "git status", "pytest -q", "type model.txt",
+    for ok in ('dir /a /b "%USERPROFILE%/.paperduck" 2>nul', "git status", "pytest -q", "type model.txt",
                "git log --format=%H"):
         assert not destructive_reason(ok), ok
 

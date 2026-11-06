@@ -1,4 +1,4 @@
-"""Most-recent-first list of files ByteSprite produced (snips, web drops, File Forge outputs)."""
+"""Most-recent-first list of files Paperduck produced (snips, web drops, File Forge outputs)."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Lightweight extensible plugin contract and registry for ByteSprite multi-tools."""
+"""Lightweight extensible plugin contract and registry for Paperduck multi-tools."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from src.engine.models import CompanionState, HudData, ToolMenuItem
 
 @runtime_checkable
 class ToolPlugin(Protocol):
-    """Protocol implemented by all ByteSprite utility tools."""
+    """Protocol implemented by all Paperduck utility tools."""
 
     @property
     def tool_id(self) -> str:

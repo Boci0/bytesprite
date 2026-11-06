@@ -893,7 +893,7 @@ class BackgroundProcs:
 
 
 # ---------------------------------------------------------------------- skills
-# A skill is %LOCALAPPDATA%/ByteSprite/skills/<name>/SKILL.md: frontmatter (name, description), then instructions.
+# A skill is %LOCALAPPDATA%/Paperduck/skills/<name>/SKILL.md: frontmatter (name, description), then instructions.
 # Only names and descriptions go in the system prompt; load_skill returns a body on demand.
 MAX_SKILLS = 30
 MAX_SKILL_DESC = 200
@@ -904,7 +904,7 @@ _SKILL_NAME = re.compile(r"^[\w.-]{1,64}$")
 def scratch_dir() -> Path:
     """The AI's own folder for helper scripts, screenshots and drafts, so they stay out of the app's data folder
     (where they piled up and broke paths: Playwright refuses files outside its working folder)."""
-    path = Path(tempfile.gettempdir()) / "ByteSprite" / "work"
+    path = Path(tempfile.gettempdir()) / "Paperduck" / "work"
     try:
         path.mkdir(parents=True, exist_ok=True)
     except OSError:
@@ -913,7 +913,7 @@ def scratch_dir() -> Path:
 
 
 def skills_dir() -> Path:
-    return Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "ByteSprite" / "skills"
+    return Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "Paperduck" / "skills"
 
 
 def parse_skill(text: str) -> tuple[dict[str, str], str]:

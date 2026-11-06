@@ -24,7 +24,7 @@ from src.ui.pet_window import PetWindow, build_app_icon
 from src.ui.quick_tools import GlobalHotkeys
 from src.ui.theme import APP_STYLESHEET
 from src.updater import (APP_DIR, FROZEN, FROZEN_EXE, launch_env, finish_frozen_update, is_installed,
-                         remove_old_build, rename_old_shortcuts, shortcut_dirs)
+                         remove_old_build)
 
 # Stored beside plugin state in state.json "tools"; not a ToolPlugin, so it never joins the HUD cycle
 RECENT_FILES_KEY = "recent"
@@ -39,7 +39,7 @@ SIMULATION_TICK_INTERVAL_MS: int = 2_000
 AUTO_SAVE_INTERVAL_MS: int = 60_000
 
 
-class ByteSpriteApp:
+class PaperduckApp:
     """Application controller coordinating multi-tool engine, floating window, tray, and storage."""
 
     def __init__(
@@ -138,7 +138,6 @@ class ByteSpriteApp:
             self.window.on_hotkeys_changed = self._start_hotkeys
             repair_autostart()  # copies updated in place may hold a Run value for a launcher they never received
             if is_installed():
-                rename_old_shortcuts(shortcut_dirs(), APP_DIR.parent)  # in-place updates never reach the shortcuts
                 # One quiet check per launch; installing waits for Settings > Check for Updates
                 QTimer.singleShot(20_000, lambda: self.window.check_for_updates(install=False))
 
@@ -314,7 +313,7 @@ def install_crash_guard(on_error: Callable[[], None] | None = None) -> Callable[
 
 
 def _finish_update(args: list[str]) -> int:
-    """`app.new/ByteSprite.exe --finish-update <pid>`: swap the staged build in, then start it."""
+    """`app.new/Paperduck.exe --finish-update <pid>`: swap the staged build in, then start it."""
     import subprocess
 
     os.chdir(APP_DIR.parent)
@@ -337,7 +336,7 @@ def _finish_update(args: list[str]) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Launch ByteSprite on the Windows desktop."""
+    """Launch Paperduck on the Windows desktop."""
     if argv is None:
         _detach_console_if_present()
     raw_args = argv if argv is not None else sys.argv
@@ -363,7 +362,7 @@ def main(argv: list[str] | None = None) -> int:
         if idx + 1 < len(args):
             storage_override = StorageManager(Path(args[idx + 1]))
 
-    controller = ByteSpriteApp(app=app, storage=storage_override)
+    controller = PaperduckApp(app=app, storage=storage_override)
     install_crash_guard(lambda: (controller.window._react("#E05A47"),
                                  controller.window._show_toast("OOPS", QColor("#E05A47"))))
 

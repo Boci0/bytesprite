@@ -16,7 +16,7 @@ HISTORY = [{"role": "user", "content": "fix the bug\n\n[File: a.py]\nprint(1)", 
 
 
 def test_sessions_live_under_localappdata_and_roundtrip(tmp_path: Path) -> None:
-    assert sessions_dir().parts[-2:] == ("ByteSprite", "sessions")
+    assert sessions_dir().parts[-2:] == ("Paperduck", "sessions")
     sid = new_id()
     assert save_session(sid, HISTORY, [("a", "done"), ("b", "pending")], created=5.0)
     session = load_session(sid)
@@ -162,7 +162,7 @@ def test_resume_shows_compaction_and_attachments_cleanly() -> None:
 def test_chat_saved_before_the_rename_still_shows_its_summary() -> None:
     from src.tools.ai_sessions import new_id, save_session
     sid = new_id()
-    save_session(sid, [{"role": "user", "content": "[Earlier conversation, compacted by ByteSprite into this summary:]\nold"},
+    save_session(sid, [{"role": "user", "content": "[Earlier conversation, compacted by Paperduck into this summary:]\nold"},
                        {"role": "assistant", "content": "Noted. Continuing from that summary."},
                        {"role": "user", "content": "next"}, {"role": "assistant", "content": "ok"}])
     chat = _chat()
@@ -171,6 +171,6 @@ def test_chat_saved_before_the_rename_still_shows_its_summary() -> None:
         from src.ui.ai_chat import ChatText
         rows = [chat._thread_layout.itemAt(i).widget() for i in range(chat._thread_layout.count())]
         shown = " | ".join(w.toPlainText() for row in rows for w in row.findChildren(ChatText))
-        assert "compacted into a summary" in shown and "compacted by ByteSprite" not in shown
+        assert "compacted into a summary" in shown and "compacted by Paperduck" not in shown
     finally:
         chat.close()

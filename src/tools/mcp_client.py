@@ -1,4 +1,4 @@
-"""MCP client for local stdio servers the user lists in %LOCALAPPDATA%\\ByteSprite\\mcp.json.
+"""MCP client for local stdio servers the user lists in %LOCALAPPDATA%\\Paperduck\\mcp.json.
 
 The file uses the common shape {"mcpServers": {"name": {"command": ..., "args": [...], "env": {...}}}}.
 Servers start only when the AI chat first offers tools to a model, and stop on quit. Each one speaks
@@ -33,7 +33,7 @@ from src.tools.ai_tools import scratch_dir
 
 logger = logging.getLogger(__name__)
 
-CONFIG_PATH = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "ByteSprite" / "mcp.json"
+CONFIG_PATH = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "Paperduck" / "mcp.json"
 CONFIG_TEMPLATE = '{\n  "mcpServers": {\n  }\n}\n'
 REGISTRY_URL = "https://registry.modelcontextprotocol.io/v0/servers"
 MAX_REGISTRY_RESULTS = 8
@@ -185,7 +185,7 @@ class McpServer:
     def start(self) -> list[dict[str, Any]]:
         """Handshake and list tools; returns their function specs."""
         self.request("initialize", {"protocolVersion": PROTOCOL_VERSION, "capabilities": {},
-                                    "clientInfo": {"name": "ByteSprite", "version": "1"}}, START_TIMEOUT_S)
+                                    "clientInfo": {"name": "Paperduck", "version": "1"}}, START_TIMEOUT_S)
         self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
         listed = self.request("tools/list", {}, START_TIMEOUT_S)
         tools = [t for t in (listed or {}).get("tools") or [] if isinstance(t, dict) and isinstance(t.get("name"), str)]
@@ -335,7 +335,7 @@ def registry_text(data: Any) -> str:
 
 
 def _get_json(url: str) -> Any:
-    with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "ByteSprite"}), timeout=20) as r:
+    with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "Paperduck"}), timeout=20) as r:
         return json.loads(r.read(2_000_000).decode("utf-8", "replace"))
 
 

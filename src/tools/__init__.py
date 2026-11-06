@@ -1,4 +1,4 @@
-"""Modular multi-tool plugin package for ByteSprite."""
+"""Modular multi-tool plugin package for Paperduck."""
 
 from src.tools.base import ToolPlugin, ToolRegistry
 from src.tools.clip_vault import ClipEntry, ClipVaultPlugin

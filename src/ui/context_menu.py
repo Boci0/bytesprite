@@ -1,4 +1,4 @@
-"""Folded-paper right-click context menu for ByteSprite Multi-Tool."""
+"""Folded-paper right-click context menu for Paperduck Multi-Tool."""
 
 from __future__ import annotations
 

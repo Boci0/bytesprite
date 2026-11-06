@@ -13,7 +13,7 @@ from PyQt6.QtCore import QPoint, QRect
 from PyQt6.QtGui import QColor, QImage, QPixmap
 from PyQt6.QtWidgets import QApplication
 
-from src.main import ByteSpriteApp
+from src.main import PaperduckApp
 from src.storage.storage_manager import StorageManager
 from src.ui.context_menu import QUICK_TOOL_ITEMS
 from src.ui.quick_tools import (
@@ -48,7 +48,7 @@ def test_snip_overlay_crops_in_device_pixels_and_reads_colors(qapp: QApplication
 
 
 def test_context_menu_exposes_quick_tools(qapp: QApplication, tmp_path: Path) -> None:
-    controller = ByteSpriteApp(
+    controller = PaperduckApp(
         app=qapp, storage=StorageManager(tmp_path / "s.json"), enable_tray=False
     )
     try:
@@ -95,12 +95,12 @@ def test_snip_save_falls_back_when_pictures_dir_refuses_writes(
     img = QImage(8, 8, QImage.Format.Format_RGB32)
     img.fill(QColor("#102030"))
     saved = pet_window.PetWindow._save_snip_png(img)
-    assert saved is not None and saved.parent == tmp_path / "home" / ".bytesprite" / "snips"
+    assert saved is not None and saved.parent == tmp_path / "home" / ".paperduck" / "snips"
     assert saved.exists()
 
 
 def test_submenu_titles_render_literal_ampersand(qapp: QApplication, tmp_path: Path) -> None:
-    controller = ByteSpriteApp(
+    controller = PaperduckApp(
         app=qapp, storage=StorageManager(tmp_path / "s.json"), enable_tray=False
     )
     try:
@@ -116,7 +116,7 @@ def test_submenu_titles_render_literal_ampersand(qapp: QApplication, tmp_path: P
 
 def test_closing_a_dialog_does_not_quit_the_app(qapp: QApplication, tmp_path: Path) -> None:
     # Pet windows are Qt.Tool, so Qt would treat a closed file dialog as the last window
-    controller = ByteSpriteApp(
+    controller = PaperduckApp(
         app=qapp, storage=StorageManager(tmp_path / "s.json"), enable_tray=False
     )
     try:

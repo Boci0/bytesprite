@@ -1,4 +1,4 @@
-"""Core data models, HUD specifications, and utility state enumerations for ByteSprite."""
+"""Core data models, HUD specifications, and utility state enumerations for Paperduck."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from typing import Any
 
 
 class CompanionState(str, Enum):
-    """Discrete utility and operational states for ByteSprite."""
+    """Discrete utility and operational states for Paperduck."""
 
     IDLE = "idle"
     SLEEPING = "sleeping"
@@ -117,7 +117,7 @@ def _sanitize_timestamp(value: Any) -> float:
 
 @dataclass
 class PetStats:
-    """Mutable utility and telemetry snapshot for ByteSprite."""
+    """Mutable utility and telemetry snapshot for Paperduck."""
 
     cpu_usage: float = 0.0
     ram_usage: float = 0.0

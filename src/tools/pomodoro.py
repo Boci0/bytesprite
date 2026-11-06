@@ -1,4 +1,4 @@
-"""Pomodoro Focus Timer tool plugin for ByteSprite."""
+"""Pomodoro Focus Timer tool plugin for Paperduck."""
 
 from __future__ import annotations
 

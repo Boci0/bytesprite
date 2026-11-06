@@ -241,7 +241,7 @@ def test_ask_maps_broken_http_replies_to_network(api: str) -> None:
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows Credential Manager")
 def test_key_round_trips_through_credential_manager() -> None:
-    url = "https://bytesprite-test.invalid/v1"
+    url = "https://paperduck-test.invalid/v1"
     try:
         assert ai_assist.save_key(url, KEY)
         assert ai_assist.load_key(url) == KEY

@@ -502,7 +502,7 @@ class AiToolHost(QObject):
 
     @staticmethod
     def _ocr(image: QImage, boxes: bool = False) -> str:
-        tmp = Path(tempfile.mkdtemp(prefix="bytesprite_ocr_"))
+        tmp = Path(tempfile.mkdtemp(prefix="paperduck_ocr_"))
         png = tmp / "screen.png"
         try:
             image.save(str(png), "PNG")
