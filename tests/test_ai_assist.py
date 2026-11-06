@@ -1078,3 +1078,63 @@ def test_steering_typed_too_late_is_sent_next(monkeypatch: pytest.MonkeyPatch, a
         assert [h["content"] for h in chat._history] == ["job", "done", "one more thing", "done"]
     finally:
         chat.close()
+
+
+def test_timeout_retried_once_and_patient_jobs_wait_longer(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ai_assist, "RETRY_DELAYS", (0.0, 0.0, 0.0))
+    monkeypatch.setattr(ai_assist, "PATIENT_DELAYS", (0.0, 0.0))
+    monkeypatch.setattr(ai_assist.time, "sleep", lambda _s: None)
+    calls: list[object] = []
+    monkeypatch.setattr(ai_assist, "_request_once", lambda *a: calls.append(a) or (_ for _ in ()).throw(ai_assist._Timeout("network")))
+    with pytest.raises(ValueError, match="network"):
+        ai_assist._request("https://api.example/v1", "k", "/x", {}, 5, patient=True)
+    assert len(calls) == 2  # a hung link gets one more try, never more: each try waited the whole timeout
+    calls.clear()
+    monkeypatch.setattr(ai_assist, "_request_once", lambda *a: calls.append(a) or (_ for _ in ()).throw(ai_assist._Transient("network")))
+    with pytest.raises(ValueError, match="network") as caught:
+        ai_assist._request("https://api.example/v1", "k", "/x", {}, 5, patient=True)
+    assert len(calls) == 6 and type(caught.value) is ValueError  # 1 + 3 retries + 2 patient ones
+
+
+def test_cache_hits_cost_screenshot_batches_and_deepseek_balance(monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.ui.ai_chat import reply_details
+    sent: list[list[dict]] = []
+    rounds = iter(range(6))
+
+    def fake(base_url, key, path, body, timeout, progress=None, patient=False):  # noqa: ANN001
+        if path == "/user/balance":
+            return {"is_available": True, "balance_infos": [{"currency": "USD", "total_balance": "4.20"}]}
+        sent.append([dict(m) for m in body["messages"]])
+        n = next(rounds)
+        usage = {"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110,
+                 "prompt_cache_hit_tokens": 80, "cost": 0.001}
+        if n < 5:
+            return {"usage": usage, "choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+                {"id": f"c{n}", "function": {"name": "screen_map", "arguments": "{}"}}]}}]}
+        return {"usage": usage, "choices": [{"message": {"content": "done"}}]}
+
+    class Host:
+        specs = [{"type": "function", "function": {"name": "screen_map", "description": "", "parameters": {}}}]
+
+        def run(self, name: str, args: dict) -> str:
+            return "Screen 10x10."
+
+        def take_image(self) -> str:
+            return "data:image/png;base64,AAAA"
+
+    monkeypatch.setattr(ai_assist, "_request", fake)
+    reply = ask("https://api.example/v1", KEY, "m-batch", T, host=Host(), web=False)
+    assert reply.cached_tokens == 480 and abs(reply.cost - 0.006) < 1e-9
+    line = reply_details(reply, "m-batch", "off")
+    assert "600 in (80% cached)" in line and "$0.0060" in line
+
+    def shots(messages: list[dict]) -> int:
+        return sum(1 for m in messages if isinstance(m.get("content"), list))
+    # screenshots pile up to KEEP_SHOTS, then the old ones go in one batch, so earlier rounds stay a cache prefix
+    assert [shots(m) for m in sent] == [0, 1, 2, 3, 1, 2]
+    assert sent[3][:len(sent[2])] == sent[2]  # nothing earlier was rewritten between batches
+
+    assert ai_assist.deepseek_balance(KEY) == ("USD", 4.2)
+    monkeypatch.setattr(ai_assist, "_request", lambda *a, **k: {"balance_infos": [{"currency": "<b>", "total_balance": "1"}]})
+    with pytest.raises(ValueError, match="bad reply"):
+        ai_assist.deepseek_balance(KEY)

@@ -93,6 +93,8 @@ MAX_ANSWER_TOKENS = 3_000_000  # billable tokens (cached prompt counts a tenth) 
 OVER_NOTE = ("\n\n[ByteSprite: this answer has used its token budget, so tools are off now. Say what is done and "
              "what is left; the user can send another message to continue.]")
 RETRY_DELAYS = (1.0, 3.0, 8.0)  # waits before each retry of a call that hit a rate limit, a 5xx or a dropped connection
+PATIENT_DELAYS = (20.0, 45.0)  # extra waits once tools have run: failing then throws away a long job's progress
+DEEPSEEK_SILENCE_S = 90.0  # DeepSeek streams reasoning and sends keep-alives, so this much silence is a dead link
 MAX_RETRY_AFTER_S = 30.0  # a Retry-After header longer than this is cut to it
 _RETRY_CODES = {429, 500, 502, 503, 504, 529}
 STEER_STOP = 6  # in a row: the model ignored the note, so tools go off for the rest of the answer
@@ -208,6 +210,8 @@ class AiReply:
     completion_tokens: int = 0  # answer plus reasoning
     reasoning_tokens: int = 0
     total_tokens: int = 0
+    cached_tokens: int = 0  # part of prompt_tokens the provider served from its prompt cache (billed far lower)
+    cost: float = 0.0  # what the provider says the answer cost (OpenRouter's usage.cost); 0 when it does not say
     cut_off: bool = False  # hit max_tokens
     compacted: int = 0  # oldest history turns replaced by `summary` before this answer (auto-compact)
     summary: str = ""
@@ -502,17 +506,26 @@ def _retry_after(headers: Any) -> float | None:
         return None
 
 
+class _Timeout(_Transient):
+    """The link went silent for the whole timeout: tried once more (a hung connection), never more, since each
+    try already cost the full wait."""
+
+
 def _request(base_url: str, key: str, path: str, body: dict[str, Any] | None, timeout: float,
-             progress: Callable[[str], None] | None = None) -> Any:
-    """`_request_once` with up to len(RETRY_DELAYS) more tries when the failure is transient."""
-    for attempt in range(len(RETRY_DELAYS) + 1):
+             progress: Callable[[str], None] | None = None, patient: bool = False) -> Any:
+    """`_request_once` with up to len(RETRY_DELAYS) more tries when the failure is transient, plus
+    PATIENT_DELAYS when `patient` (tools already ran, so giving up loses the job's progress)."""
+    delays = RETRY_DELAYS + (PATIENT_DELAYS if patient else ())
+    timed_out = False
+    for attempt in range(len(delays) + 1):
         try:
             return _request_once(base_url, key, path, body, timeout, progress)
         except _Transient as exc:
-            if attempt == len(RETRY_DELAYS):
+            if attempt == len(delays) or (timed_out and isinstance(exc, _Timeout)):
                 logger.warning("request %s failed after %d tries: %s", path.split("?")[0], attempt + 1, exc)
-                raise
-            delay = exc.wait if exc.wait is not None else RETRY_DELAYS[attempt] * random.uniform(1.0, 1.25)  # jitter
+                raise ValueError(str(exc)) from None
+            timed_out = timed_out or isinstance(exc, _Timeout)
+            delay = exc.wait if exc.wait is not None else delays[attempt] * random.uniform(1.0, 1.25)  # jitter
             logger.info("request %s: %s, retrying in %.0f s", path.split("?")[0], exc, delay)
             time.sleep(delay)
         except ValueError as exc:
@@ -550,7 +563,7 @@ def _request_once(base_url: str, key: str, path: str, body: dict[str, Any] | Non
         raise ValueError(message) from None
     except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:  # e.g. BadStatusLine
         slow = isinstance(exc, TimeoutError) or isinstance(getattr(exc, "reason", None), TimeoutError)
-        raise (ValueError if slow else _Transient)("network") from None  # a timeout already cost the full wait
+        raise (_Timeout if slow else _Transient)("network") from None
     if len(raw) > MAX_RESPONSE_BYTES:
         raise ValueError("reply too large")
     try:
@@ -844,7 +857,7 @@ def _post_anthropic(base_url: str, key: str, model: str, messages: list[dict[str
     paid = 0  # the same, billable (see _billable)
     reasoning: list[str] = []
     used: list[tuple[str, str]] = []
-    tool_rounds = 0
+    tool_rounds = hits = 0
     fails: list[Any] = [0, 0, None]
     read_local = any(read_local_data(m) for m in messages)  # set once a tool has returned the user's own data
     seen_buf: list[Any] = ["", 0]  # see _grow_seen
@@ -857,10 +870,11 @@ def _post_anthropic(base_url: str, key: str, model: str, messages: list[dict[str
         _check(cancel)
         if tools and (tool_rounds >= MAX_TOOL_ROUNDS or _stuck(fails) or paid >= MAX_ANSWER_TOKENS):  # same tool list (thinking is bound to it), but answer-only
             body["tool_choice"] = {"type": "none"}
-        data = _request(base_url, key, "/messages", body, timeout or THINKING_TIMEOUT_S, progress)
+        data = _request(base_url, key, "/messages", body, timeout or THINKING_TIMEOUT_S, progress, bool(used))
         try:
             blocks = data["content"]
             usage = data.get("usage") or {}
+            hits += _int(usage.get("cache_read_input_tokens"))
             cached = _int(usage.get("cache_read_input_tokens")) + _int(usage.get("cache_creation_input_tokens"))
             spent[0] += cached  # input_tokens alone leaves out the cached part of the prompt
             paid += _billable(_int(usage.get("input_tokens")) + _int(usage.get("cache_creation_input_tokens")),
@@ -926,8 +940,8 @@ def _post_anthropic(base_url: str, key: str, model: str, messages: list[dict[str
             text += "\n\nSources:\n" + "\n".join(f"- {t[:80]}: {u}" for u, t in list(sources.items())[:5])
         reply = AiReply(text=text, model=served if isinstance(served, str) and valid_model(served) else "",
                         reasoning="\n\n".join(reasoning).strip(), prompt_tokens=spent[0], completion_tokens=spent[1],
-                        reasoning_tokens=spent[2], total_tokens=spent[0] + spent[1], cut_off=stop == "max_tokens",
-                        tools=used)
+                        reasoning_tokens=spent[2], total_tokens=spent[0] + spent[1], cached_tokens=hits,
+                        cut_off=stop == "max_tokens", tools=used)
         if not reply.text:
             raise ValueError("cut off" if reply.cut_off else "empty reply")
         return reply
@@ -947,7 +961,8 @@ def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], t
     spent = [0, 0, 0, 0]  # prompt, completion, reasoning, total tokens over every round
     paid = 0  # billable tokens (see _billable)
     used: list[tuple[str, str]] = []
-    shot_at: int | None = None  # index in `messages` of the screenshot message
+    shot_at: list[int] = []  # indexes in `messages` of the screenshot messages still sent
+    cached, cost = 0, 0.0
     fails: list[Any] = [0, 0, None]
     for round_ in range(MAX_TOOL_ROUNDS + 1):
         _check(cancel)
@@ -958,10 +973,11 @@ def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], t
         if tools and round_ < MAX_TOOL_ROUNDS and not _stuck(fails) and paid < MAX_ANSWER_TOKENS:
             body["tools"] = [*((SEARCH_TOOL, FETCH_TOOL) if web else ()), *(host.specs if host else [])]
         streams = progress is not None and (base_url, model) not in _NO_STREAM
-        wait = timeout or (THINKING_TIMEOUT_S if thinks else TIMEOUT_S)
+        wait = timeout or (DEEPSEEK_SILENCE_S if streams and is_deepseek(base_url)
+                           else THINKING_TIMEOUT_S if thinks else TIMEOUT_S)
         try:
             try:
-                data = _request(base_url, key, "/chat/completions", body, wait, progress if streams else None)
+                data = _request(base_url, key, "/chat/completions", body, wait, progress if streams else None, bool(used))
             except ValueError as exc:
                 if not (streams and str(exc) == "bad request"):
                     raise
@@ -972,13 +988,14 @@ def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], t
         except ValueError as exc:
             if str(exc) != "bad request":
                 raise
-            if shot_at is None:
+            if not shot_at:
                 if used:  # `ask` would restart the answer without thinking or tools, running its edits and commands again
                     raise ValueError("refused mid-answer") from None
                 raise
             _NO_VISION.add((base_url, model))  # this model refuses the screenshot: go on with the text lists
-            messages[shot_at] = {"role": "user", "content": "(this model cannot see screenshots; use the text lists)"}
-            shot_at = None
+            for i in shot_at:
+                messages[i] = {"role": "user", "content": "(this model cannot see screenshots; use the text lists)"}
+            shot_at = []
             continue
         try:
             choice = data["choices"][0]
@@ -995,6 +1012,8 @@ def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], t
                 spent[3] += _int(usage.get("prompt_tokens")) + _int(usage.get("completion_tokens"))
             hit = _int(usage.get("prompt_cache_hit_tokens")) or _int((usage.get("prompt_tokens_details") or {}).get("cached_tokens"))
             hit = min(hit, _int(usage.get("prompt_tokens")))
+            cached += hit
+            cost += usage["cost"] if isinstance(usage.get("cost"), (int, float)) and usage["cost"] > 0 else 0.0
             paid += (_billable(_int(usage.get("prompt_tokens")) - hit, hit, _int(usage.get("completion_tokens")))
                      if usage.get("prompt_tokens") or usage.get("completion_tokens") else _int(usage.get("total_tokens")))
             calls = message.get("tool_calls") or []
@@ -1025,12 +1044,14 @@ def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], t
                 if said := _steered(steer):
                     messages[-1] = {**messages[-1], "content": messages[-1]["content"] + said}
                 if shots and (base_url, model) not in _NO_VISION:
-                    if shot_at is not None:  # only the newest screenshot stays in the request
-                        messages[shot_at] = {"role": "user", "content": "(earlier screenshot removed)"}
                     messages.append({"role": "user", "content": [
                         {"type": "text", "text": "Screenshot from screen_map:"},
                         {"type": "image_url", "image_url": {"url": shots[-1]}}]})
-                    shot_at = len(messages) - 1
+                    shot_at.append(len(messages) - 1)
+                    if len(shot_at) > KEEP_SHOTS:  # old ones go in one batch, so the prompt cache holds in between
+                        for i in shot_at[:-1]:
+                            messages[i] = {"role": "user", "content": "(earlier screenshot removed)"}
+                        shot_at = shot_at[-1:]
                 _trim_results(messages, start)
                 continue
             reply = AiReply(
@@ -1038,7 +1059,7 @@ def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], t
                 model=served if isinstance(served, str) and valid_model(served) else "",
                 reasoning=reasoning.strip() if isinstance(reasoning, str) else "",
                 prompt_tokens=spent[0], completion_tokens=spent[1], reasoning_tokens=spent[2], total_tokens=spent[3],
-                cut_off=choice.get("finish_reason") == "length", tools=used,
+                cached_tokens=cached, cost=cost, cut_off=choice.get("finish_reason") == "length", tools=used,
             )
         except (KeyError, IndexError, TypeError, AttributeError):
             raise ValueError("bad reply") from None
@@ -1434,6 +1455,23 @@ def list_models(base_url: str, key: str, timeout: float = TIMEOUT_S) -> list[Mod
         models.append(ModelInfo(model_id, name[:60] if isinstance(name, str) else "",
                                 ("image" in modalities) if isinstance(modalities, list) else None))
     return models if is_anthropic(base_url) else sorted(models, key=lambda m: m.id)  # Anthropic lists newest first
+
+
+DEEPSEEK_TOP_UP = "https://platform.deepseek.com/top_up"
+
+
+def deepseek_balance(key: str, timeout: float = TIMEOUT_S) -> tuple[str, float]:
+    """(currency, total balance) from DeepSeek's free GET /user/balance; ValueError('bad reply') on odd data."""
+    data = _request("https://api.deepseek.com", key, "/user/balance", None, timeout)
+    try:
+        info = data["balance_infos"][0]
+        total = float(info["total_balance"])
+        currency = str(info["currency"])
+    except (KeyError, IndexError, TypeError, ValueError):
+        raise ValueError("bad reply") from None
+    if not re.fullmatch(r"[A-Z]{3}", currency) or not 0 <= total < 1e9:
+        raise ValueError("bad reply")
+    return currency, total
 
 
 class AiJob(QObject):

@@ -136,7 +136,7 @@ def test_retry_after_is_honoured_and_capped(monkeypatch: pytest.MonkeyPatch) -> 
 def test_stop_ends_a_stream_mid_way(monkeypatch: pytest.MonkeyPatch) -> None:
     cancel = threading.Event()
 
-    def fake(url, key, path, body, timeout, progress=None):
+    def fake(url, key, path, body, timeout, progress=None, patient=False):
         cancel.set()  # the user presses Stop while the reply streams in
         progress("Writing, 10 characters")
         return _text("never")

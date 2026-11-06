@@ -73,7 +73,7 @@ def test_only_a_refusal_of_streaming_turns_streaming_off(monkeypatch: pytest.Mon
     reply = {"choices": [{"message": {"role": "assistant", "content": "hi"}}]}
     seen: list[bool] = []
 
-    def refuses_streaming(base, key, path, body, timeout, progress=None):
+    def refuses_streaming(base, key, path, body, timeout, progress=None, patient=False):
         seen.append(progress is not None)
         if progress is not None:
             raise ValueError("bad request")
@@ -82,7 +82,7 @@ def test_only_a_refusal_of_streaming_turns_streaming_off(monkeypatch: pytest.Mon
     assert _post(monkeypatch, refuses_streaming).text == "hi"
     assert seen == [True, False] and ("https://api.example/v1", "m") in ai_assist._NO_STREAM
 
-    def refuses_tools(base, key, path, body, timeout, progress=None):
+    def refuses_tools(base, key, path, body, timeout, progress=None, patient=False):
         raise ValueError("bad request")  # streamed or not: the 400 is about something else
 
     with pytest.raises(ValueError, match="bad request"):
@@ -94,7 +94,7 @@ def test_a_provider_without_total_tokens_still_hits_the_budget(monkeypatch: pyte
     monkeypatch.setattr(ai_assist, "MAX_ANSWER_TOKENS", 100)
     sent: list[dict] = []
 
-    def request(base, key, path, body, timeout, progress=None):
+    def request(base, key, path, body, timeout, progress=None, patient=False):
         sent.append(body)
         if "tools" not in body:
             return {"choices": [{"message": {"role": "assistant", "content": "Out of budget."}}]}

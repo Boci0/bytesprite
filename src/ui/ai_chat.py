@@ -27,7 +27,7 @@ from PyQt6.QtWidgets import (QAbstractButton, QComboBox, QFileDialog, QFormLayou
 
 from src.storage.recent_files import format_age
 from src.tools.ai_assist import (BRAVE_KEY_PAGE, BRAVE_URL, COMPACT_AT, COMPACT_MARK, KEY_PAGES, MAX_INPUT_CHARS, PRESETS,
-                                 compact_history, history_chars, summary_turns,
+                                 compact_history, history_chars, summary_turns, DEEPSEEK_TOP_UP, deepseek_balance, is_deepseek,
                                  THINKING_LEVELS, AiAssistPlugin, fit_thinking, thinking_levels, AiJob, AiReply, ModelInfo, ToolHost, ask, chat_messages, delete_key, list_models, load_key, save_key, valid_key,
                                  valid_model, validate_base_url)
 from src.tools.ai_sessions import delete_sessions, list_sessions, load_session, new_id, save_session
@@ -92,11 +92,14 @@ def reply_details(reply: AiReply, asked_model: str, thinking: str, name: str = "
     if thinking != "off":
         parts.append(f"thinking {thinking}")
     if reply.total_tokens:
-        split = [f"{reply.prompt_tokens:,} in"]
+        cached = min(reply.cached_tokens, reply.prompt_tokens)
+        split = [f"{reply.prompt_tokens:,} in" + (f" ({cached * 100 // reply.prompt_tokens}% cached)" if cached else "")]
         if reply.reasoning_tokens:
             split.append(f"{reply.reasoning_tokens:,} thinking")
         split.append(f"{max(0, reply.completion_tokens - reply.reasoning_tokens):,} answer")
         parts.append(f"{reply.total_tokens:,} tokens ({', '.join(split)})")
+    if reply.cost:
+        parts.append(f"${reply.cost:.4f}")
     if reply.cut_off:
         parts.append("cut off at the limit")
     return "  -  ".join(parts)
@@ -654,6 +657,9 @@ class AiChat(QWidget):
         self._pending: Callable[[str | None], None] | None = None  # the open Allow/Deny prompt
         self._models_job: AiJob | None = None
         self._models: dict[str, list[ModelInfo]] = {}  # base URL -> its /models list, fetched on first open
+        self._balance_job: AiJob | None = None
+        self._balance: tuple[str, float] | None = None  # DeepSeek (currency, total), refreshed after each reply
+        self._last_info: QLabel | None = None  # the newest reply's details line, where its balance drop is added
         self._testing = False
         self._asked = ("", "off")  # model and thinking level of the request in flight
         self._anchor: QRect | None = None  # the pet's sprite, in global coordinates
@@ -1272,7 +1278,8 @@ class AiChat(QWidget):
             if error != "stopped":
                 play_cue("error")
                 self.answered.emit(False)
-                self._add_bubble("error", friendly_error(error))
+                top_up = f" Top up at {DEEPSEEK_TOP_UP}" if error == "no balance" and is_deepseek(self._plugin.base_url) else ""
+                self._add_bubble("error", friendly_error(error) + top_up)
             else:
                 self._add_row("note", "Stopped")
             if self._history and self._history[-1]["role"] == "user":
@@ -1339,6 +1346,8 @@ class AiChat(QWidget):
         info.setFont(ui_font(7.5))
         info.setStyleSheet(f"color: {TEXT_DIM_HEX}; padding: 0 2px;")
         layout.addWidget(info)
+        self._last_info = info
+        QTimer.singleShot(3000, self._fetch_balance)  # DeepSeek books the charge a moment after the answer
         if not reply.reasoning:
             return
         toggle = _ClickLabel(f"Show reasoning ({reply.reasoning_tokens:,} tokens)" if reply.reasoning_tokens
@@ -1450,6 +1459,35 @@ class AiChat(QWidget):
         job.start(lambda: list_models(url, key))
         if show:
             self._title.setText("Loading models...")
+        if self._balance is None:
+            self._last_info = None  # an opening fetch is a baseline, not a reply's charge
+            self._fetch_balance()
+
+    def _fetch_balance(self) -> None:
+        """DeepSeek only: GET /user/balance (free) in the background. The drop since the last fetch is added to
+        the newest reply's details line (approximate: a Watch pre-fetch in between counts too)."""
+        p = self._plugin
+        if self._balance_job is not None or not is_deepseek(p.base_url) or not p.has_key():
+            return
+        key, info = load_key(p.base_url), self._last_info
+        job = self._balance_job = AiJob(self)
+        job.finished.connect(lambda got, error: self._on_balance(got, error, info))
+        job.start(lambda: deepseek_balance(key))
+
+    def _on_balance(self, got: tuple[str, float] | None, error: str, info: QLabel | None) -> None:
+        if self._balance_job is not None:
+            self._balance_job.deleteLater()
+        self._balance_job = None
+        if error or got is None:
+            return
+        before, self._balance = self._balance, got
+        spent = before[1] - got[1] if before and before[0] == got[0] else 0.0
+        if info is not None and spent > 0 and info is self._last_info:
+            try:
+                info.setText(f"{info.text()}  -  ~{spent:.4f} {got[0]} from balance")
+            except RuntimeError:  # the row was cleared (New chat) while the fetch ran
+                pass
+        self._refresh_title()
 
     def _model_name(self, model_id: str) -> str:
         """The provider's display name for a model id ("" until the list has loaded or when it gives none)."""
@@ -1756,7 +1794,10 @@ class AiChat(QWidget):
         host = f" @ {p.host}" if p.provider == "custom" else ""  # a preset's host is in the tooltip; it cut the line
         self._title.setText(f"{name or p.model or 'No model'}{thinking}{host}  \u25BE")
         self._title.setToolTip((f"{name}, requested as {p.model}" if name and name != p.model else p.model)
-                               + f" @ {p.host}. Switch model or thinking level")
+                               + f" @ {p.host}."
+                               + (f" Balance {self._balance[1]:,.2f} {self._balance[0]}."
+                                  if self._balance and is_deepseek(p.base_url) else "")
+                               + " Switch model or thinking level")
 
     def show_setup(self, message: str = "") -> None:
         self._load_setup()
