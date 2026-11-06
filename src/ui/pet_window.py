@@ -56,7 +56,7 @@ from src.ui.ai_tool_host import AiToolHost, grab_screen, show_quietly
 from src.ui.screen_glow import ScreenGlow, play_screen_glow
 from src.storage.recent_files import RecentFiles
 from src.storage.storage_manager import log_text
-from src.tools.web_drop import WebImageJob, html_image_src, is_web_image_source, web_image_stem
+from src.tools.web_drop import WebImageJob, html_image_src, is_web_image_source, strip_metadata, web_image_stem
 from src.ui.context_menu import PetContextMenu, style_menu
 from src.ui.drop_wheel import RadialDropWheel
 from src.ui.macro_editor import MacroEditor
@@ -1541,7 +1541,7 @@ class PetWindow(QWidget):
             except OSError:
                 continue
             target = out_dir / f"snip_{stamp}.png"
-            if image.save(str(target), "PNG"):
+            if strip_metadata(image).save(str(target), "PNG"):
                 return target
         return None
 

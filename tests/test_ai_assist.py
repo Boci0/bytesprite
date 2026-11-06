@@ -252,6 +252,23 @@ def test_key_round_trips_through_credential_manager() -> None:
     assert ai_assist.load_key(url) == ""
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows Credential Manager")
+def test_key_saved_under_the_old_name_is_copied_once_and_delete_removes_both(monkeypatch: pytest.MonkeyPatch) -> None:
+    url = "https://paperduck-migrate-test.invalid/v1"
+    real_target = ai_assist.credential_target
+    old = real_target(url, ai_assist._OLD_PREFIX)
+    monkeypatch.setattr(ai_assist, "credential_target", lambda _u, prefix="": old)
+    assert ai_assist.save_key(url, KEY)  # what the pre-rename app wrote
+    monkeypatch.setattr(ai_assist, "credential_target", real_target)
+    try:
+        assert ai_assist._read_key(real_target(url)) == ""
+        assert ai_assist.load_key(url) == KEY
+        assert ai_assist._read_key(real_target(url)) == KEY and ai_assist._read_key(old) == KEY  # copied, old kept
+    finally:
+        ai_assist.delete_key(url)
+    assert ai_assist._read_key(old) == "" and ai_assist.load_key(url) == ""  # never comes back
+
+
 def test_plugin_settings_persist_without_the_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ai_assist, "load_key", lambda _url: "")
     plugin = AiAssistPlugin()
@@ -335,7 +352,7 @@ def test_model_switcher_and_reasoning_toggle_work(monkeypatch: pytest.MonkeyPatc
         body = _Api.seen[-1]["body"]
         assert body["model"] == "deepseek-flash" and body["reasoning_effort"] == "high"
         row = chat._thread_layout.itemAt(chat._thread_layout.count() - 1).widget()
-        toggle = row.findChildren(ai_chat._ClickLabel)[0]
+        toggle = [w for w in row.findChildren(ai_chat._ClickLabel) if w.text().startswith("Show reasoning")][0]
         reasoning = [w for w in row.findChildren(ai_chat.ChatText) if w.toPlainText() == "17*20=340, +51=391."][0]
         assert reasoning.isHidden() and toggle.text() == "Show reasoning (18 tokens)"
         toggle.clicked.emit()  # works while the card is hidden too (isVisible() would read False)

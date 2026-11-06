@@ -32,6 +32,7 @@ import os
 import re
 import subprocess
 import tempfile
+import itertools
 import threading
 import time
 from dataclasses import dataclass
@@ -132,6 +133,10 @@ TOOL_SPECS: list[dict[str, Any]] = [
         "Save dialog, or cancel.", {"name": {"type": "string", "description": "Suggested file name, e.g. report.md"},
                                     "content": {"type": "string", "description": "The whole file's text"}},
         ("name", "content")),
+    _fn("clean_metadata", "Remove who-made-it metadata from a PDF, PNG or JPEG you made for the user (author, "
+        "creating app such as HeadlessChrome, dates, EXIF/GPS), in place, without re-encoding. Call it on every such "
+        "file you create with a script or a headless browser; --print-to-pdf output is cleaned for you.",
+        {"path": _PATH}, ("path",)),
     _fn("open_link", "Open a web link (http or https) in the user's browser.", {"url": {"type": "string"}}, ("url",)),
     _fn("load_skill", "Load one of the user's skills (listed in the system prompt) and follow its instructions.",
         {"name": {"type": "string"}}, ("name",)),
@@ -220,6 +225,61 @@ def save_args(args: dict[str, Any]) -> tuple[str, str]:
     if len(content) > MAX_SAVE_CHARS:
         raise ValueError(f"content is longer than {MAX_SAVE_CHARS} characters")
     return re.sub(r'[<>:"|?*\x00-\x1f]', "_", name.strip()).rstrip(". ") or "file.txt", content
+
+
+# Chrome switches take values only after "=": a bare --print-to-pdf writes output.pdf, the next word is the page
+_PRINT_TO_PDF = re.compile(r'--print-to-pdf(?:=(?:"([^"]+)"|([^\s"]+)))?')
+
+
+PDF_WAIT_S = 15.0  # how long a --print-to-pdf command's PDF may take to appear after the command returns
+
+
+def file_stamp(path: Path) -> tuple[int, int] | None:
+    """(mtime_ns, size), or None when the file does not exist."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return st.st_mtime_ns, st.st_size
+
+
+def wait_for_new_file(path: Path, before: tuple[int, int] | None, timeout: float,
+                      cancel: threading.Event | None = None) -> bool:
+    """True once `path` differs from its `before` stamp and has stopped changing for one poll."""
+    end, last = time.monotonic() + timeout, before
+    while time.monotonic() < end and not (cancel is not None and cancel.is_set()):
+        now = file_stamp(path)
+        if now is not None and now != before and now == last:
+            return True
+        last = now
+        time.sleep(0.25)
+    return False
+
+
+_MEDIA = re.compile(r'"([^"]+\.(?:pdf|png|jpe?g))"|([^\s"=]+\.(?:pdf|png|jpe?g))\b', re.I)
+
+
+def media_stamps(command: str, cwd: Path) -> dict[Path, tuple[int, int] | None]:
+    """Stamps of the PDFs and images a command could make: those it names, plus the ones directly in `cwd`."""
+    paths = {(cwd / Path(m.group(1) or m.group(2)).expanduser()).resolve() for m in _MEDIA.finditer(command)}
+    try:
+        # shortcut: top level of cwd only, not subfolders; scripts writing deeper rely on the system prompt rule
+        paths |= {p for p in itertools.islice(cwd.iterdir(), 2000) if p.suffix.lower() in (".pdf", ".png", ".jpg", ".jpeg")}
+    except OSError:
+        pass
+    return {p: file_stamp(p) for p in paths}
+
+
+def changed_media(before: dict[Path, tuple[int, int] | None], cwd: Path, command: str) -> list[Path]:
+    """Files from media_stamps(...) taken before a command that it created or changed."""
+    now = media_stamps(command, cwd)
+    return sorted(p for p, stamp in now.items() if stamp is not None and stamp != before.get(p))
+
+
+def print_to_pdf_paths(command: str, cwd: Path) -> list[Path]:
+    """PDFs a headless Chrome/Edge command writes (--print-to-pdf[=path]; no path means output.pdf in cwd)."""
+    return [(cwd / Path(m.group(1) or m.group(2) or "output.pdf").expanduser()).resolve()
+            for m in _PRINT_TO_PDF.finditer(command)]
 
 
 def resolve(root: Path | None, rel: Any) -> Path:

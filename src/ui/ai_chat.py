@@ -30,7 +30,8 @@ from src.tools.ai_assist import (BRAVE_KEY_PAGE, BRAVE_URL, COMPACT_AT, COMPACT_
                                  compact_history, history_chars, summary_turns, DEEPSEEK_TOP_UP, deepseek_balance, is_deepseek,
                                  THINKING_LEVELS, AiAssistPlugin, fit_thinking, thinking_levels, AiJob, AiReply, ModelInfo, ToolHost, ask, chat_messages, delete_key, list_models, load_key, save_key, valid_key,
                                  valid_model, validate_base_url)
-from src.tools.ai_sessions import delete_sessions, list_sessions, load_session, new_id, save_session
+from src.tools.ai_sessions import delete_session, delete_sessions, list_sessions, load_session, new_id, save_session
+from src.tools.web_drop import strip_metadata
 from src.ui.ai_tool_host import APPROVE_TIMEOUT_S
 from src.ui.context_menu import style_menu
 from src.ui.quick_tools import OcrJob
@@ -72,6 +73,8 @@ _DENY_CSS = _BUTTON_CSS.replace(f"color: {ACCENT_HEX}; }}", f"color: {DANGER_HEX
 
 
 def image_data_url(image: QImage) -> str:
+    """PNG data URL for the model, without the image's text tags (they would reach the provider)."""
+    image = strip_metadata(image)
     if max(image.width(), image.height()) > MAX_IMAGE_SIDE:
         image = image.scaled(MAX_IMAGE_SIDE, MAX_IMAGE_SIDE, Qt.AspectRatioMode.KeepAspectRatio,
                              Qt.TransformationMode.SmoothTransformation)
@@ -1609,8 +1612,27 @@ class AiChat(QWidget):
             layout.addWidget(bubble, 0, align)
         else:
             layout.addWidget(label)
+        if role in ("user", "assistant") and text:
+            layout.addWidget(self._copy_link(text), 0, align)
         self._append(row)
         return row, label
+
+    @staticmethod
+    def _copy_link(text: str) -> _ClickLabel:
+        """Dim "Copy" under a prompt or reply: puts the raw text (the reply's own markdown) on the clipboard."""
+        link = _ClickLabel("Copy")
+        link.setFont(ui_font(7.5))
+        link.setStyleSheet(f"color: {TEXT_DIM_HEX}; padding: 0 2px; text-decoration: underline;")
+        link.setCursor(Qt.CursorShape.PointingHandCursor)
+        link.setToolTip("Copy this message exactly as sent")
+
+        def copy() -> None:
+            QGuiApplication.clipboard().setText(text)
+            link.setText("Copied")
+            QTimer.singleShot(1500, lambda: link.setText("Copy"))
+
+        link.clicked.connect(copy)
+        return link
 
     def _append(self, row: QWidget) -> None:
         self._thread_layout.addWidget(row)
@@ -1735,9 +1757,16 @@ class AiChat(QWidget):
             menu.addAction("No saved chats yet").setEnabled(False)
         else:
             menu.addSeparator()
+            if self._sid is not None:
+                menu.addAction("Delete this chat").triggered.connect(lambda _c=False: self._delete_current())
             menu.addAction("Delete all saved chats").triggered.connect(lambda _c=False: self._delete_saved())
         menu.exec(self._history_btn.mapToGlobal(QPoint(0, self._history_btn.height() + 2)))
         menu.deleteLater()
+
+    def _delete_current(self) -> None:
+        if self._sid is not None:
+            delete_session(self._sid)
+        self.new_chat()
 
     def _delete_saved(self) -> None:
         delete_sessions()

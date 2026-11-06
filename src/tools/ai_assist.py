@@ -139,7 +139,8 @@ SYSTEM_PROMPT = (
     "tool: files, CLIs, APIs and COM beat clicking; screen tools only for what nothing else reaches, and check "
     "each click's effect by reading, not assuming. (4) Batch: one script, one edit_files or one computer_batch call beats many tiny "
     "steps; call independent searches and listings together in one turn, they run at the same time; delete "
-    "scratch files you created. (5) Verify every change by reading the result back (tests, the "
+    "scratch files you created; every PDF, PNG or JPEG you make for the user (script, headless browser, "
+    "Playwright, Office export) gets clean_metadata before you hand it over. (5) Verify every change by reading the result back (tests, the "
     "file, the document's properties) and never say done without that evidence. (6) When a step fails, read "
     "the error and fix its cause; after two similar failures change approach, never repeat the same call. "
     "(7) Keep going until the job is done or truly blocked; do not stop to ask about steps the user already "
@@ -264,9 +265,13 @@ class _CREDENTIAL(ctypes.Structure):
 _CRED_TYPE_GENERIC, _CRED_PERSIST_LOCAL_MACHINE = 1, 2
 
 
-def credential_target(base_url: str) -> str:
+def credential_target(base_url: str, prefix: str = "Paperduck AI/") -> str:
     """One key per API host: a changed base URL never reuses another host's key."""
-    return "Paperduck AI/" + (urlsplit(base_url).netloc or "").lower()
+    return prefix + (urlsplit(base_url).netloc or "").lower()
+
+
+# shortcut: one-time carry-over of keys saved before the rename; delete once the old install is gone
+_OLD_PREFIX = "ByteSprite AI/"
 
 
 def save_key(base_url: str, key: str) -> bool:
@@ -281,11 +286,19 @@ def save_key(base_url: str, key: str) -> bool:
 
 
 def load_key(base_url: str) -> str:
+    """The saved key; one saved under the old name only is copied to the new name first (the old stays put)."""
+    key = _read_key(credential_target(base_url))
+    if not key and (key := _read_key(credential_target(base_url, _OLD_PREFIX))):
+        save_key(base_url, key)
+    return key
+
+
+def _read_key(target: str) -> str:
     if sys.platform != "win32":
         return ""
     advapi32 = ctypes.windll.advapi32
     ptr = ctypes.POINTER(_CREDENTIAL)()
-    if not advapi32.CredReadW(credential_target(base_url), _CRED_TYPE_GENERIC, 0, ctypes.byref(ptr)):
+    if not advapi32.CredReadW(target, _CRED_TYPE_GENERIC, 0, ctypes.byref(ptr)):
         return ""
     try:
         cred = ptr.contents
@@ -297,6 +310,8 @@ def load_key(base_url: str) -> str:
 def delete_key(base_url: str) -> bool:
     if sys.platform != "win32":
         return False
+    # The old name goes too, or load_key would copy a removed key back
+    ctypes.windll.advapi32.CredDeleteW(credential_target(base_url, _OLD_PREFIX), _CRED_TYPE_GENERIC, 0)
     return bool(ctypes.windll.advapi32.CredDeleteW(credential_target(base_url), _CRED_TYPE_GENERIC, 0))
 
 

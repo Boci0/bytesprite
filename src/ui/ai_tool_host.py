@@ -27,8 +27,10 @@ from PyQt6.QtWidgets import QFileDialog
 from src.tools import computer
 from src.tools.ai_tools import (calculate, COMPUTER_TOOLS, MAX_BATCH_STEPS, FILE_TOOLS, PET_ACTIONS, TOOL_SPECS, BackgroundProcs, apply_edits,
                                 computer_action, destructive_reason, is_secret, load_skill, memory_path, parse_boxes, plan_edit,
-                                plan_edits, plan_memory, plan_skill_update, resolve, run_command, run_file_tool, save_args,
+                                plan_edits, plan_memory, plan_skill_update, print_to_pdf_paths, resolve,
+                                PDF_WAIT_S, changed_media, file_stamp, media_stamps, wait_for_new_file, run_command, run_file_tool, save_args,
                                 skill_text, skills_dir, task_list, write_memory, write_skill)
+from src.tools.file_forge import scrub_metadata
 from src.tools.macros import parse_recipe
 from src.tools.mcp_client import SEP, McpHub, add_server, find_servers, safe_name
 from src.ui.quick_tools import ocr_image_file
@@ -38,6 +40,13 @@ SAVE_TIMEOUT_S = 600.0  # the Save dialog waits on the user
 APPROVE_TIMEOUT_S = 300.0  # the user reads the MCP confirm, a diff or a command in the chat
 MAX_CLIP_CHARS = 12000
 MAX_SCREEN_CHARS = 8000
+
+
+def _rel_name(path: Path, base: Path) -> str:
+    try:
+        return str(path.relative_to(base))
+    except ValueError:
+        return str(path)
 
 
 def _strings(value: Any) -> list[str]:
@@ -189,7 +198,24 @@ class AiToolHost(QObject):
             if not self._allowed("run_command", f"The model wants to run in {where}:\n\n{command.strip()}", "commands",
                                  risk):
                 return "error: the user declined this command"
-            return run_command(cwd, command, self.cancel)
+            pdfs = {pdf: file_stamp(pdf) for pdf in print_to_pdf_paths(command, cwd)}
+            media = media_stamps(command, cwd)
+            out = run_command(cwd, command, self.cancel)
+            for pdf, before in pdfs.items():  # headless Edge stamps HeadlessChrome, Skia and dates
+                # msedge.exe hands off to a child and returns before the PDF is written: wait for the new file
+                if wait_for_new_file(pdf, before, PDF_WAIT_S, self.cancel):
+                    out += f"\n[Paperduck: {pdf.name}: metadata {scrub_metadata(pdf)}]"
+                else:
+                    out += f"\n[Paperduck: {pdf.name} was not written within {PDF_WAIT_S:g} s; call clean_metadata on it]"
+            # Other PDFs and images the command made may carry metadata too; they are the user's to keep as they
+            # are (a build's own fixtures, say), so the model is told rather than the files changed
+            unclean = [p for p in changed_media(media, cwd, command)
+                       if p not in pdfs and scrub_metadata(p, dry_run=True) == "would clean"]
+            if unclean:
+                names = ", ".join(_rel_name(p, cwd) for p in unclean[:8])
+                out += (f"\n[Paperduck: this made or changed {names}, which still carry metadata (author, creating app, "
+                        "dates). Call clean_metadata on each one you hand to the user.]")
+            return out
         if name == "start_background":
             command = args.get("command")
             if not isinstance(command, str) or not command.strip():
@@ -279,6 +305,12 @@ class AiToolHost(QObject):
             return self._computer(name, args)
         if name == "computer_batch":
             return self._batch(args.get("steps"))
+        if name == "clean_metadata":  # only blanks metadata in a PDF/PNG/JPEG, so it needs no approval
+            try:
+                path = resolve(self._project(), args.get("path"))
+            except (OSError, ValueError):
+                return "error: bad path"
+            return scrub_metadata(path) if path.is_file() else "error: not a file"
         if name == "save_file":
             try:
                 file_name, content = save_args(args)

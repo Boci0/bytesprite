@@ -174,3 +174,47 @@ def test_chat_saved_before_the_rename_still_shows_its_summary() -> None:
         assert "compacted into a summary" in shown and "compacted by Paperduck" not in shown
     finally:
         chat.close()
+
+
+def test_copy_links_put_the_exact_prompt_and_reply_on_the_clipboard() -> None:
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtGui import QGuiApplication
+    from PyQt6.QtTest import QTest
+
+    from src.ui.ai_chat import _ClickLabel
+
+    chat = _chat()
+    clip = QGuiApplication.clipboard()
+    saved = clip.text()
+    try:
+        prompt = "fix  this\n\ttabbed line ü 🦆"
+        reply = "# Title\n\n**bold** and `code`\n\n```py\nprint('x')  \n```\n- item\n\ntrailing  "
+        chat._add_row("user", prompt)
+        chat._add_row("assistant", reply, markdown=True)
+        chat._add_row("note", "a note has no copy link")
+        links = [w for w in chat.findChildren(_ClickLabel) if w.text() == "Copy"]
+        assert len(links) == 2
+        for link, expected in zip(links, (prompt, reply)):
+            QTest.mouseClick(link, Qt.MouseButton.LeftButton)
+            assert clip.text() == expected and link.text() == "Copied"
+    finally:
+        clip.setText(saved)
+        chat.deleteLater()
+
+
+def test_delete_this_chat_removes_only_the_open_chat() -> None:
+    keep = new_id()
+    save_session(keep, HISTORY)
+    chat = _chat()
+    try:
+        chat._history += [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a", "tools": []}]
+        chat._save_session()
+        sid = chat._sid
+        assert sid is not None and {s.id for s in list_sessions()} == {sid, keep}
+        chat._delete_current()
+        assert [s.id for s in list_sessions()] == [keep] and load_session(sid) is None
+        assert chat._sid is None and chat._history == [] and chat._thread_layout.count() == 0
+        ai_sessions.delete_session("../../evil")  # not an id: ignored, never a path
+        assert [s.id for s in list_sessions()] == [keep]
+    finally:
+        chat.deleteLater()

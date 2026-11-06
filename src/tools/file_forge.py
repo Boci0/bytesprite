@@ -12,6 +12,8 @@ import io
 import json
 import lzma
 import os
+import random
+import re
 import shutil
 import struct
 import tarfile
@@ -842,6 +844,9 @@ def convert_image_file(
 
     if image.isNull():
         return ForgeResult(False, (), src_bytes, 0, "IMG ERR", "#EF7D57")
+    from src.tools.web_drop import strip_metadata
+
+    image = strip_metadata(image)  # outputs never carry the source's Author/Comment tags
 
     dest = output_path or _unique_output_path(src.parent, src.stem, f".{fmt}", avoid_path=src)
     temp_path = _temp_sibling_path(dest)
@@ -904,6 +909,128 @@ def _json_default_serializer(obj: Any) -> Any:
     if isinstance(obj, (dt.datetime, dt.date, dt.time)):
         return obj.isoformat()
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
+# Info entries that say who or what made a PDF and when (headless Chrome/Edge writes HeadlessChrome and Skia here)
+_PDF_INFO_KEYS = (b"Author", b"Creator", b"Producer", b"CreationDate", b"ModDate", b"Subject", b"Keywords")
+# A Title that is only a file name, path or URL (Chrome's fallback when the page has none) goes; a real one stays
+_PDF_TITLE_FALLBACK = re.compile(rb"^(file|https?):|[\\/]|\.(html?|xhtml|svg|txt|pdf)$", re.I)
+# JPEG segments kept: APP0 (JFIF), APP2 (ICC colour profile), APP14 (Adobe colour transform); other APPn and COM go
+_JPEG_DROP = {0xE1, *range(0xE3, 0xEE), 0xEF, 0xFE}
+_PNG_DROP = {b"tEXt", b"zTXt", b"iTXt", b"eXIf", b"tIME"}
+# What a cleaned PDF says made it: plainly a joke, never a real program's name
+PDF_PRODUCER = b"Paperduck"
+PDF_CREATORS = (b"a very determined duck", b"quack quack, machine translated", b"one duck, two wings, zero comments",
+                b"a duck who folded it by hand", b"bread, mostly", b"the pond's finest paperwork")
+
+
+def _pdf_string_end(data: bytes, start: int) -> int:
+    """Index of the byte closing the PDF string that opens at `start` ('(' literal or '<' hex)."""
+    if data[start] == 0x3C:
+        return data.index(b">", start)
+    depth, i = 0, start
+    while True:
+        ch = data[i]
+        if ch == 0x5C:  # backslash escapes the next byte
+            i += 2
+            continue
+        depth += ch == 0x28
+        depth -= ch == 0x29
+        if depth == 0:
+            return i
+        i += 1
+
+
+def _scrub_pdf(data: bytes) -> bytes | None:
+    """Delete the Info entries (key and value) and write the duck's own Producer and Creator into the space they
+    freed. Removed bytes become spaces of the same length (whitespace is valid anywhere between PDF tokens), so
+    every xref offset stays valid and the file needs no rebuild. A file already carrying the duck's entries is
+    left as it is."""
+    if b"/ObjStm" in data or b"xmpmeta" in data:
+        return None  # Info or XMP inside compressed streams: not something to remove in place
+    out = bytearray(data)
+    for ref in re.finditer(rb"/Info\s+(\d+)\s+(\d+)\s+R", data):
+        obj = re.search(rb"(?<!\d)" + ref.group(1) + rb"\s+" + ref.group(2) + rb"\s+obj\b", data)
+        if obj is None:
+            return None
+        end = data.find(b"endobj", obj.end())
+        removed = False
+        for key in re.compile(rb"/([A-Za-z]+)\s*([(<])").finditer(data, obj.end(), end):
+            name, close = key.group(1), _pdf_string_end(data, key.start(2))
+            value = data[key.start(2) + 1:close]
+            ours = (name == b"Producer" and value == PDF_PRODUCER) or (name == b"Creator" and value in PDF_CREATORS)
+            if not ours and (name in _PDF_INFO_KEYS or (
+                    name == b"Title" and _PDF_TITLE_FALLBACK.search(re.sub(rb"\\([()\\])", rb"\1", value).strip()))):
+                out[key.start():close + 1] = b" " * (close + 1 - key.start())
+                removed = True
+        if removed:
+            joke = b"/Producer (" + PDF_PRODUCER + b") /Creator (" + random.choice(PDF_CREATORS) + b")"
+            gap = re.compile(rb" {%d,}" % (len(joke) + 2)).search(out, obj.end(), end)
+            if gap is not None:  # always room after Chrome's long user agent; otherwise the entries just go
+                out[gap.start() + 1:gap.start() + 1 + len(joke)] = joke
+    return bytes(out)
+
+
+def _scrub_png(data: bytes) -> bytes | None:
+    out, i = bytearray(data[:8]), 8
+    while i < len(data):
+        size = struct.unpack(">I", data[i:i + 4])[0]
+        chunk = data[i:i + 12 + size]
+        if len(chunk) < 12 + size:
+            return None
+        if chunk[4:8] not in _PNG_DROP:
+            out += chunk
+        i += 12 + size
+    return bytes(out)
+
+
+def _scrub_jpeg(data: bytes) -> bytes | None:
+    out, i = bytearray(data[:2]), 2
+    while i + 4 <= len(data) and data[i] == 0xFF:
+        marker = data[i + 1]
+        if marker == 0xDA:  # start of scan: the rest is image data
+            return bytes(out + data[i:])
+        size = struct.unpack(">H", data[i + 2:i + 4])[0]
+        if marker not in _JPEG_DROP:
+            out += data[i:i + 2 + size]
+        i += 2 + size
+    return None
+
+
+def scrub_metadata(path: Path, dry_run: bool = False) -> str:
+    """Remove who-made-it metadata from a PDF, PNG or JPEG in place, without re-encoding: PDF Info entries
+    (Author, Creator, Producer, dates, a file-name Title; a duck joke takes their place), PNG text/EXIF/time
+    chunks, JPEG EXIF/XMP/IPTC and comments. Returns "cleaned" ("would clean" with `dry_run`, which writes
+    nothing), "nothing to remove" or "error: ..."."""
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        return f"error: {exc.strerror or exc}"
+    try:
+        if data.startswith(b"%PDF-"):
+            clean = _scrub_pdf(data)
+        elif data.startswith(b"\x89PNG\r\n\x1a\n"):
+            clean = _scrub_png(data)
+        elif data.startswith(b"\xff\xd8"):
+            clean = _scrub_jpeg(data)
+        else:
+            return "error: only PDF, PNG and JPEG files are cleaned"
+    except (ValueError, IndexError, struct.error):
+        clean = None
+    if clean is None:
+        return "error: this file's layout is not one Paperduck can clean safely; it was left as it was"
+    if clean == data:
+        return "nothing to remove"
+    if dry_run:
+        return "would clean"
+    temp = _temp_sibling_path(path)
+    try:
+        temp.write_bytes(clean)
+        os.replace(temp, path)
+    except OSError as exc:
+        temp.unlink(missing_ok=True)
+        return f"error: {exc.strerror or exc}"
+    return "cleaned"
 
 
 def convert_data_file(

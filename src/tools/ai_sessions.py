@@ -170,6 +170,15 @@ def load_session(sid: str, root: Path | None = None) -> Session | None:
     return _parse((root or sessions_dir()) / f"{sid}.json") if _ID.match(sid) else None
 
 
+def delete_session(sid: str, root: Path | None = None) -> None:
+    """Remove one saved session; a bad id or a disk error just leaves it."""
+    if _ID.match(sid):
+        try:
+            ((root or sessions_dir()) / f"{sid}.json").unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def delete_sessions(root: Path | None = None) -> None:
     """Remove every saved session."""
     root = root or sessions_dir()

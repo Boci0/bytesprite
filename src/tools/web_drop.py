@@ -103,10 +103,26 @@ def fetch_image_bytes(
     return data
 
 
+def strip_metadata(image: QImage) -> QImage:
+    """The same pixels with no text tags (Author, Comment, Description, ...), which Qt carries from a loaded file
+    into PNG tEXt and JPEG COM on every save. Qt already drops EXIF (GPS, camera) blocks when it decodes."""
+    if image.isNull() or not image.textKeys():
+        return image
+    bits = image.constBits()
+    bits.setsize(image.sizeInBytes())
+    clean = QImage(bits, image.width(), image.height(), image.bytesPerLine(), image.format()).copy()
+    clean.setColorTable(image.colorTable())
+    clean.setDotsPerMeterX(image.dotsPerMeterX())
+    clean.setDotsPerMeterY(image.dotsPerMeterY())
+    clean.setDevicePixelRatio(image.devicePixelRatio())
+    return clean
+
+
 def save_clean_png(image: QImage, dest_dir: Path, stem: str, source_url: str = "") -> Path:
-    """Write a re-encoded PNG and tag it with the Windows Mark of the Web."""
+    """Write a re-encoded PNG without metadata and tag it with the Windows Mark of the Web."""
     if image.isNull():
         raise ValueError("not an image")
+    image = strip_metadata(image)
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = _unique_output_path(dest_dir, stem, ".png")
     if not image.save(str(dest), "PNG"):
