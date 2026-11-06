@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import ctypes
 import logging
-import math
 from ctypes import wintypes
 import os
 import random
@@ -16,7 +15,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from PyQt6.QtCore import QDateTime, QElapsedTimer, QPoint, QProcess, QRect, QStandardPaths, Qt, QTimer, QUrl
+from PyQt6.QtCore import QDateTime, QElapsedTimer, QPoint, QProcess, QRect, QRectF, QStandardPaths, Qt, QTimer, QUrl
 from PyQt6.QtGui import (
     QCloseEvent,
     QColor,
@@ -28,7 +27,6 @@ from PyQt6.QtGui import (
     QDragMoveEvent,
     QDropEvent,
     QEnterEvent,
-    QFont,
     QGuiApplication,
     QIcon,
     QImage,
@@ -43,7 +41,7 @@ from PyQt6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMenu, QToo
 from src.engine.models import PetState, PetStats
 from src.engine.pet_state import PetStateMachine
 from src.graphics.animation_controller import AnimationController
-from src.graphics.sprite_matrix import FrameMatrix, get_sprite_frames
+from src.graphics.duck import Pose, render_pose
 from src.tools.file_forge import ForgeMode, ForgeWheelOption, get_wheel_options_for_paths
 from src.tools.ai_assist import AiAssistPlugin, AiJob, AiReply, fit_thinking, load_key, thinking_levels
 from src.tools.ai_tools import skills_dir
@@ -69,7 +67,7 @@ from src.ui.sfx import play_cue, preload_tick_sounds, prewarm as prewarm_ticks
 from src.ui.tool_wheel import WEB_SHORTCUTS, ToolWheel, ToolWheelOption, WheelLayout, google_search_url
 from src.updater import APP_DIR, FROZEN, FROZEN_EXE, RELEASES_URL, UpdateJob, is_installed
 from src.ui.theme import (DANGER_HEX, GLASS_RGBA, HAIRLINE_RGBA, HOVER_RGBA, SLEEP_HEX, TEXT_DIM_HEX, TEXT_HEX,
-                          paint_pixel_panel, pet_accent, qcolor, ui_font)
+                          paint_panel, pet_accent, qcolor, ui_font)
 
 
 @dataclass(frozen=True)
@@ -203,47 +201,23 @@ def clamp_position_to_screens(
     return (clamped_x, clamped_y)
 
 
-def frame_matrix_to_qimage(frame: FrameMatrix) -> QImage:
-    """Convert an RGBA matrix into an owned QImage without smoothing blur."""
-    height = len(frame)
-    width = len(frame[0]) if height > 0 else 0
-    raw = bytes(ch for row in frame for pixel in row for ch in pixel)
-    image = QImage(raw, width, height, width * 4, QImage.Format.Format_RGBA8888)
-    return image.copy()
-
-
 def build_app_icon(size: int = 64) -> QIcon:
-    """Generate a crisp nearest-neighbor pixel icon from the embedded 16x16 idle sprite."""
-    base_frame = get_sprite_frames("idle", size=16)[0]
-    qimg = frame_matrix_to_qimage(base_frame).scaled(
-        size,
-        size,
-        Qt.AspectRatioMode.KeepAspectRatio,
-        Qt.TransformationMode.FastTransformation,
-    )
-    return QIcon(QPixmap.fromImage(qimg))
+    """App and tray icon: the duck's resting pose rendered at the icon size."""
+    return QIcon(QPixmap.fromImage(render_pose(Pose(), size)))
 
 
 def export_windows_ico(
     output_path: Path | str,
     sizes: Sequence[int] = (16, 32, 48, 64, 128, 256),
 ) -> Path:
-    """Write a multi-resolution Windows .ico file with PNG-encoded nearest-neighbor frames."""
+    """Write a multi-resolution Windows .ico file, each size rendered sharp from the vector duck."""
     from PyQt6.QtCore import QBuffer, QIODevice
 
     dest = Path(output_path)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    base_frame = get_sprite_frames("idle", size=32)[0]
-    base_img = frame_matrix_to_qimage(base_frame)
-
     png_blobs: list[tuple[int, bytes]] = []
     for sz in sizes:
-        scaled = base_img.scaled(
-            sz,
-            sz,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.FastTransformation,
-        )
+        scaled = render_pose(Pose(), max(16, sz))
         buf = QBuffer()
         buf.open(QIODevice.OpenModeFlag.WriteOnly)
         scaled.save(buf, "PNG")
@@ -328,8 +302,8 @@ class PetWindow(QWidget):
         self._layout_sprite()
         self._hud_rect = QRect(8, 4, self.WINDOW_WIDTH - 16, 72)
 
-        # Cached QImages keyed by (clip_name, frame_index, facing_left)
-        self._image_cache: dict[tuple[str, int, bool], QImage] = {}
+        # Rendered frames keyed by (clip_name, frame_index, facing_left, device px)
+        self._image_cache: dict[tuple[str, int, bool, int], QImage] = {}
 
         # Mouse drag and hover state
         self._press_global_pos: QPoint | None = None
@@ -1862,17 +1836,14 @@ class PetWindow(QWidget):
         if not self._sprite_rect.contains(local_pos):
             return False
 
-        frame = self._anim.current_frame()
-        h = len(frame)
-        w = len(frame[0]) if h > 0 else 0
-        if w == 0 or h == 0:
-            return False
-
-        sx = (local_pos.x() - self._sprite_rect.left()) // self.pet_scale
-        sy = (local_pos.y() - self._sprite_rect.top()) // self.pet_scale
-        for ny in range(max(0, sy - 1), min(h, sy + 2)):
-            for nx in range(max(0, sx - 1), min(w, sx + 2)):
-                if frame[ny][nx][3] > 0:
+        # Rendered alpha decides; a 3x3 probe a few px apart forgives thin parts like the beak tip
+        image = self._current_qimage()
+        k = image.width() / max(1, self._sprite_rect.width())
+        lx, ly = local_pos.x() - self._sprite_rect.left(), local_pos.y() - self._sprite_rect.top()
+        for oy in (-3, 0, 3):
+            for ox in (-3, 0, 3):
+                ix, iy = int((lx + ox) * k), int((ly + oy) * k)
+                if 0 <= ix < image.width() and 0 <= iy < image.height() and image.pixelColor(ix, iy).alpha() > 0:
                     return True
         return False
 
@@ -2136,18 +2107,20 @@ class PetWindow(QWidget):
             menu.deleteLater()
 
     # ------------------------------------------------------------------
-    # Painting (Crisp Nearest-Neighbor Sprite + Pixel HUD)
+    # Painting (Vector Duck + HUD)
     # ------------------------------------------------------------------
 
     def _current_qimage(self) -> QImage:
-        key = (
-            self._anim.active_clip_name,
-            self._anim.frame_index,
-            self._anim.facing_left,
-        )
+        """The current pose rendered at the sprite's device pixel size (sharp at any pet size and DPI)."""
+        dpr = self.devicePixelRatioF() or 1.0
+        px = max(16, round(self._sprite_rect.width() * dpr))
+        key = (self._anim.active_clip_name, self._anim.frame_index, self._anim.facing_left, px)
         cached = self._image_cache.get(key)
         if cached is None:
-            cached = frame_matrix_to_qimage(self._anim.current_frame())
+            if len(self._image_cache) >= 96:  # about 10 MB at 4x on a 125% display
+                self._image_cache.clear()
+            cached = render_pose(self._anim.current_frame(), px, mirrored=self._anim.facing_left)
+            cached.setDevicePixelRatio(px / self._sprite_rect.width())
             self._image_cache[key] = cached
         return cached
 
@@ -2156,8 +2129,8 @@ class PetWindow(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
 
-        # Crisp nearest-neighbor 4x pixel-art character
-        painter.drawImage(self._sprite_rect, self._current_qimage())
+        # Rendered at device pixels already, so this is a 1:1 blit
+        painter.drawImage(self._sprite_rect.topLeft(), self._current_qimage())
 
         if self._hint is not None:
             self._paint_hint(painter)
@@ -2170,7 +2143,7 @@ class PetWindow(QWidget):
         painter.end()
 
     def _paint_hud(self, painter: QPainter) -> None:
-        """Pixel-frame card matching PetContextMenu: stepped panel, segmented bars, Segoe UI text."""
+        """Folded-paper card matching PetContextMenu: dog-eared panel, rounded bar tracks, Segoe UI text."""
         r = self._hud_rect
         hud = self._state_machine.get_hud_data()
         sleeping = self._state_machine.state == PetState.SLEEPING
@@ -2179,7 +2152,7 @@ class PetWindow(QWidget):
 
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-        paint_pixel_panel(painter, r)
+        paint_panel(painter, r)
 
         # Header: name + colored status dot, like the menu header card
         header = QRect(r.left() + 10, r.top() + 5, r.width() - 20, 14)
@@ -2212,12 +2185,15 @@ class PetWindow(QWidget):
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                 bar.label,
             )
-            # Chunky 4px cells like the sprite's own pixels; any nonzero value lights the first cell
-            cells = (row.width() - 68 + 1) // 5
-            lit = math.ceil(bar.clamped_value / 100.0 * cells)
-            for c in range(cells):
-                cell = QRect(row.left() + 36 + c * 5, row.center().y() - 2, 4, 4)
-                painter.fillRect(cell, pet_accent(bar.color_hex) if c < lit else qcolor(HOVER_RGBA))
+            # Rounded track with a filled run; any nonzero value shows at least a dot of fill
+            track = QRectF(row.left() + 36, row.center().y() - 2, row.width() - 68, 4)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(qcolor(HOVER_RGBA))
+            painter.drawRoundedRect(track, 2, 2)
+            if bar.clamped_value > 0:
+                painter.setBrush(pet_accent(bar.color_hex))
+                painter.drawRoundedRect(QRectF(track.left(), track.top(), max(4.0, track.width() * bar.clamped_value / 100.0), 4), 2, 2)
             painter.setPen(QColor(TEXT_HEX))
             painter.drawText(
                 QRect(row.right() - 28, row.top(), 28, row.height()),
@@ -2241,7 +2217,7 @@ class PetWindow(QWidget):
         r = self._hint_rect
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-        paint_pixel_panel(painter, r)
+        paint_panel(painter, r)
         center = Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter
         painter.setFont(ui_font(8.5, bold=True))
         painter.setPen(QColor(TEXT_HEX))
@@ -2266,10 +2242,9 @@ class PetWindow(QWidget):
 
         painter.save()
         painter.setOpacity(alpha / 255)
-        paint_pixel_panel(painter, pill)
+        paint_panel(painter, pill, radius=pill_h / 2, fold=False)
         painter.setPen(pet_accent(self._toast_color))
-        toast_font = QFont("Consolas", 8, QFont.Weight.Bold)
-        painter.setFont(toast_font)
+        painter.setFont(ui_font(7.5, bold=True))
         painter.drawText(pill, Qt.AlignmentFlag.AlignCenter, self._toast_text)
         painter.restore()
 

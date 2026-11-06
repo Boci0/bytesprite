@@ -2,14 +2,15 @@
 
 <p align="center">
   <img src="docs/images/idle.png" width="144" alt="ByteSprite idling">
-  <img src="docs/images/spin.png" width="144" alt="ByteSprite spinning">
+  <img src="docs/images/spin.png" width="144" alt="ByteSprite quacking">
 </p>
 
-A small frosted-glass paperclip that lives on your Windows desktop. It carries a pocket full of developer and file
-tools behind a click, a hold or a drag, and can open an AI chat with the model and key you bring.
+A small origami rubber duck that lives on your Windows desktop, ready for rubber duck debugging. It carries a
+pocket full of developer and file tools behind a click, a hold or a drag, and can open an AI chat with the model
+and key you bring.
 
-Windows 10 / 11, PyQt6 (the installed app bundles its own Python). No telemetry, no asset files: every
-sprite is generated in code.
+Windows 10 / 11, PyQt6 (the installed app bundles its own Python). No telemetry, no asset files: the duck
+is drawn and animated in code.
 
 ## Install
 
@@ -86,8 +87,8 @@ inside a URL without you seeing it. The reach is the same for every model; how w
 on the model. The header shows the real model behind an alias, e.g. `DeepSeek-V4.1-Flash` for `deepseek-flash`.
 
 <p align="center">
-  <img src="docs/images/moods.png" width="720" alt="Idle, music, focus, spin, sleep and cheer poses">
-  <br><sub>Idle, music, focus, spin, sleep, cheer</sub>
+  <img src="docs/images/moods.png" width="720" alt="Idle, music, focus, quack, sleep and cheer poses">
+  <br><sub>Idle, music, focus, quack, sleep, cheer</sub>
 </p>
 
 ## What else it does

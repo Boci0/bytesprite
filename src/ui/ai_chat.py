@@ -35,10 +35,9 @@ from src.ui.ai_tool_host import APPROVE_TIMEOUT_S
 from src.ui.context_menu import style_menu
 from src.ui.quick_tools import OcrJob
 from src.ui.sfx import play_cue
-from src.ui.theme import (ACCENT_HEX, DANGER_HEX, FONT_FAMILY, GLASS_RAISED_RGBA, GLASS_RGBA, HAIRLINE_RGBA, HOVER_RGBA,
-                          OUTLINE_RGBA, TEXT_DIM_HEX, TEXT_HEX, paint_pixel_panel, qcolor, rgba_css, ui_font)
-
-BUBBLE_RGBA: tuple[int, int, int, int] = (56, 59, 68, 255)  # your messages: a step lighter than the card
+from src.ui.theme import (ACCENT_HEX, BUBBLE_RGBA, DANGER_HEX, FONT_FAMILY, GLASS_RAISED_RGBA, GLASS_RGBA,
+                          HAIRLINE_RGBA, HOVER_RGBA, OUTLINE_RGBA, SHADOW, TEXT_DIM_HEX, TEXT_HEX, paint_panel, qcolor,
+                          rgba_css, ui_font)
 
 MAX_FILE_BYTES = 512 * 1024
 MAX_ATTACHMENTS = 4
@@ -61,11 +60,11 @@ _FRIENDLY_ERRORS = {
 }
 _FIELD_CSS = (
     f"background: {rgba_css(GLASS_RAISED_RGBA)}; color: {TEXT_HEX}; border: 1px solid {rgba_css(OUTLINE_RGBA)};"
-    " border-radius: 0; padding: 4px 6px;"
+    " border-radius: 6px; padding: 5px 8px;"
 )
 _BUTTON_CSS = (
     f"QPushButton {{ color: {TEXT_HEX}; background: transparent; border: 1px solid {rgba_css(OUTLINE_RGBA)};"
-    " border-radius: 0; padding: 4px 12px; }"
+    " border-radius: 6px; padding: 5px 14px; }"
     f" QPushButton:hover {{ background: {rgba_css(HOVER_RGBA)}; color: {ACCENT_HEX}; }}"
 )
 _ALLOW_CSS = _BUTTON_CSS.replace(f"border: 1px solid {rgba_css(OUTLINE_RGBA)}", f"border: 1px solid {ACCENT_HEX}")
@@ -158,7 +157,7 @@ class Attachment:
 
 
 class _Frosted(QFrame):
-    """Rounded opaque graphite panel with a white hairline, like the menus and HUD."""
+    """The chat's paper panel: the card itself is dog-eared with a soft shadow; raised fields are plain sheets."""
 
     def __init__(self, raised: bool = False, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -166,7 +165,10 @@ class _Frosted(QFrame):
 
     def paintEvent(self, _event) -> None:  # type: ignore[override]
         painter = QPainter(self)
-        paint_pixel_panel(painter, self.rect(), qcolor(GLASS_RAISED_RGBA if self._raised else GLASS_RGBA))
+        if self._raised:
+            paint_panel(painter, self.rect(), qcolor(GLASS_RAISED_RGBA), radius=8, fold=False)
+        else:
+            paint_panel(painter, self.rect(), qcolor(GLASS_RGBA), shadow=SHADOW)
         painter.end()
 
 
@@ -195,7 +197,9 @@ class IconButton(QAbstractButton):
         s = self.width() / 32.0
         painter.scale(s, s)
         if self.underMouse() and self.isEnabled():
-            painter.fillRect(QRectF(3, 3, 26, 26), qcolor(HOVER_RGBA))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(qcolor(HOVER_RGBA))
+            painter.drawRoundedRect(QRectF(3, 3, 26, 26), 7, 7)
         color = QColor((ACCENT_HEX if self.underMouse() else TEXT_HEX) if self.isEnabled() else TEXT_DIM_HEX)
         painter.setPen(QPen(color, 1.6 / max(s, 0.6), cap=Qt.PenCapStyle.RoundCap, join=Qt.PenJoinStyle.RoundJoin))
         painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -232,7 +236,7 @@ class IconButton(QAbstractButton):
             painter.drawPolyline([QPointF(16, 11.5), QPointF(16, 16), QPointF(19.5, 18)])
         elif self.kind == "stop":
             painter.setBrush(color)
-            painter.drawRect(QRectF(11.5, 11.5, 9, 9))
+            painter.drawRoundedRect(QRectF(11.5, 11.5, 9, 9), 2, 2)
         painter.end()
 
 
@@ -492,8 +496,8 @@ class _Bubble(QFrame):
 
 
 class _Card(QFrame):
-    """A non-reply row (permission, error, saved file) in the pet's own pixel frame, like the HUD and the menu: an
-    inset graphite panel with a stepped outline, a square pixel marker in the status colour and a dim header."""
+    """A non-reply row (permission, error, saved file): a raised paper sheet with a hairline edge, a round
+    marker in the status colour and a dim header; errors and destructive prompts get a vermilion edge."""
 
     def __init__(self, title: str, color: str) -> None:
         super().__init__()
@@ -518,9 +522,13 @@ class _Card(QFrame):
     def paintEvent(self, _event) -> None:  # type: ignore[override]
         painter = QPainter(self)
         alert = self._color.name().lower() == DANGER_HEX.lower()  # a coral frame only for errors and denials
-        paint_pixel_panel(painter, self.rect(), qcolor(GLASS_RGBA), self._color if alert else None)
+        paint_panel(painter, self.rect(), qcolor(GLASS_RAISED_RGBA), self._color if alert else None, radius=8,
+                    fold=False)
         head = self._head.geometry()
-        painter.fillRect(QRect(8 + 2, head.center().y() - 2, 6, 6), self._color)  # one sprite-pixel marker
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(self._color)
+        painter.drawEllipse(QPointF(13, head.center().y() + 0.5), 3, 3)
         painter.end()
 
 
@@ -569,12 +577,15 @@ class _TaskList(QWidget):
                          f"{'+' if self._collapsed else '-'} Tasks  {done} of {len(self._tasks)} done")
         for n, (label, status) in enumerate([] if self._collapsed else self._tasks, 1):
             top = 2 + n * self.ROW
-            box = QRect(12, top + self.ROW // 2 - 3, 6, 6)
+            dot = QPointF(15, top + self.ROW / 2)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             if status == "pending":
-                painter.setPen(dim)
-                painter.drawRect(box.adjusted(0, 0, -1, -1))
+                painter.setPen(QPen(dim, 1.2))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
             else:
-                painter.fillRect(box, ice if status == "in_progress" else dim)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(ice if status == "in_progress" else dim)
+            painter.drawEllipse(dot, 3, 3)
             font.setStrikeOut(status == "done")
             painter.setFont(font)
             painter.setPen(dim if status == "done" else text)
@@ -695,7 +706,7 @@ class AiChat(QWidget):
         card = self._card = _Frosted()
         root.addWidget(card)
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setContentsMargins(6 + SHADOW, 6 + SHADOW // 2, 6 + SHADOW, 6 + SHADOW * 3 // 2)  # shadow margin
         layout.setSpacing(4)
 
         header = QHBoxLayout()
@@ -751,7 +762,7 @@ class AiChat(QWidget):
         self._scroll.setStyleSheet(
             "QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; }"
             " QScrollBar:vertical { background: transparent; width: 6px; margin: 0; }"
-            f" QScrollBar::handle:vertical {{ background: {rgba_css(OUTLINE_RGBA)}; border-radius: 0;"
+            f" QScrollBar::handle:vertical {{ background: {rgba_css(OUTLINE_RGBA)}; border-radius: 3px;"
             " min-height: 24px; }"
             " QScrollBar::add-line, QScrollBar::sub-line, QScrollBar::add-page, QScrollBar::sub-page"
             " { background: none; height: 0; }")

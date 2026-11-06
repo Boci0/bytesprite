@@ -1,4 +1,4 @@
-"""Frameless translucent frosted radial drop wheel for interactive File Forge selection."""
+"""Frameless translucent folded-paper radial drop wheel for interactive File Forge selection."""
 
 from __future__ import annotations
 
@@ -22,10 +22,11 @@ from PyQt6.QtGui import (
     QPalette,
     QPen,
     QPolygonF,
+    QRadialGradient,
 )
 from PyQt6.QtWidgets import QWidget
 
-from src.graphics.sprite_matrix import get_sprite_frames
+from src.graphics.duck import Pose, render_pose
 from src.tools.file_forge import ForgeWheelOption
 from src.ui.sfx import TickSounds
 from src.ui.theme import (
@@ -33,28 +34,23 @@ from src.ui.theme import (
     DANGER_HEX,
     GLASS_RAISED_RGBA,
     GLASS_RGBA,
-    HAIRLINE_RGBA,
+    HOVER_RGBA,
     OUTLINE_RGBA,
+    SHADOW,
+    SHADOW_RGBA,
     TEXT_DIM_HEX,
     TEXT_HEX,
-    paint_pixel_panel,
+    paint_panel,
     qcolor,
     ui_font,
 )
 
 
-def _build_hub_sprite_qimage() -> QImage:
-    frame = get_sprite_frames("idle", size=16)[0]
-    h = len(frame)
-    w = len(frame[0]) if h > 0 else 0
-    raw = bytes(ch for row in frame for pixel in row for ch in pixel)
-    img = QImage(raw, w, h, w * 4, QImage.Format.Format_RGBA8888).copy()
-    return img.scaled(
-        32,
-        32,
-        Qt.AspectRatioMode.KeepAspectRatio,
-        Qt.TransformationMode.FastTransformation,
-    )
+def _build_hub_sprite_qimage(dpr: float = 1.0) -> QImage:
+    """The duck for the 40px hub slot, rendered at device pixels so it stays sharp."""
+    image = render_pose(Pose(), max(16, round(40 * dpr)))
+    image.setDevicePixelRatio(image.width() / 40)
+    return image
 
 
 def _annular_wedge_polygon(
@@ -425,20 +421,21 @@ class RadialDropWheel(QWidget):
             QRect(4, 4, self.width() - 8, self.height() - 8),
             QColor(18, 16, 30, 4),
         )
-        hairline = QPen(qcolor(HAIRLINE_RGBA), 1.0)
 
         # Header pill with the live "file -> result" preview
         t = self._open_t
         base_opacity = _clamp01(t * 2.0)
         painter.setOpacity(base_opacity)
         header_text, header_color = self._header_preview_text()
-        banner = QRectF(18, 8, self.width() - 36, 26)
-        paint_pixel_panel(painter, banner.toRect())
+        banner = QRectF(18, 6, self.width() - 36, 30)
+        paint_panel(painter, banner.toRect(), radius=13, fold=False, shadow=SHADOW)
         if self.selected_option() is not None:
-            painter.fillRect(QRect(int(banner.left()) + 12, int(banner.center().y()) - 2, 4, 4), QColor(ACCENT_HEX))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(ACCENT_HEX))
+            painter.drawEllipse(QPointF(banner.left() + 18, banner.top() + 13), 3, 3)
         painter.setFont(ui_font(8.5, bold=True))
         painter.setPen(header_color)
-        painter.drawText(banner, Qt.AlignmentFlag.AlignCenter, header_text)
+        painter.drawText(banner.adjusted(0, 0, 0, -SHADOW), Qt.AlignmentFlag.AlignCenter, header_text)
 
         # Frosted ring backdrop, popped and spun in by the open animation
         center = QPointF(self.CENTER_X, self.CENTER_Y)
@@ -449,8 +446,15 @@ class RadialDropWheel(QWidget):
         painter.scale(scale, scale)
         painter.translate(-center)
         halo_r = self.OUTER_RADIUS + 6.0
-        painter.setPen(QPen(qcolor(OUTLINE_RGBA), 2.0))
-        painter.setBrush(qcolor(GLASS_RGBA))
+        painter.setPen(Qt.PenStyle.NoPen)
+        for i in range(SHADOW, 0, -1):  # soft paper shadow, offset down
+            painter.setBrush(QColor(*SHADOW_RGBA[:3], max(1, SHADOW_RGBA[3] // SHADOW)))
+            painter.drawEllipse(QPointF(center.x(), center.y() + 2), halo_r + i, halo_r + i)
+        disc = QRadialGradient(QPointF(center.x(), center.y() - halo_r * 0.5), halo_r * 1.6)
+        disc.setColorAt(0, qcolor(GLASS_RGBA).lighter(106))
+        disc.setColorAt(1, qcolor(GLASS_RGBA))
+        painter.setPen(QPen(qcolor(OUTLINE_RGBA), 1.0))
+        painter.setBrush(disc)
         painter.drawEllipse(center, halo_r, halo_r)
 
         for idx, opt in enumerate(self._options):
@@ -458,12 +462,14 @@ class RadialDropWheel(QWidget):
             is_hot = idx == self._hovered_index
             poly = self._hover_polys[idx] if is_hot else self._normal_polys[idx]
             if is_hot:
-                accent = QColor(ACCENT_HEX)
-                painter.setBrush(QColor(68, 72, 84, 245))
-                painter.setPen(QPen(accent, 2.0))
+                painter.setBrush(qcolor(GLASS_RAISED_RGBA))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.drawPolygon(poly)
+                painter.setBrush(qcolor(HOVER_RGBA))
+                painter.setPen(QPen(QColor(ACCENT_HEX), 1.5, join=Qt.PenJoinStyle.RoundJoin))
             else:
                 painter.setBrush(qcolor(GLASS_RAISED_RGBA))
-                painter.setPen(hairline)
+                painter.setPen(Qt.PenStyle.NoPen)
             painter.drawPolygon(poly)
 
         # Center cancel hub
@@ -471,12 +477,15 @@ class RadialDropWheel(QWidget):
         hub_r = self.INNER_RADIUS - 5.0
         hub_is_neutral = self._hovered_index < 0
         painter.setBrush(qcolor(GLASS_RGBA))
-        painter.setPen(QPen(QColor(DANGER_HEX), 1.6) if hub_is_neutral else hairline)
+        painter.setPen(QPen(QColor(DANGER_HEX), 1.4) if hub_is_neutral else QPen(qcolor(OUTLINE_RGBA), 1.0))
         painter.drawEllipse(center, hub_r, hub_r)
 
-        # Crisp pixel-art sprite (no smoothing)
-        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
-        sprite_rect = QRect(int(self.CENTER_X) - 16, int(self.CENTER_Y) - 24, 32, 32)
+        # The duck, pre-rendered at 3x and smooth-scaled into its slot
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        sprite_rect = QRect(int(self.CENTER_X) - 20, int(self.CENTER_Y) - 31, 40, 40)
+        dpr = self.devicePixelRatioF() or 1.0
+        if self._hub_sprite.width() != max(16, round(40 * dpr)):
+            self._hub_sprite = _build_hub_sprite_qimage(dpr)
         painter.drawImage(sprite_rect, self._hub_sprite)
 
         sub_font = ui_font(7.0)
@@ -496,7 +505,7 @@ class RadialDropWheel(QWidget):
             box = QRectF(pt.x() - 34.0, pt.y() - 14.0, 68.0, 28.0)
 
             painter.setFont(label_font)
-            painter.setPen(QColor("#FFFFFF") if is_hot else QColor(TEXT_HEX))
+            painter.setPen(QColor(ACCENT_HEX) if is_hot else QColor(TEXT_HEX))
             painter.drawText(
                 QRectF(box.left(), box.top(), box.width(), 15.0),
                 Qt.AlignmentFlag.AlignCenter,
@@ -504,7 +513,7 @@ class RadialDropWheel(QWidget):
             )
 
             painter.setFont(sub_font)
-            painter.setPen(QColor(ACCENT_HEX) if is_hot else QColor(TEXT_DIM_HEX))
+            painter.setPen(QColor(TEXT_HEX if is_hot else TEXT_DIM_HEX))
             painter.drawText(
                 QRectF(box.left(), box.top() + 14.0, box.width(), 13.0),
                 Qt.AlignmentFlag.AlignCenter,

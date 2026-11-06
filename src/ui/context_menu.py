@@ -1,4 +1,4 @@
-"""Pixel-framed right-click context menu for ByteSprite Multi-Tool."""
+"""Folded-paper right-click context menu for ByteSprite Multi-Tool."""
 
 from __future__ import annotations
 
@@ -22,24 +22,28 @@ from src.ui.theme import (
     FONT_FAMILY,
     HAIRLINE_RGBA,
     HOVER_RGBA,
+    SHADOW,
     SLEEP_HEX,
     TEXT_DIM_HEX,
     TEXT_HEX,
-    install_pixel_frame,
+    install_panel_frame,
     rgba_css,
 )
 
+# Padding holds the panel's soft shadow (SHADOW) plus 6px of paper around the rows
 MENU_STYLESHEET = f"""
 QMenu {{
     background: transparent;
     color: {TEXT_HEX};
     border: none;
-    padding: 8px;
+    padding: {6 + SHADOW // 2}px {6 + SHADOW}px {6 + SHADOW * 3 // 2}px {6 + SHADOW}px;
     font-family: "{FONT_FAMILY}";
     font-size: 10pt;
 }}
 QMenu::item {{
-    padding: 6px 28px 6px 10px;
+    padding: 6px 30px 6px 12px;
+    margin: 1px 0;
+    border-radius: 6px;
     background: transparent;
 }}
 QMenu::item:selected {{
@@ -52,17 +56,17 @@ QMenu::item:disabled {{
 QMenu::separator {{
     height: 1px;
     background: {rgba_css(HAIRLINE_RGBA)};
-    margin: 5px 2px;
+    margin: 5px 10px;
 }}
 QMenu::indicator {{
     width: 14px;
     height: 14px;
-    margin-left: 4px;
+    margin-left: 6px;
 }}
 QMenu::right-arrow {{
     width: 8px;
     height: 8px;
-    margin-right: 8px;
+    margin-right: 10px;
 }}
 """
 
@@ -81,7 +85,7 @@ _STATE_LABELS: dict[PetState, tuple[str, str]] = {
 
 
 def style_menu(menu: QMenu) -> QMenu:
-    """Apply the frameless pixel-frame look (stepped corners need a clear backdrop)."""
+    """Apply the frameless folded-paper look (rounded corners and the shadow need a clear backdrop)."""
     menu.setWindowFlags(
         menu.windowFlags()
         | Qt.WindowType.FramelessWindowHint
@@ -89,7 +93,7 @@ def style_menu(menu: QMenu) -> QMenu:
     )
     menu.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
     menu.setStyleSheet(MENU_STYLESHEET)
-    install_pixel_frame(menu)
+    install_panel_frame(menu)
     return menu
 
 
