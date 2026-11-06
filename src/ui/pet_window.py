@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import logging
 import math
 from ctypes import wintypes
 import os
@@ -365,7 +366,8 @@ class PetWindow(QWidget):
         self._hold_timer.setInterval(self.HOLD_TO_WHEEL_MS)
         self._hold_timer.timeout.connect(self._on_hold_timeout)
         self._ocr_jobs: list[OcrJob] = []
-        self._ai_chat: AiChat | None = None  # built on first open
+        self._ai_chat: AiChat | None = None  # built hidden soon after launch (_prebuild_ai_chat) or on first open
+        QTimer.singleShot(self.PREBUILD_CHAT_MS, self._prebuild_ai_chat)
         self._ai_thinking: bool = False
         self._ai_since: float = 0.0  # when the pending AI answer started
         self._away: bool = False  # no input for AWAY_AFTER_S: idle naps (visual only, never DND)
@@ -1587,20 +1589,33 @@ class PetWindow(QWidget):
         plugin = self._state_machine.registry.get_plugin("ai")
         if not isinstance(plugin, AiAssistPlugin):
             return
+        started = time.perf_counter()
         if self._ai_chat is None:
             self._make_ai_chat(plugin)
         elif self._ai_chat.isVisible():
             self._ai_chat.hide()
             return
         sprite = self._sprite_global_rect()
+        play_cue("open")
+        self._ai_chat.open_near(sprite)
+        # the effects start after the card's layout pass, so their first frames are not frozen by it
         glow = play_screen_glow(self.screen(), sprite.center())
         if glow is not None:
             self._glows.append(glow)
             glow.destroyed.connect(lambda *_a, g=glow: self._glows.remove(g) if g in self._glows else None)
-        play_cue("open")
         self._anim.play_oneshot("spin")
         self._schedule_next_anim_tick()
-        self._ai_chat.open_near(sprite)
+        took = (time.perf_counter() - started) * 1000
+        if took > 150:
+            logging.getLogger(__name__).info("ai chat open took %.0f ms", took)
+
+    PREBUILD_CHAT_MS = 4000  # after launch settles: the first open then skips about 0.65s of widget setup and first show
+
+    def _prebuild_ai_chat(self) -> None:
+        plugin = self._state_machine.registry.get_plugin("ai")
+        if self._ai_chat is None and not self._is_shutting_down and isinstance(plugin, AiAssistPlugin):
+            self._make_ai_chat(plugin)
+            self._ai_chat.warm_up()
 
     def _make_ai_chat(self, plugin: AiAssistPlugin) -> None:
         """Build the chat card hidden (about 0.4s of widget setup on the Qt thread)."""

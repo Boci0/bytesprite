@@ -1832,6 +1832,13 @@ class AiChat(QWidget):
         self.activateWindow()
         self._draft.setFocus()
 
+    def warm_up(self) -> None:
+        """While hidden: style every widget, create the native window and run the first layout pass. A cold
+        first show() did all of that on the click (about 400ms in the live pet); after this it takes about 1ms."""
+        self.ensurePolished()
+        self.winId()
+        self._relayout()
+
     def _relayout(self) -> None:
         """Size the thread to its content (capped) and keep the edge nearest the pet in place."""
         if self._stack.currentIndex() == 0:
