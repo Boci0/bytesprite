@@ -1,10 +1,17 @@
 """Paper theme: tool colours fold into the duck palette, panels are rounded with a dog-eared corner."""
 
+import pytest
 from PyQt6.QtCore import QRect
 from PyQt6.QtGui import QColor, QImage, QPainter
+from PyQt6.QtWidgets import QApplication
 
 from src.ui.theme import (ACCENT_HEX, DANGER_HEX, FOLD_RGBA, GLASS_RGBA, SLEEP_HEX, TEXT_DIM_HEX, paint_panel,
                           pet_accent)
+
+
+@pytest.fixture(scope="module")
+def qapp() -> QApplication:
+    return QApplication.instance() or QApplication([])  # type: ignore[return-value]
 
 
 def test_pet_accent_keeps_meaning() -> None:
@@ -35,3 +42,31 @@ def test_unfolded_panel_has_no_dog_ear() -> None:
     painter.end()
     corner = img.pixelColor(56, 4)  # near the top the dark fill is a touch lighter (lit edge gradient)
     assert corner.alpha() == 255 and corner != QColor(*FOLD_RGBA)
+
+
+def test_theme_choice_is_saved_and_restarts_only_on_a_change(tmp_path, monkeypatch, qapp) -> None:
+    from src.engine.models import PetStats
+    from src.engine.pet_state import PetStateMachine
+    from src.graphics.animation_controller import AnimationController
+    from src.ui import theme
+    from src.ui.pet_window import PetWindow
+
+    monkeypatch.setattr(theme, "THEME_FILE", tmp_path / "theme.txt")
+    assert theme.saved_theme() == "system"  # no file: follow Windows
+    win = PetWindow(state_machine=PetStateMachine(PetStats()), animation_controller=AnimationController(size=32),
+                    auto_wander=False)
+    restarts: list[int] = []
+    monkeypatch.setattr(win, "restart", lambda: restarts.append(1))
+    try:
+        win.trigger_tool_action("theme:system")  # already the choice: nothing to do
+        win.trigger_tool_action("theme:neon")  # unknown: ignored
+        assert restarts == [] and not theme.THEME_FILE.exists()
+        win.trigger_tool_action("theme:light")
+        assert restarts == [1] and theme.saved_theme() == "light"
+        menu = win.build_context_menu()
+        assert [a.text() for a in menu.theme_menu.actions() if a.isChecked()] == ["Light"]
+        menu.deleteLater()
+    finally:
+        win.deleteLater()
+    theme.THEME_FILE.write_text("garbage", encoding="utf-8")
+    assert theme.saved_theme() == "system"

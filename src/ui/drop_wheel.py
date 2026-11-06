@@ -144,7 +144,7 @@ class RadialDropWheel(QWidget):
         self._configure_window()
 
     def _configure_window(self) -> None:
-        self.setWindowTitle("ByteSprite Drop Wheel")
+        self.setWindowTitle("Paperduck Drop Wheel")
         self.setFixedSize(self.WHEEL_WIDTH, self.WHEEL_HEIGHT)
         flags = Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
         if self._always_on_top:

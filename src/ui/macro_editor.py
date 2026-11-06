@@ -22,7 +22,7 @@ class MacroEditor(QDialog):
         super().__init__(parent, Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint
                          | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setWindowTitle("ByteSprite - Macro")
+        self.setWindowTitle("Paperduck - Macro")
         self.setFixedWidth(400)
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)

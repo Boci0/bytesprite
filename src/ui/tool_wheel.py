@@ -160,7 +160,7 @@ class ToolWheel(RadialDropWheel):
         self._on_selected = on_selected
         self._button_up_ticks = 0
         self.setAcceptDrops(False)
-        self.setWindowTitle("ByteSprite Tool Wheel")
+        self.setWindowTitle("Paperduck Tool Wheel")
 
     def open_tools(
         self,

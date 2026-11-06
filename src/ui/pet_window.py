@@ -41,7 +41,7 @@ from PyQt6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMenu, QToo
 from src.engine.models import PetState, PetStats
 from src.engine.pet_state import PetStateMachine
 from src.graphics.animation_controller import AnimationController
-from src.graphics.duck import Pose, render_pose
+from src.graphics.duck import Pose, render_icon, render_pose
 from src.tools.file_forge import ForgeMode, ForgeWheelOption, get_wheel_options_for_paths
 from src.tools.ai_assist import AiAssistPlugin, AiJob, AiReply, fit_thinking, load_key, thinking_levels
 from src.tools.ai_tools import skills_dir
@@ -67,7 +67,7 @@ from src.ui.sfx import play_cue, preload_tick_sounds, prewarm as prewarm_ticks
 from src.ui.tool_wheel import WEB_SHORTCUTS, ToolWheel, ToolWheelOption, WheelLayout, google_search_url
 from src.updater import APP_DIR, FROZEN, FROZEN_EXE, RELEASES_URL, UpdateJob, is_installed
 from src.ui.theme import (DANGER_HEX, GLASS_RGBA, HAIRLINE_RGBA, HOVER_RGBA, SLEEP_HEX, TEXT_DIM_HEX, TEXT_HEX,
-                          paint_panel, pet_accent, qcolor, ui_font)
+                          THEME_CHOICES, paint_panel, pet_accent, qcolor, save_theme, saved_theme, ui_font)
 
 
 @dataclass(frozen=True)
@@ -202,8 +202,8 @@ def clamp_position_to_screens(
 
 
 def build_app_icon(size: int = 64) -> QIcon:
-    """App and tray icon: the duck's resting pose rendered at the icon size."""
-    return QIcon(QPixmap.fromImage(render_pose(Pose(), size)))
+    """App and tray icon: the resting duck filling the icon square."""
+    return QIcon(QPixmap.fromImage(render_icon(size)))
 
 
 def export_windows_ico(
@@ -217,7 +217,7 @@ def export_windows_ico(
     dest.parent.mkdir(parents=True, exist_ok=True)
     png_blobs: list[tuple[int, bytes]] = []
     for sz in sizes:
-        scaled = render_pose(Pose(), max(16, sz))
+        scaled = render_icon(sz)
         buf = QBuffer()
         buf.open(QIODevice.OpenModeFlag.WriteOnly)
         scaled.save(buf, "PNG")
@@ -409,7 +409,7 @@ class PetWindow(QWidget):
         self._tidy_asks = 0  # a fresh approval key per plan, so "Allow" never carries over to the next one
 
     def _configure_window(self) -> None:
-        self.setWindowTitle("ByteSprite")
+        self.setWindowTitle("Paperduck")
         self.setWindowIcon(build_app_icon(64))
 
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
@@ -513,7 +513,7 @@ class PetWindow(QWidget):
             return
         current = self.hotkeys.get(mode) or default_hotkey(mode)
         text, ok = QInputDialog.getText(
-            self, f"ByteSprite - {HOTKEY_ACTIONS[mode]} Hotkey",
+            self, f"Paperduck - {HOTKEY_ACTIONS[mode]} Hotkey",
             f"Type a combo like Ctrl+Alt+K (A-Z, 0-9, F1-F24).\nEmpty resets to {default_hotkey(mode)}.", text=current)
         if not ok:
             return
@@ -1195,7 +1195,7 @@ class PetWindow(QWidget):
         elif status == "available":
             self._show_toast(f"NEW {tag}", QColor("#FFCD75"))
             if self._on_notification is not None:
-                self._on_notification(f"ByteSprite {tag} is available: Settings > Check for Updates")
+                self._on_notification(f"Paperduck {tag} is available: Settings > Check for Updates")
             if install and not is_installed():
                 QDesktopServices.openUrl(QUrl(RELEASES_URL))  # git checkout: update by hand
         elif install:  # the silent startup check never toasts "up to date" or errors
@@ -1205,7 +1205,7 @@ class PetWindow(QWidget):
             self._show_toast("UP TO DATE" if status == "current" else refused or "UPDATE ERR",
                              QColor("#38B764" if status == "current" else "#E05A47"))
             if refused and self._on_notification is not None:
-                self._on_notification(f"Update refused ({tag}): it is not a release signed by the ByteSprite key")
+                self._on_notification(f"Update refused ({tag}): it is not a release signed by the Paperduck key")
             elif status == "error" and tag != "needs installer" and self._on_notification is not None:
                 self._on_notification(f"Update failed: {tag}")  # the reason, also in the log (Settings > Copy Log)
             if tag == "needs installer":
@@ -1350,12 +1350,12 @@ class PetWindow(QWidget):
         if key.startswith("toggle:"):
             self._wheel_toast(self.wheel.toggle(key.removeprefix("toggle:"), self.all_tool_wheel_options()))
         elif key == "add_web":
-            label, ok = QInputDialog.getText(self, "ByteSprite - Add Website", "Slice name:")
-            url, ok2 = (QInputDialog.getText(self, "ByteSprite - Add Website", "URL:", text="https://")
+            label, ok = QInputDialog.getText(self, "Paperduck - Add Website", "Slice name:")
+            url, ok2 = (QInputDialog.getText(self, "Paperduck - Add Website", "URL:", text="https://")
                         if ok and label.strip() else ("", False))
             self._wheel_toast(self.wheel.add_custom(label, url) if ok2 else "CANCEL")
         elif key == "add_app":
-            path, _flt = QFileDialog.getOpenFileName(self, "ByteSprite - Add App or File to Wheel")
+            path, _flt = QFileDialog.getOpenFileName(self, "Paperduck - Add App or File to Wheel")
             self._wheel_toast(self.wheel.add_custom(Path(path).stem, path) if path else "CANCEL")
         elif key.startswith("remove:") and key.removeprefix("remove:").isdigit():
             self._wheel_toast("REMOVED" if self.wheel.remove_custom(int(key.removeprefix("remove:"))) else "GONE")
@@ -1689,13 +1689,19 @@ class PetWindow(QWidget):
         if callback_id.startswith("size:"):
             self.set_pet_scale(int(callback_id[5:]) if callback_id[5:].isdigit() else 0)
             return
+        if callback_id.startswith("theme:"):
+            choice = callback_id.removeprefix("theme:")
+            if choice in THEME_CHOICES and choice != saved_theme():
+                save_theme(choice)
+                self.restart()  # every surface takes its colours at import, so a new scheme needs a fresh start
+            return
         if callback_id.startswith("snip:"):
             self.trigger_snip(callback_id.split(":", 1)[1])
             return
         if callback_id == "forge:pick_files":
             selected, _flt = QFileDialog.getOpenFileNames(
                 self,
-                "ByteSprite File Forge - Select File(s)",
+                "Paperduck File Forge - Select File(s)",
             )
             if selected:
                 self.trigger_drop_files(selected)
@@ -1703,7 +1709,7 @@ class PetWindow(QWidget):
         if callback_id == "forge:pick_folder":
             folder = QFileDialog.getExistingDirectory(
                 self,
-                "ByteSprite File Forge - Select Folder to Compress",
+                "Paperduck File Forge - Select Folder to Compress",
             )
             if folder:
                 self.trigger_drop_files([folder])
@@ -1787,7 +1793,7 @@ class PetWindow(QWidget):
             self._open_clip_history(QCursor.pos())
             return
         if callback_id == "project:pick":
-            folder = QFileDialog.getExistingDirectory(self, "ByteSprite - Choose Project Folder")
+            folder = QFileDialog.getExistingDirectory(self, "Paperduck - Choose Project Folder")
             project = self._state_machine.registry.get_plugin("project")
             if folder and project is not None:
                 project.set_repo(folder)
@@ -2096,6 +2102,7 @@ class PetWindow(QWidget):
             hotkeys=[(label, self.hotkeys.get(mode) or default_hotkey(mode), mode)
                      for mode, label in HOTKEY_ACTIONS.items()],
             pet_scales=self.PET_SCALES,
+            theme=saved_theme(),
             parent=self,
         )
 

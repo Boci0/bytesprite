@@ -6,7 +6,8 @@ import pytest
 from PyQt6.QtWidgets import QApplication
 
 from src.graphics.animation_controller import AnimationClip, AnimationController
-from src.graphics.duck import ALL_ANIMATIONS, REQUIRED_ANIMATIONS, Pose, get_poses, get_sprite_frames, render_pose
+from src.graphics.duck import (ALL_ANIMATIONS, REQUIRED_ANIMATIONS, Pose, get_poses, get_sprite_frames, render_icon,
+                              render_pose)
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -113,3 +114,11 @@ class TestAnimationController:
 
         assert controller.active_clip_name == "idle"
         assert controller.frame_index == 0
+
+
+def test_icon_fills_its_square() -> None:
+    img = render_icon(64)
+    cols = [x for x in range(64) if any(img.pixelColor(x, y).alpha() > 40 for y in range(64))]
+    rows = [y for y in range(64) if any(img.pixelColor(x, y).alpha() > 40 for x in range(64))]
+    assert cols[0] <= 3 and cols[-1] >= 60  # the duck spans the width: no empty canvas around it
+    assert rows[0] >= 2 and rows[-1] <= 61 and (rows[0] + rows[-1]) / 2 == pytest.approx(31.5, abs=3)  # centred

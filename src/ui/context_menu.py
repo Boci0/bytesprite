@@ -26,6 +26,7 @@ from src.ui.theme import (
     SLEEP_HEX,
     TEXT_DIM_HEX,
     TEXT_HEX,
+    THEME_CHOICES,
     install_panel_frame,
     rgba_css,
 )
@@ -124,6 +125,7 @@ class PetContextMenu(QMenu):
         pet_scale: int = 4,
         hotkeys: Sequence[tuple[str, str, str]] = (),
         pet_scales: dict[int, str] | None = None,
+        theme: str = "system",
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -135,7 +137,7 @@ class PetContextMenu(QMenu):
 
         # Header card: name + status dot on line one, live telemetry on line two
         header = QLabel(
-            f'<div style="font-size:10.5pt; font-weight:600; color:{TEXT_HEX};">ByteSprite'
+            f'<div style="font-size:10.5pt; font-weight:600; color:{TEXT_HEX};">Paperduck'
             f'&nbsp;&nbsp;<span style="color:{state_color}; font-size:9pt;">&#9679; {state_text}</span></div>'
             f'<div style="font-size:8.5pt; color:{TEXT_DIM_HEX};">'
             f"CPU {int(round(stats.cpu_usage))}%&nbsp;&nbsp;&middot;&nbsp;&nbsp;"
@@ -331,6 +333,14 @@ class PetContextMenu(QMenu):
                 act.triggered.connect(lambda _checked=False, c=f"size:{scale}": on_tool_action(c))
                 self.size_menu.addAction(act)
             self.settings_menu.addMenu(self.size_menu)
+            self.theme_menu = style_menu(QMenu("Theme", self.settings_menu))
+            for key, label in THEME_CHOICES.items():
+                act = QAction(label, self.theme_menu)
+                act.setCheckable(True)
+                act.setChecked(key == theme)
+                act.triggered.connect(lambda _checked=False, c=f"theme:{key}": on_tool_action(c))
+                self.theme_menu.addAction(act)
+            self.settings_menu.addMenu(self.theme_menu)
 
         # Shortcut hints elsewhere in the menu follow rebound hotkeys (snip:<mode>, and the AI chat's ai:chat)
         for _label, combo, mode in hotkeys:
@@ -389,6 +399,6 @@ class PetContextMenu(QMenu):
 
         self.addSeparator()
 
-        self.quit_action = QAction("Quit ByteSprite", self)
+        self.quit_action = QAction("Quit Paperduck", self)
         self.quit_action.triggered.connect(lambda _checked=False: on_quit())
         self.addAction(self.quit_action)

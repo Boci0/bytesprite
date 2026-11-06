@@ -377,7 +377,7 @@ def _fx(painter: QPainter, kind: str, x: float, y: float, alpha: float) -> None:
     painter.restore()
 
 
-def paint_pose(painter: QPainter, pose: Pose, *, mirrored: bool = False) -> None:
+def paint_pose(painter: QPainter, pose: Pose, *, mirrored: bool = False, shadow: bool = True) -> None:
     """Paint one pose into the current 128-unit painter space."""
     painter.save()
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -396,7 +396,8 @@ def paint_pose(painter: QPainter, pose: Pose, *, mirrored: bool = False) -> None
     painter.translate(-(64 + pose.x), -110)
     painter.setPen(Qt.PenStyle.NoPen)
     painter.setBrush(shade)
-    painter.drawEllipse(QPointF(64 + pose.x, 110), 40, 40)
+    if shadow:
+        painter.drawEllipse(QPointF(64 + pose.x, 110), 40, 40)
     painter.restore()
 
     edge = QPen(QColor(107, 74, 18, 150), 0.9)  # PAPER["edge"] at 60%: fold edges, not cartoon outlines
@@ -448,6 +449,24 @@ def render_pose(pose: Pose, px: int, *, mirrored: bool = False) -> QImage:
     painter = QPainter(image)
     painter.scale(px / UNITS, px / UNITS)
     paint_pose(painter, pose, mirrored=mirrored)
+    painter.end()
+    return image
+
+
+ICON_BOX = (15.0, 21.0, 122.0, 107.0)  # the resting duck's bounds in units, shadow left out (measured)
+
+
+def render_icon(px: int) -> QImage:
+    """The resting duck filling a px-by-px square (app, tray and .ico icons): cropped, centred, no ground shadow."""
+    image = QImage(px, px, QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(0)
+    left, top, right, bottom = ICON_BOX
+    k = px * 0.96 / max(right - left, bottom - top)
+    painter = QPainter(image)
+    painter.translate(px / 2, px / 2)
+    painter.scale(k, k)
+    painter.translate(-(left + right) / 2, -(top + bottom) / 2)
+    paint_pose(painter, Pose(), shadow=False)
     painter.end()
     return image
 

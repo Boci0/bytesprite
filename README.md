@@ -1,8 +1,8 @@
-# ByteSprite
+# Paperduck
 
 <p align="center">
-  <img src="docs/images/idle.png" width="144" alt="ByteSprite idling">
-  <img src="docs/images/spin.png" width="144" alt="ByteSprite quacking">
+  <img src="docs/images/idle.png" width="144" alt="Paperduck idling">
+  <img src="docs/images/spin.png" width="144" alt="Paperduck quacking">
 </p>
 
 A small origami rubber duck that lives on your Windows desktop, ready for rubber duck debugging. It carries a
@@ -34,6 +34,9 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -DesktopShortcut
 Options: `-DesktopShortcut`, `-StartWithWindows`, `-NoLaunch`. A clone install needs Python; if it is
 missing: `winget install Python.Python.3.12`.
 
+Paperduck used to be called ByteSprite; its folders and program file keep that name, so existing settings
+and updates carry on.
+
 | Location | Contents |
 | :--- | :--- |
 | `%LOCALAPPDATA%\ByteSprite\app` | Program files (`ByteSprite.exe` and `_internal`, or `src` and `assets` for a clone install, plus `uninstall.ps1`) |
@@ -43,14 +46,14 @@ missing: `winget install Python.Python.3.12`.
 | `Pictures\ByteSprite` | Screen snips |
 
 The installer adds a Start Menu shortcut and an entry in **Settings > Apps**, which runs the uninstaller.
-Launch it from the Start Menu (search "ByteSprite"), or re-run the installer with `-DesktopShortcut` for a
+Launch it from the Start Menu (search "Paperduck"), or re-run the installer with `-DesktopShortcut` for a
 desktop icon. The `.exe` is not code-signed, so antivirus tools may be wary of it on first run.
 
 ### Updating
 
 Right-click the pet, then **Settings > Check for Updates**. It downloads the newest GitHub release
 (about 36 MB for the standalone build, which ships its whole runtime), swaps in the new version and restarts. Updates are signed: the app only installs a release whose
-signature matches the ByteSprite release key built into it (toast `BAD SIG` or `UNSIGNED` otherwise),
+signature matches the Paperduck release key built into it (toast `BAD SIG` or `UNSIGNED` otherwise),
 so a hijacked GitHub account or an intercepted download cannot push code to you. An installed copy
 also checks quietly once per launch and shows a toast when a release is out. Re-running `install.ps1` updates too (and refreshes dependencies).
 A copy run straight from a git clone has no install marker, so **Check for Updates** only opens the
@@ -58,7 +61,7 @@ release page there; `git pull` instead.
 
 ### Uninstalling
 
-**Settings > Apps > ByteSprite > Uninstall**, or:
+**Settings > Apps > Paperduck > Uninstall**, or:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\ByteSprite\app\uninstall.ps1" -Purge

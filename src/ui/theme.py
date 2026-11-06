@@ -1,13 +1,15 @@
 """Paper-and-ink UI tokens shared by every ByteSprite surface, matched to the origami duck.
 
 Panels are folded paper: rounded corners, a hairline edge, a soft shadow and one dog-eared corner. The scheme
-follows the Windows app theme (light or dark) at startup; `BYTESPRITE_THEME=light|dark` overrides it.
+follows the Windows app theme at startup unless Settings > Theme picks light or dark;
+`BYTESPRITE_THEME=light|dark` overrides both.
 """
 
 from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 
 from PyQt6.QtCore import QEvent, QObject, QPointF, QRect, QRectF
 from PyQt6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen, QPolygonF
@@ -16,8 +18,29 @@ from PyQt6.QtWidgets import QWidget
 RGBA = tuple[int, int, int, int]
 
 
+# Settings > Theme. A file of its own because every module copies these tokens at import, before state.json loads
+THEME_FILE = Path.home() / ".bytesprite" / "theme.txt"
+THEME_CHOICES = {"system": "Match Windows", "light": "Light", "dark": "Dark"}
+
+
+def saved_theme() -> str:
+    try:
+        choice = THEME_FILE.read_text(encoding="utf-8").strip().lower()
+    except OSError:
+        return "system"
+    return choice if choice in THEME_CHOICES else "system"
+
+
+def save_theme(choice: str) -> None:
+    """Store a Settings > Theme choice; it applies from the next start."""
+    if choice not in THEME_CHOICES:
+        raise ValueError(f"unknown theme {choice!r}")
+    THEME_FILE.parent.mkdir(parents=True, exist_ok=True)
+    THEME_FILE.write_text(choice, encoding="utf-8")
+
+
 def _system_is_light() -> bool:
-    forced = os.environ.get("BYTESPRITE_THEME", "").strip().lower()
+    forced = os.environ.get("BYTESPRITE_THEME", "").strip().lower() or saved_theme()
     if forced in ("light", "dark"):
         return forced == "light"
     if sys.platform != "win32":

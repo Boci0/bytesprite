@@ -660,7 +660,7 @@ class AiChat(QWidget):
                          | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.NoDropShadowWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAcceptDrops(True)
-        self.setWindowTitle("ByteSprite AI")
+        self.setWindowTitle("Paperduck AI")
         self.setFixedWidth(self.WIDTH)
         self._plugin = plugin
         self._on_attach_screen = on_attach_screen
@@ -1016,7 +1016,7 @@ class AiChat(QWidget):
         menu.deleteLater()
 
     def _pick_files(self) -> None:
-        paths, _flt = QFileDialog.getOpenFileNames(self, "ByteSprite AI - Attach Files")
+        paths, _flt = QFileDialog.getOpenFileNames(self, "Paperduck AI - Attach Files")
         for path in paths:
             self.attach_path(Path(path))
 
@@ -1808,7 +1808,7 @@ class AiChat(QWidget):
             state, color = "Setup needed", DANGER_HEX
         self._name.setText(
             f'<span style="font-family:\'{FONT_FAMILY}\'; font-size:10.5pt; font-weight:600; color:{TEXT_HEX};">'
-            f'ByteSprite AI</span>&nbsp;&nbsp;<span style="font-family:\'{FONT_FAMILY}\'; font-size:9pt;'
+            f'Paperduck AI</span>&nbsp;&nbsp;<span style="font-family:\'{FONT_FAMILY}\'; font-size:9pt;'
             f' color:{color};">&#9679; {state}</span>')
         thinking = "" if p.thinking == "off" else f", thinking {p.thinking}"
         name = self._model_name(p.model)
