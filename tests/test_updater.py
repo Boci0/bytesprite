@@ -428,3 +428,15 @@ def test_launch_env_drops_the_parent_qt_dll_folder(monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setenv("PATH", os.pathsep.join([r"C:\app.new\_internal\PyQt6\Qt6\bin", r"C:\Windows"]))
     assert updater.launch_env()["PATH"] == r"C:\Windows"
+
+
+def test_old_shortcut_is_renamed_only_when_it_points_into_this_install(tmp_path: Path) -> None:
+    root = tmp_path / "ByteSprite"
+    ours, other = tmp_path / "desktop", tmp_path / "programs"
+    ours.mkdir()
+    other.mkdir()
+    (ours / "ByteSprite.lnk").write_bytes(b"\x4c\0\0\0" + str(root / "app" / "ByteSprite.exe").encode("utf-16-le"))
+    (other / "ByteSprite.lnk").write_bytes(b"\x4c\0\0\0" + r"C:\dev\desktop_pet\x.exe".encode("utf-16-le"))
+    assert updater.rename_old_shortcuts([ours, other, tmp_path / "missing"], root) == 1
+    assert (ours / "Paperduck.lnk").is_file() and not (ours / "ByteSprite.lnk").exists()
+    assert (other / "ByteSprite.lnk").is_file()  # a dev checkout's shortcut is left alone

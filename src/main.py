@@ -24,7 +24,7 @@ from src.ui.pet_window import PetWindow, build_app_icon
 from src.ui.quick_tools import GlobalHotkeys
 from src.ui.theme import APP_STYLESHEET
 from src.updater import (APP_DIR, FROZEN, FROZEN_EXE, launch_env, finish_frozen_update, is_installed,
-                         remove_old_build)
+                         remove_old_build, rename_old_shortcuts, shortcut_dirs)
 
 # Stored beside plugin state in state.json "tools"; not a ToolPlugin, so it never joins the HUD cycle
 RECENT_FILES_KEY = "recent"
@@ -138,6 +138,7 @@ class ByteSpriteApp:
             self.window.on_hotkeys_changed = self._start_hotkeys
             repair_autostart()  # copies updated in place may hold a Run value for a launcher they never received
             if is_installed():
+                rename_old_shortcuts(shortcut_dirs(), APP_DIR.parent)  # in-place updates never reach the shortcuts
                 # One quiet check per launch; installing waits for Settings > Check for Updates
                 QTimer.singleShot(20_000, lambda: self.window.check_for_updates(install=False))
 

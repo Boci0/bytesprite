@@ -308,6 +308,48 @@ def remove_old_build(app_dir: Path = APP_DIR) -> None:
         shutil.rmtree(app_dir.with_name(app_dir.name + suffix), ignore_errors=True)
 
 
+def shortcut_dirs() -> list[Path]:
+    """The Start Menu Programs and Desktop folders (the Desktop may be redirected to OneDrive)."""
+    if sys.platform != "win32":
+        return []
+    import ctypes
+
+    out = []
+    for csidl in (0x0002, 0x0010):  # CSIDL_PROGRAMS, CSIDL_DESKTOPDIRECTORY
+        buf = ctypes.create_unicode_buffer(260)
+        if ctypes.windll.shell32.SHGetFolderPathW(None, csidl, None, 0, buf) == 0:
+            out.append(Path(buf.value))
+    return out
+
+
+def rename_old_shortcuts(dirs: list[Path], root: Path) -> int:
+    """Rename this install's ByteSprite.lnk to Paperduck.lnk, which only install.ps1 did before; returns how many."""
+    needle = str(root).lower()
+    renamed = 0
+    for folder in dirs:
+        old, new = folder / "ByteSprite.lnk", folder / "Paperduck.lnk"
+        try:
+            data = old.read_bytes().lower()
+        except OSError:
+            continue
+        # shortcut: a substring match on the stored target path, not a .lnk parser; fine for our own shortcuts
+        if needle.encode("utf-16-le") not in data and needle.encode("mbcs", "replace") not in data:
+            continue  # another copy's shortcut, e.g. a dev checkout's
+        try:
+            if new.exists():
+                old.unlink()
+            else:
+                old.rename(new)
+            renamed += 1
+        except OSError as exc:
+            logger.warning("could not rename %s: %s", old, exc)
+    if renamed and sys.platform == "win32":
+        import ctypes
+
+        ctypes.windll.shell32.SHChangeNotify(0x08000000, 0, None, None)  # SHCNE_ASSOCCHANGED: redraw cached icons
+    return renamed
+
+
 class UpdateJob(QObject):
     """Checks GitHub (and, when `install`, applies the update) on a worker thread.
 
