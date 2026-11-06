@@ -23,6 +23,11 @@ irm https://raw.githubusercontent.com/Boci0/paperduck/main/install.ps1 | iex
 It downloads the latest signed release (a standalone `Paperduck.exe` build, no Python needed) and
 refuses to install it unless the signature checks out. Re-running it over an older install replaces it.
 
+Coming from ByteSprite (any version, even 1.0.0)? Run the same command. It closes ByteSprite, copies its
+settings, pet state, saved chats, skills and MCP servers over, keeps Start with Windows and the Desktop
+shortcut if you had them, and removes the old program. Your old data stays in `ByteSprite-backup` and
+`.bytesprite-backup` until you delete it. Saved API keys carry over by themselves.
+
 Or from a clone, which installs from source into a private Python 3.11+ environment:
 
 ```powershell

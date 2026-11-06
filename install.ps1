@@ -10,6 +10,9 @@
 #          %LOCALAPPDATA%\Paperduck\venv
 # Settings and state live in %USERPROFILE%\.paperduck and are kept across updates.
 # Re-running it updates an existing install in place; a standalone install replaces an older venv one.
+# An old ByteSprite install (any version) is migrated: its settings, chats, skills and MCP servers are copied
+# over (files Paperduck already has are kept), its Start with Windows and Desktop shortcut carry over, and the
+# old program, shortcuts and registry entries are removed. The old data folders stay as *-backup.
 
 param(
     [switch]$DesktopShortcut,
@@ -113,9 +116,52 @@ function Test-Ed25519Signature([byte[]]$PublicKey, [string]$File, [byte[]]$Signa
 function Stop-Paperduck {
     $procs = Get-CimInstance Win32_Process -Filter "Name='pythonw.exe' OR Name='python.exe' OR Name='Paperduck.exe'" |
         Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($Root, [StringComparison]::OrdinalIgnoreCase) }
-    foreach ($p in $procs) { taskkill /PID $p.ProcessId 2>$null | Out-Null }
+    Stop-Tree $procs
+}
+
+# Graceful first; /T because a venv's pythonw.exe is a launcher whose child runs the pet
+function Stop-Tree($procs) {
+    foreach ($p in $procs) { taskkill /T /PID $p.ProcessId 2>$null | Out-Null }
     foreach ($p in $procs) { Wait-Process -Id $p.ProcessId -Timeout 10 -ErrorAction SilentlyContinue }
-    foreach ($p in $procs) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }
+    foreach ($p in $procs) { taskkill /T /F /PID $p.ProcessId 2>$null | Out-Null }
+}
+
+# ByteSprite (every version up to 2.0.2) -> Paperduck. Returns @(had Start with Windows, had a Desktop shortcut).
+function Move-ByteSprite([string]$Reg = "HKCU:\Software\Microsoft\Windows\CurrentVersion",
+                         [string]$Programs = [Environment]::GetFolderPath("Programs"),
+                         [string]$Desktop = [Environment]::GetFolderPath("Desktop")) {
+    $oldRoot = Join-Path $env:LOCALAPPDATA "ByteSprite"
+    $oldHome = Join-Path $env:USERPROFILE ".bytesprite"
+    $links = @((Join-Path $Programs "ByteSprite.lnk"), (Join-Path $Desktop "ByteSprite.lnk"))
+    $hadRun = [bool](Get-ItemProperty "$Reg\Run" -Name ByteSprite -ErrorAction SilentlyContinue)
+    $hadDesktop = Test-Path $links[1]
+    if (-not ((Test-Path $oldRoot) -or (Test-Path $oldHome) -or $hadRun -or $hadDesktop)) { return , @($false, $false) }
+    Write-Host "Moving ByteSprite's settings, chats and skills to Paperduck..."
+    Stop-Tree (Get-CimInstance Win32_Process -Filter "Name='pythonw.exe' OR Name='python.exe' OR Name='ByteSprite.exe'" |
+        Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($oldRoot, [StringComparison]::OrdinalIgnoreCase) })
+    # /XC /XN /XO: copy only files Paperduck does not have yet, never overwrite
+    if (Test-Path $oldHome) {
+        robocopy $oldHome (Join-Path $env:USERPROFILE ".paperduck") /E /XC /XN /XO /NFL /NDL /NJH /NJS /NP | Out-Null
+        if ($LASTEXITCODE -ge 8) { throw "Copying $oldHome failed (robocopy $LASTEXITCODE); nothing was removed" }
+    }
+    $program = @("app", "app.old", "app.new", "venv") | ForEach-Object { Join-Path $oldRoot $_ }
+    if (Test-Path $oldRoot) {
+        robocopy $oldRoot $Root /E /XC /XN /XO /XD @program /XF *.log *.log.1 /NFL /NDL /NJH /NJS /NP | Out-Null
+        if ($LASTEXITCODE -ge 8) { throw "Copying $oldRoot failed (robocopy $LASTEXITCODE); nothing was removed" }
+    }
+    Remove-ItemProperty "$Reg\Run" -Name ByteSprite -ErrorAction SilentlyContinue
+    Remove-Item "$Reg\Uninstall\ByteSprite" -Recurse -Force -ErrorAction SilentlyContinue
+    foreach ($old in $links + $program) { Remove-Item $old -Recurse -Force -ErrorAction SilentlyContinue }
+    foreach ($old in $program) { if (Test-Path $old) { Write-Warning "Could not remove $old (still in use?); delete it by hand" } }
+    # Renamed, so a later install does not copy them again (and bring back what was deleted in Paperduck)
+    foreach ($old in $oldHome, $oldRoot) {
+        if (Test-Path $old) {
+            Rename-Item $old "$(Split-Path $old -Leaf)-backup" -ErrorAction SilentlyContinue
+            if (Test-Path $old) { Write-Warning "Could not rename $old; it is copied already, delete it by hand" }
+            else { Write-Host "Old data kept as a backup in $old-backup (delete it once Paperduck looks right)" }
+        }
+    }
+    , @($hadRun, $hadDesktop)
 }
 
 # 1. Source: this folder when run from a clone, else the latest GitHub release (its standalone build if it has one)
@@ -170,6 +216,10 @@ if (-not $Source -or -not (Test-Path (Join-Path $Source "src\main.py"))) {
         }
     }
 }
+
+$moved = Move-ByteSprite
+if ($moved[0]) { $StartWithWindows = $true }
+if ($moved[1]) { $DesktopShortcut = $true }
 
 Write-Host "Installing to $Root"
 if ($Standalone) {
