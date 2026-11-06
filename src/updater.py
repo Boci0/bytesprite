@@ -52,6 +52,7 @@ SIG_NAME = ASSET_NAME + ".sig"
 # Public half of the release signing key; the private half never leaves the maintainer's PC
 RELEASE_PUBLIC_KEY = bytes.fromhex("f0cc212a80d53fe877827253c020e2c01d023c4280eebf47423c6032a0259316")
 _TIMEOUT_S = 15
+CACHE_NAME = "update-cache"  # beside app/: the startup check downloads a newer bundle here, so installing is instant
 
 
 def parse_version(tag: str) -> tuple[int, ...]:
@@ -92,6 +93,29 @@ def latest_release() -> tuple[str, str, str]:
     assets = {a.get("name"): str(a.get("browser_download_url") or "") for a in info.get("assets") or []
               if isinstance(a, dict)}
     return str(info["tag_name"]), assets.get(ASSET_NAME, ""), assets.get(SIG_NAME, "")
+
+
+def _bundle(tag: str, zip_url: str, sig_url: str, progress: Callable[[int], None] | None = None) -> bytes:
+    """The verified bundle for `tag`: the prefetched copy when it still verifies, else downloaded and cached."""
+    cache = APP_DIR.parent / CACHE_NAME
+    zip_path, sig_path = cache / f"{tag}-{ASSET_NAME}", cache / f"{tag}-{SIG_NAME}"
+    if zip_path.is_file() and sig_path.is_file():
+        try:  # verified again on every use: the cache is just files on disk
+            return verified_bundle(zip_path.read_bytes(), sig_path.read_bytes(), tag)
+        except (OSError, ValueError, zipfile.BadZipFile) as exc:
+            logger.warning("cached update %s unusable, downloading again: %s", tag, exc)
+    if not zip_url or not sig_url:
+        raise ValueError("unsigned release")
+    sig = _get(sig_url, 1024)
+    data = verified_bundle(_get(zip_url, _MAX_ZIP_BYTES, progress), sig, tag)
+    try:
+        shutil.rmtree(cache, ignore_errors=True)  # only one release is ever kept
+        cache.mkdir(parents=True, exist_ok=True)
+        zip_path.write_bytes(data)
+        sig_path.write_bytes(sig)  # written last: a zip cut off mid-write has no signature beside it
+    except OSError as exc:
+        logger.warning("could not cache update %s: %s", tag, exc)
+    return data
 
 
 def zip_version(data: bytes) -> str:
@@ -288,7 +312,7 @@ class UpdateJob(QObject):
     """Checks GitHub (and, when `install`, applies the update) on a worker thread.
 
     `finished` delivers (status, tag) on the Qt main thread; status is one of
-    'current', 'available', 'installed', 'error'.
+    'current', 'available', 'ready' (downloaded and verified in the background), 'installed', 'error'.
     """
 
     finished = pyqtSignal(str, str)
@@ -302,15 +326,23 @@ class UpdateJob(QObject):
         try:
             tag, zip_url, sig_url = latest_release()
             if not is_newer(tag):
+                shutil.rmtree(APP_DIR.parent / CACHE_NAME, ignore_errors=True)  # the cached update is installed
                 self.finished.emit("current", tag)
                 return
-            if not install or not is_installed():
+            if not is_installed():
                 self.finished.emit("available", tag)
                 return
-            if not zip_url or not sig_url:
-                raise ValueError("unsigned release")
+            if not install:  # the quiet startup check: fetch it now, at whatever speed GitHub gives
+                try:
+                    _bundle(tag, zip_url, sig_url)
+                except (OSError, ValueError, zipfile.BadZipFile, http.client.HTTPException) as exc:
+                    logger.warning("prefetching update %s failed: %s: %s", tag, type(exc).__name__, exc)
+                    self.finished.emit("available", tag)  # still say it exists; installing retries and explains
+                    return
+                self.finished.emit("ready", tag)
+                return
             apply = install_frozen_zip if FROZEN else install_source_zip
-            apply(verified_bundle(_get(zip_url, _MAX_ZIP_BYTES, self.progress.emit), _get(sig_url, 1024), tag))
+            apply(_bundle(tag, zip_url, sig_url, self.progress.emit))
         except (OSError, ValueError, KeyError, zipfile.BadZipFile, http.client.HTTPException) as exc:
             logger.warning("update %s failed: %s: %s", tag or "check", type(exc).__name__, exc)
             self.finished.emit("error", str(exc) or tag)

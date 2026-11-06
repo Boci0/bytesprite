@@ -1193,6 +1193,10 @@ class PetWindow(QWidget):
             if self._on_notification is not None:
                 self._on_notification(f"{'Installing' if FROZEN else 'Updated to'} {tag}, restarting")
             QTimer.singleShot(1500, self.restart)
+        elif status == "ready":  # the startup check already downloaded and verified it
+            self._show_toast(f"NEW {tag}", QColor("#FFCD75"))
+            if self._on_notification is not None:
+                self._on_notification(f"Paperduck {tag} is downloaded: Settings > Check for Updates installs it")
         elif status == "available":
             self._show_toast(f"NEW {tag}", QColor("#FFCD75"))
             if self._on_notification is not None:

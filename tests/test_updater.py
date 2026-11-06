@@ -21,9 +21,10 @@ def _zipball(files: dict[str, str]) -> bytes:
 
 
 def _app(tmp_path: Path) -> Path:
-    (tmp_path / "src").mkdir()
-    (tmp_path / "src" / "main.py").write_text("old")
-    return tmp_path
+    """`<tmp>/app` like a real install, so the update cache beside it stays inside this test's folder."""
+    (tmp_path / "app" / "src").mkdir(parents=True)
+    (tmp_path / "app" / "src" / "main.py").write_text("old")
+    return tmp_path / "app"
 
 
 def test_version_compare() -> None:
@@ -181,6 +182,45 @@ def test_update_job_installs_only_signed_releases(case: str, tmp_path: Path, mon
                 "tampered": ("error", "bad signature")}[case]
     assert results == [expected]
     assert (app / "src" / "main.py").read_text() == ("v99.0.0" if case == "signed" else "old")
+
+
+def test_startup_check_prefetches_so_install_needs_no_download(tmp_path: Path,
+                                                                monkeypatch: pytest.MonkeyPatch) -> None:
+    server = HTTPServer(("127.0.0.1", 0), _FakeGitHub)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    data = _bundle("99.0.0")
+    assets = [{"name": "bytesprite.zip", "browser_download_url": f"{base}/zip"},
+              {"name": "bytesprite.zip.sig", "browser_download_url": f"{base}/sig"}]
+    _FakeGitHub.files = {"/latest": json.dumps({"tag_name": "v99.0.0", "assets": assets}).encode(),
+                         "/zip": data, "/sig": _sig(data)}
+    app = _app(tmp_path)
+    monkeypatch.setattr(updater, "LATEST_API", f"{base}/latest")
+    monkeypatch.setattr(updater, "RELEASE_PUBLIC_KEY", _TEST_PUBLIC)
+    monkeypatch.setattr(updater, "APP_DIR", app)
+    monkeypatch.setattr(updater, "is_installed", lambda: True)
+    real_install = updater.install_source_zip
+    monkeypatch.setattr(updater, "install_source_zip", lambda d: real_install(d, app))
+    results: list[tuple[str, str]] = []
+    job = updater.UpdateJob()
+    job.finished.connect(lambda status, tag: results.append((status, tag)))
+    cache = tmp_path / updater.CACHE_NAME
+    try:
+        job._run(install=False)
+        assert results == [("ready", "v99.0.0")] and (app / "src" / "main.py").read_text() == "old"
+        del _FakeGitHub.files["/zip"]  # installing now must come from the cache
+        job._run(install=True)
+        assert results[-1] == ("installed", "v99.0.0") and (app / "src" / "main.py").read_text() == "v99.0.0"
+        (app / "src" / "main.py").write_text("old")
+        (cache / "v99.0.0-bytesprite.zip").write_bytes(data + b"evil")  # a tampered cache is not trusted
+        job._run(install=True)
+        assert results[-1] == ("error", "HTTP Error 404: Not Found")
+        assert (app / "src" / "main.py").read_text() == "old"
+        _FakeGitHub.files["/latest"] = json.dumps({"tag_name": "v0.0.1", "assets": []}).encode()
+        job._run(install=False)  # up to date: the leftover download goes
+        assert results[-1][0] == "current" and not cache.exists()
+    finally:
+        server.shutdown()
 
 
 def test_update_job_reports_a_broken_http_reply(monkeypatch: pytest.MonkeyPatch,

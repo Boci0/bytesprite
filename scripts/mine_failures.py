@@ -32,7 +32,7 @@ PUSHBACK = re.compile(r"\b(still|again|wrong|not what|that'?s not|isn'?t|doesn'?
                       r"broke|broken|why did|stop|no,|nope|instead|you forgot|missing|try again|not working)\b", re.I)
 RETRY_RUN = 3  # the same call this many times in one answer is a retry chain
 _KNOWN = {"app", "venv", "sessions", "skills", "bytesprite.log", "crash.log", "memory.md", "rules.md", "mcp.json",
-          "state.json", "state.json.bak", ".installed"}
+          "state.json", "state.json.bak", ".installed", "update-cache"}
 
 
 def _shape(note: str) -> str:
