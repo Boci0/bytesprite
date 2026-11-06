@@ -1366,6 +1366,9 @@ class AiChat(QWidget):
         info.setFont(ui_font(7.5))
         info.setStyleSheet(f"color: {TEXT_DIM_HEX}; padding: 0 2px;")
         layout.addWidget(info)
+        # A widget added to a row already on screen stays hidden until Qt's queued show, and the thread is sized
+        # before that, so the usage line was clipped off. Show it now so the relayout counts it.
+        info.show()
         self._last_info = info
         QTimer.singleShot(3000, self._fetch_balance)  # DeepSeek books the charge a moment after the answer
         if not reply.reasoning:
@@ -1388,6 +1391,7 @@ class AiChat(QWidget):
 
         toggle.clicked.connect(flip)
         layout.addWidget(toggle, 0, Qt.AlignmentFlag.AlignLeft)
+        toggle.show()  # same as the usage line above
         layout.addWidget(body)
 
     def _add_saved_row(self, path: Path) -> None:

@@ -1167,3 +1167,23 @@ def test_system_prompt_names_the_scratch_folder() -> None:
     system = chat_messages([{"role": "user", "content": "hi"}])[0]["content"]
     assert str(scratch_dir()) in system and f"never in {skills_dir().parent}" in system
     assert scratch_dir().is_dir()
+
+
+def test_reply_usage_line_is_not_clipped(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The usage line joins a row already on screen; Qt shows it a pass later, so the thread was sized without it
+    from src.tools.ai_assist import AiReply
+    import time
+    app, _plugin, chat = _chat(monkeypatch, "https://api.deepseek.com")
+    monkeypatch.setattr(chat, "_fetch_balance", lambda: None)
+    chat.show()
+    chat._asked = ("deepseek-chat", "low")
+    chat._accept_reply(AiReply(text="Hello. What can I help you with?", model="deepseek-chat", total_tokens=912,
+                               cost_estimate=0.0003))
+    for _ in range(10):
+        app.processEvents()
+        time.sleep(0.01)
+    info = chat._last_info
+    assert info.isVisible() and "912 tokens" in info.text()
+    bottom = info.mapTo(chat._stack, info.rect().bottomLeft()).y()
+    assert bottom <= chat._stack.height(), (bottom, chat._stack.height())
+    chat.close()

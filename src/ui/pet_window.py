@@ -260,8 +260,9 @@ class PetWindow(QWidget):
 
     WINDOW_WIDTH: int = 176
     WINDOW_HEIGHT: int = 222
-    SPRITE_SCALE: int = 4  # default: 32x32 * 4 = 128x128 crisp integer scaling
+    SPRITE_SCALE: int = 4  # the largest size, 32x32 * 4 = 128x128; WINDOW_HEIGHT is laid out for it
     PET_SCALES: dict[int, str] = {2: "Small", 3: "Medium", 4: "Large"}  # whole numbers keep the pixels crisp
+    DEFAULT_PET_SCALE: int = 2  # Small until the user picks another size (a saved size wins)
     DRAG_THRESHOLD_PX: int = 5
     HOLD_TO_WHEEL_MS: int = 450
     # First-run tips on the hint card: (title, how-to line), one at a time, TIP_GAP_S apart
@@ -298,7 +299,7 @@ class PetWindow(QWidget):
         self._on_quit_requested = on_quit_requested
         self._on_notification = on_notification
 
-        self.pet_scale = self.SPRITE_SCALE  # Settings > Pet Size; persisted by ByteSpriteApp
+        self.pet_scale = self.DEFAULT_PET_SCALE  # Settings > Pet Size; persisted by ByteSpriteApp
         self._layout_sprite()
         self._hud_rect = QRect(8, 4, self.WINDOW_WIDTH - 16, 72)
 
