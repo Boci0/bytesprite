@@ -468,12 +468,15 @@ def test_topmost_yields_to_held_buttons_and_foreign_topmost_windows() -> None:
 
 
 def test_away_naps_and_wakes_with_a_yawn(qapp: QApplication, monkeypatch: pytest.MonkeyPatch) -> None:
+    import src.tools.system_monitor as system_monitor
     import src.ui.pet_window as pw
 
+    # real CPU or RAM over 90% (a busy suite) would make it hungry from the first sample, taken while it is built
+    monkeypatch.setattr(system_monitor, "get_system_metrics", lambda: system_monitor.SystemMetrics(5.0, 40.0, 50.0))
     sm = PetStateMachine(PetStats())
     win = PetWindow(state_machine=sm, animation_controller=AnimationController(size=32), auto_wander=False)
     try:
-        monkeypatch.setattr(sm, "refresh_metrics", lambda: False)  # real RAM over 90% would make it hungry
+        monkeypatch.setattr(sm, "refresh_metrics", lambda: False)
         monkeypatch.setattr(pw, "idle_seconds", lambda: win.AWAY_AFTER_S + 1)
         monkeypatch.setattr(pw, "display_kept_on", lambda: True)  # a video is playing
         win._check_away()
