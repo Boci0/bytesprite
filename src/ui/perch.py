@@ -31,6 +31,15 @@ def pick_perch(rects: Sequence[Rect], feet_x: int, feet_y: int, reach: int = PER
     return None
 
 
+def perch_covered(rects: Sequence[Rect], index: int | None, feet_x: int) -> bool:
+    """True when the perch (rects[index], z-order topmost first) is no longer where the duck can be seen sitting:
+    gone from the list (index None) or a window above it covers its top edge under the feet."""
+    if index is None:
+        return True
+    top = rects[index][1]
+    return any(_inside(above, feet_x, top) for above in rects[:index])
+
+
 def perch_position(edge: Rect, center_x: int, sprite_cx: int, feet_y: int, margin: int) -> tuple[int, int]:
     """Pet window top-left that stands the feet (local y `feet_y`) on the edge's top, with the sprite centre
     (local x `sprite_cx`) kept at least `margin` inside the edge's ends."""
@@ -95,9 +104,10 @@ def top_level_windows() -> list[tuple[int, Rect]]:
         pid = wintypes.DWORD()
         u.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
         if pid.value != me:
-            tool = u.GetWindowLongW(hwnd, -20) & 0x80  # WS_EX_TOOLWINDOW
+            ex = u.GetWindowLongW(hwnd, -20)
+            skip = ex & 0xA0  # WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT (click-through overlays show nothing to sit on)
             cls = _class(u, hwnd)
-            if (not tool and cls not in ("Progman", "WorkerW")) or cls in TASKBAR_CLASSES:  # not the desktop
+            if (not skip and cls not in ("Progman", "WorkerW")) or cls in TASKBAR_CLASSES:  # not the desktop
                 rect = _physical_rect(u, hwnd)
                 if rect is not None:
                     found.append((int(hwnd), rect))

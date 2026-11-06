@@ -300,6 +300,7 @@ class PetWindow(QWidget):
     LONG_TASK_S: float = 30.0  # an AI answer that took this long cheers when it lands
     AWAY_AFTER_S: float = 300.0  # no keyboard or mouse input this long: the idle clip becomes a nap
     PERCH_TICK_MS: int = 16  # perch follow and fall frame time (about 60 fps)
+    PERCH_COVER_EVERY: int = 6  # perch ticks between checks that no other window covers the duck's footing
     FALL_ACCEL: float = 2400.0  # px/s^2: a flutter, a bit gentler than a drop
     PREWARM_DELAY_MS: int = 150  # a drag has usually passed DRAG_THRESHOLD_PX by now; still before the wheel opens
 
@@ -350,6 +351,7 @@ class PetWindow(QWidget):
         self._walk_steps_remaining: int = 0
         self._perch: tuple[int, int] | None = None  # (hwnd, sprite centre x minus the edge's left) while sitting
         self._fall_to: int | None = None  # window y a perch fall ends at
+        self._perch_ticks = 0
         self._fall_x, self._fall_y, self._fall_v = 0, 0.0, 0.0  # x, exact y, speed in px/s
         # Perch follow and falls run at display rate (the 90ms overlay tick looked choppy); only while needed
         self._perch_timer = QTimer(self)
@@ -779,16 +781,39 @@ class PetWindow(QWidget):
         """On release: sit on the window (or taskbar) whose top edge is within reach of the feet."""
         if QGuiApplication.platformName() != "windows":
             return  # offscreen tests: never perch on the real desktop's windows
-        screens = self._qt_screens()
-        wins = perch.top_level_windows()
-        rects = [perch.to_logical(r, screens) for _, r in wins]
+        hwnds, rects = self._perch_candidates()
         sx, fy = self._feet_local()
         i = perch.pick_perch(rects, self.x() + sx, self.y() + fy)
         if i is None:
             return
-        self._perch = (wins[i][0], self.x() + sx - rects[i][0])
+        self._perch = (hwnds[i], self.x() + sx - rects[i][0])
+        self._perch_ticks = 0
         if self._follow_perch(fall=False):
             self._start_perch_timer()
+
+    def _perch_candidates(self) -> tuple[list[int], list[perch.Rect]]:
+        """Windows the duck could sit on, topmost first, in logical px."""
+        screens = self._qt_screens()
+        wins = perch.top_level_windows()
+        return [h for h, _ in wins], [perch.to_logical(r, screens) for _, r in wins]
+
+    def _check_perch_cover(self) -> None:
+        """Another window came up over the spot the duck sits on (alt-tab, a click on another app): hop onto that
+        window's top edge when it is right at the feet, else fall to the floor."""
+        assert self._perch is not None
+        hwnds, rects = self._perch_candidates()
+        sx, fy = self._feet_local()
+        fx = self.x() + sx
+        index = hwnds.index(self._perch[0]) if self._perch[0] in hwnds else None
+        if not perch.perch_covered(rects, index, fx):
+            return
+        j = perch.pick_perch(rects, fx, self.y() + fy)
+        if j is not None:
+            self._perch = (hwnds[j], fx - rects[j][0])
+            self._follow_perch()  # falls itself when there is no room up there
+            return
+        self._perch = None
+        self._start_fall()
 
     def _start_perch_timer(self) -> None:
         if not self._perch_timer.isActive():
@@ -803,8 +828,12 @@ class PetWindow(QWidget):
             self.move(self._fall_x, round(self._fall_y))
             if self.y() >= self._fall_to:
                 self._land_fall()
-        elif self._perch is not None and self._walk_steps_remaining <= 0:
-            self._follow_perch()  # a hop steps along the edge on the overlay tick instead
+        elif self._perch is not None:
+            self._perch_ticks += 1
+            if self._perch_ticks % self.PERCH_COVER_EVERY == 0:
+                self._check_perch_cover()  # a full window scan (~0.7ms), so not every frame
+            if self._perch is not None and self._walk_steps_remaining <= 0:
+                self._follow_perch()  # a hop steps along the edge on the overlay tick instead
         if self._perch is None and self._fall_to is None:
             self._perch_timer.stop()
 
