@@ -39,6 +39,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from src.tools.errands import KINDS as ERRAND_KINDS
+
 MAX_FILE_CHARS = 30000  # one read_file call; the model pages on with start_line
 MAX_FILE_BYTES = 2 * 1024 * 1024
 MAX_LISTED = 200
@@ -124,6 +126,19 @@ TOOL_SPECS: list[dict[str, Any]] = [
     _fn("scroll", "Scroll the wheel at the cursor, or at x and y when given: positive amounts scroll down, negative "
         "up, one notch each (max 20).", {"amount": {"type": "integer"}, "x": {"type": "integer"},
                                         "y": {"type": "integer"}}, ("amount",)),
+    _fn("set_errand", "Wait for something and act on it later: when the trigger happens, the pet runs the "
+        "instruction in this chat as a new message to you, even after the user left (the chat may be resumed for it). "
+        "Use it for 'when X, do Y', or instead of polling a build, download, server or timer, or asking the user to "
+        "come back. Triggers are checked on the PC for free; the model runs once, when it fires. The user allows "
+        "each errand first. Kinds: " + "; ".join(f"{k} ({v})" for k, v in ERRAND_KINDS.items()) + ".",
+        {"when": {"type": "object", "description": "{\"kind\": ..., plus its fields}, e.g. {\"kind\": "
+                  "\"background_done\", \"id\": \"bg2\"} or {\"kind\": \"file_appears\", \"pattern\": "
+                  "\"~/Downloads/*.zip\"}"},
+         "instruction": {"type": "string", "description": "What to do when it fires, written to your future self "
+                         "with everything needed (paths, what done looks like)"}},
+        ("when", "instruction")),
+    _fn("cancel_errand", "Cancel a waiting errand by its id (pet_status lists them).", {"id": {"type": "string"}},
+        ("id",)),
     _fn("pet_status", "The pet's tool readouts: CPU/RAM, focus timer, Project Folder and git status, clipboard vault."),
     _fn("pet_action", "Run one Paperduck action.",
         {"action": {"type": "string", "enum": list(PET_ACTIONS),
@@ -211,7 +226,7 @@ TOOL_SPECS: list[dict[str, Any]] = [
 ]
 # the user allows each call in the chat (or all of them for a chat)
 COMPUTER_TOOLS = {"mouse_click", "type_text", "press_key", "scroll"}  # computer_batch runs these as its steps
-APPROVED_TOOLS = COMPUTER_TOOLS | {"computer_batch", "edit_file", "edit_files", "run_command", "start_background", "add_mcp_server", "add_skill", "update_skill", "remember", "forget"}
+APPROVED_TOOLS = COMPUTER_TOOLS | {"computer_batch", "edit_file", "edit_files", "run_command", "start_background", "add_mcp_server", "add_skill", "update_skill", "remember", "forget", "set_errand"}
 FILE_TOOLS = {"list_files", "read_file", "find_files", "search_text"}
 
 
@@ -923,6 +938,19 @@ class BackgroundProcs:
                  if proc.stopped else f"exited with code {code}")
         note = f"... {lost} earlier characters dropped ...\n" if lost else ""
         return f"{state}\n{note}{new.strip() or '(no new output)'}"
+
+    def peek(self, name: str, since: int = 0) -> tuple[int | None, bool, str, int] | None:
+        """(exit code or None while running, stopped as asked, output written after offset `since`, offset now)
+        without moving the model's read cursor; None when there is no such process. Errands watch with it."""
+        with self._lock:
+            proc = self._procs.get(name)
+        if proc is None:
+            return None
+        code = proc.proc.poll()
+        with proc.lock:
+            end = proc.dropped + len(proc.text)
+            text = proc.text[max(0, since - proc.dropped):]
+        return code, proc.stopped, text, end
 
     def snapshot(self) -> list[tuple[str, str]]:
         """(name, command) of the running processes, for the chat to list."""

@@ -15,6 +15,7 @@ import ctypes
 import json
 import tempfile
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable
 from pathlib import Path
@@ -30,6 +31,7 @@ from src.tools.ai_tools import (calculate, COMPUTER_TOOLS, MAX_BATCH_STEPS, FILE
                                 plan_edits, plan_memory, plan_skill_update, print_to_pdf_paths, resolve,
                                 PDF_WAIT_S, changed_media, file_stamp, media_stamps, wait_for_new_file, run_command, run_file_tool, save_args,
                                 skill_text, skills_dir, task_list, write_memory, write_skill)
+from src.tools.errands import describe as describe_errand
 from src.tools.file_forge import scrub_metadata
 from src.tools.macros import parse_recipe
 from src.tools.mcp_client import SEP, McpHub, add_server, find_servers, safe_name
@@ -38,6 +40,7 @@ from src.ui.quick_tools import ocr_image_file
 GUI_TIMEOUT_S = 15.0
 SAVE_TIMEOUT_S = 600.0  # the Save dialog waits on the user
 APPROVE_TIMEOUT_S = 300.0  # the user reads the MCP confirm, a diff or a command in the chat
+ERRAND_APPROVE_S = 1800.0  # an errand runs while the user may be away, so its approvals wait longer
 MAX_CLIP_CHARS = 12000
 MAX_SCREEN_CHARS = 8000
 
@@ -117,6 +120,7 @@ class AiToolHost(QObject):
     """The ToolHost the chat hands to ask(); `window` is the PetWindow."""
 
     _call = pyqtSignal(object)
+    activity = pyqtSignal(str)  # the tool that runs now, "approval" while one waits on the user, "" when idle
 
     def __init__(self, window: Any, mcp: McpHub | None = None) -> None:
         super().__init__(window)  # lives on the Qt thread, so the queued signal lands there
@@ -126,6 +130,7 @@ class AiToolHost(QObject):
         self.mcp = mcp or McpHub()
         self.procs = BackgroundProcs()
         self.cancel = threading.Event()  # the chat swaps in a fresh one per answer and sets it on Stop
+        self.approve_s = APPROVE_TIMEOUT_S  # the chat raises it for an errand's answer
         self._call.connect(self._on_call)
         self._idle_timer = QTimer(self)
         self._idle_timer.timeout.connect(self._close_idle_mcp)
@@ -145,13 +150,22 @@ class AiToolHost(QObject):
         return TOOL_SPECS + self.mcp.specs()
 
     def run(self, name: str, args: dict[str, Any]) -> str:
+        """One tool call; the pet acts it out meanwhile (`activity`)."""
+        self._tool = name  # what the pet goes back to acting out after an approval
+        self.activity.emit(name)
+        try:
+            return self._run(name, args)
+        finally:
+            self.activity.emit("")
+
+    def _run(self, name: str, args: dict[str, Any]) -> str:
         server = self.mcp.server_of(name)
         if server is not None:
             chat = self._win._ai_chat
             shown = json.dumps(args, ensure_ascii=False)
             # Values only: an argument named "format" or "truncate" is not a destructive command
             risk = "destructive tool" if self.mcp.is_destructive(name) else destructive_reason("\n".join(_strings(args)))
-            allowed = self._on_gui(lambda done: chat.confirm_mcp(server, name, done, shown[:600], risk), APPROVE_TIMEOUT_S)
+            allowed = self._waiting(lambda done: chat.confirm_mcp(server, name, done, shown[:600], risk))
             return self.mcp.call(name, args) if allowed is True else "error: the user did not allow this MCP server"
         if name in FILE_TOOLS:
             secrets = False
@@ -179,6 +193,8 @@ class AiToolHost(QObject):
             if not self._allowed("edit_file", ask, "file edits"):
                 return "error: the user declined this edit"
             return apply_edits(edits)
+        if name in ("set_errand", "cancel_errand"):
+            return self._errand(name, args)
         if name == "calculate":  # pure arithmetic, nothing to allow
             return calculate(args.get("expression"))
         if name == "plan_tasks":
@@ -321,6 +337,42 @@ class AiToolHost(QObject):
         out = self._on_gui(lambda done: done(self._pet_tool(name, args)))
         return out if isinstance(out, str) else "error: the pet did not answer in time"
 
+    def _errand(self, name: str, args: dict[str, Any]) -> str:
+        """set_errand asks every time (it is an instruction that runs later, maybe while the user is away);
+        cancel_errand only removes one. The plugin is touched on the Qt thread, where the pet polls it."""
+        errands = self._win._state_machine.registry.get_plugin("errands")
+        if errands is None:
+            return "error: errands are not available"
+        if name == "cancel_errand":
+            out = self._on_gui(lambda done: done(errands.cancel(args.get("id"))))
+            return out if isinstance(out, str) else "error: the pet did not answer in time"
+        try:
+            from src.tools.errands import parse_when
+
+            kind, arg = parse_when(args.get("when"))
+        except ValueError as exc:
+            return f"error: {exc}"
+        instruction = args.get("instruction")
+        if not isinstance(instruction, str) or not instruction.strip():
+            return "error: give the instruction to follow when it fires"
+        if not self._allowed(f"errand:{time.monotonic()}", f"The model wants to set an errand: {describe_errand(kind, arg)}, "
+                             "it will run this in this chat (edits and commands still ask you):\n\n"
+                             f"{instruction.strip()}", "errand"):
+            return "error: the user declined this errand"
+
+        def add(done: Callable[[Any], None]) -> None:
+            try:
+                errand = errands.add(args.get("when"), instruction, self._win._ai_chat.ensure_sid())
+            except ValueError as exc:
+                done(f"error: {exc}")
+                return
+            self._win.update()  # the errand tag
+            done(f"errand {errand.id} set: {describe_errand(errand.kind, errand.arg)}. It runs in this chat when "
+                 "that happens; tell the user they can leave it to you.")
+
+        out = self._on_gui(add)
+        return out if isinstance(out, str) else "error: the pet did not answer in time"
+
     def _computer(self, name: str, args: dict[str, Any]) -> str:
         """Mouse and keyboard on the primary monitor. Every action needs the user's Allow (once or for the chat); a
         delete key or a destructive typed command asks every time."""
@@ -429,7 +481,15 @@ class AiToolHost(QObject):
         chat = self._win._ai_chat
         ask = (lambda done: chat.confirm(key, text, what, done, danger=risk)) if risk else (
             lambda done: chat.confirm(key, text, what, done))
-        return self._on_gui(ask, APPROVE_TIMEOUT_S) is True
+        return self._waiting(ask) is True
+
+    def _waiting(self, ask: Callable[[Callable[[Any], None]], None]) -> Any:
+        """An approval on the Qt thread: the pet waits with the user (`activity` "approval") until it is answered."""
+        self.activity.emit("approval")
+        try:
+            return self._on_gui(ask, self.approve_s)
+        finally:
+            self.activity.emit(getattr(self, "_tool", ""))
 
     def allow_link(self, name: str, url: str) -> bool:
         """A link the model built after reading local data: the user checks the full URL for their data."""
@@ -507,7 +567,10 @@ class AiToolHost(QObject):
                 rows.append(f"{hud.badge_left} [{hud.badge_right}] {bars}. {hud.detail}".strip())
             project = self._win._state_machine.registry.get_plugin("project")
             repo = getattr(project, "repo", None)
-            return "\n".join([*rows, f"Project Folder: {repo or 'none chosen'}"])
+            errands = self._win._state_machine.registry.get_plugin("errands")
+            waiting = errands.summary() if errands is not None else ""
+            return "\n".join([*rows, f"Project Folder: {repo or 'none chosen'}",
+                              "Errands waiting:\n" + waiting if waiting else "No errands waiting"])
         if name == "pet_action":
             action = args.get("action")
             if action not in PET_ACTIONS:

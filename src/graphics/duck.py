@@ -17,7 +17,7 @@ from PyQt6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen, QPolygonF,
 REQUIRED_ANIMATIONS: tuple[str, ...] = ("idle", "blink", "walk", "sleep", "focus", "spin")
 ALL_ANIMATIONS: tuple[str, ...] = (
     "idle", "blink", "walk", "sleep", "focus", "spin", "hungry", "eating", "music",
-    "cheer", "yawn", "dangle", "land", "flinch", "shine",
+    "cheer", "yawn", "dangle", "land", "flinch", "shine", "type", "scan", "wait",
 )
 ONESHOT_ANIMATIONS: frozenset[str] = frozenset({"blink", "eating", "spin", "cheer", "yawn", "land", "flinch", "shine"})
 
@@ -219,6 +219,31 @@ def _build_clips() -> dict[str, tuple[list[Pose], list[int]]]:
         (replace(N, hr=-6, eye="happy", sq=1.02, tail=6), 2, 100),
         (replace(N, eye="happy"), 1, 220),
     ], loop=False)
+    # Type (the chat runs a command or edits a file): hunched over its work, wing tip tapping fast, beak set
+    desk = replace(N, eye="half", hr=10, hx=3, hy=3, lean=3, sq=0.98)
+    clips["type"] = _clip([
+        (replace(desk, wing=10), 1, 90),
+        (replace(desk, wing=20, hy=3.6), 1, 90),
+        (replace(desk, wing=8, hr=11), 1, 90),
+        (replace(desk, wing=22, hy=3.6, tail=3), 1, 90),
+        (replace(desk, wing=12, hr=9, nlift=2), 2, 110),
+    ], loop=True)
+    # Scan (the chat searches the web or asks an MCP server): head up and craning, looking out ahead then back
+    look = replace(N, hr=-10, hy=-3, sq=1.03, eye="wide")
+    clips["scan"] = _clip([
+        (replace(look, hx=4, lean=2), 4, 150),
+        (replace(look, hx=4, lean=2, hr=-12), 2, 200),
+        (replace(look, hx=-3, lean=-1, hr=-6, tail=4), 4, 150),
+        (replace(look, hx=-3, lean=-1, hr=-8, tail=4), 2, 200),
+    ], loop=True)
+    # Wait (an approval card waits on the user): a wing up like a raised hand, head cocked, a patient foot tap
+    hand = replace(N, wing=58, hr=-8, hx=1, tail=2)
+    clips["wait"] = _clip([
+        (hand, 3, 150),
+        (replace(hand, nlift=4, hr=-10, wing=62), 2, 120),
+        (hand, 3, 150),
+        (replace(hand, eye="closed", hr=-9), 1, 110),
+    ], loop=True)
     return clips
 
 
