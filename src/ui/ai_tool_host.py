@@ -117,24 +117,43 @@ def grab_screen(win: Any, done: Callable[[Any], None], primary: bool = False, wi
 
 
 SPOT_R = 16  # half the side of the square compared around a click
+ROW_LEFT, ROW_RIGHT, ROW_R = 700, 300, 10  # the strip across the click's row: a list row's label sits to the left
 
 
-def spot_changed(old: QImage, new: QImage, x: int, y: int) -> bool:
-    """True when a fifth of the pixels around (x, y) differ by more than 48 in a channel between two grabs: the page
-    moved, scrolled, re-rendered or a popup covers the spot. A blinking caret or a hover tint stays under that."""
-    if old.size() != new.size():
-        return True
-    rect = QRect(x - SPOT_R, y - SPOT_R, 2 * SPOT_R + 1, 2 * SPOT_R + 1).intersected(old.rect())
-    if rect.isEmpty():
-        return False
+def _diff(old: QImage, new: QImage, rect: QRect) -> tuple[int, int]:
+    """(pixels that differ by more than 48 in a channel, columns holding any of them) inside `rect`."""
     a, b = (img.copy(rect).convertToFormat(QImage.Format.Format_RGB32) for img in (old, new))
     pa, pb = a.constBits(), b.constBits()
     pa.setsize(a.sizeInBytes())
     pb.setsize(b.sizeInBytes())
-    da, db = bytes(pa), bytes(pb)
-    changed = sum(1 for i in range(0, len(da), 4)
-                  if max(abs(da[i] - db[i]), abs(da[i + 1] - db[i + 1]), abs(da[i + 2] - db[i + 2])) > 48)
-    return changed * 5 > len(da) // 4
+    da, db, stride = bytes(pa), bytes(pb), a.bytesPerLine()
+    changed, cols = 0, set()
+    for row in range(a.height()):
+        i = row * stride
+        if da[i:i + stride] == db[i:i + stride]:
+            continue
+        for x in range(a.width()):
+            j = i + 4 * x
+            if max(abs(da[j] - db[j]), abs(da[j + 1] - db[j + 1]), abs(da[j + 2] - db[j + 2])) > 48:
+                changed += 1
+                cols.add(x)
+    return changed, len(cols)
+
+
+def spot_changed(old: QImage, new: QImage, x: int, y: int) -> bool:
+    """True when the click at (x, y) could hit something else than the model saw: a fifth of the square around it
+    changed (moved, scrolled, re-rendered, covered), or text along its row did, so an identical button there now
+    belongs to another row. A blinking caret (under 6 columns) or a hover tint does not count."""
+    if old.size() != new.size():
+        return True
+    square = QRect(x - SPOT_R, y - SPOT_R, 2 * SPOT_R + 1, 2 * SPOT_R + 1).intersected(old.rect())
+    if square.isEmpty():
+        return False
+    changed, _cols = _diff(old, new, square)
+    if changed * 5 > square.width() * square.height():
+        return True
+    row = QRect(x - ROW_LEFT, y - ROW_R, ROW_LEFT + ROW_RIGHT + 1, 2 * ROW_R + 1).intersected(old.rect())
+    return _diff(old, new, row)[1] >= 6
 
 
 class AiToolHost(QObject):
@@ -440,8 +459,8 @@ class AiToolHost(QObject):
         if self._refused is not None and self._refused[:2] == (x, y) and self._refused[2] != self._maps:
             return ""
         self._refused = (x, y, self._maps)
-        return (f"error: not clicked: the screen at ({x}, {y}) changed since you last looked (the page moved, "
-                "scrolled, re-rendered or something covers it), so the click could land on the wrong thing. "
+        return (f"error: not clicked: the screen at ({x}, {y}) changed since you last looked (the page moved, a list "
+                "row shifted, it scrolled, re-rendered or something covers it), so the click could land on the wrong thing. "
                 "Call screen_map again and click the new position.")
 
     def _batch(self, steps: Any) -> str:

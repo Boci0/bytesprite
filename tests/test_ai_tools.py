@@ -935,9 +935,14 @@ def test_click_refused_when_the_screen_changed_since_screen_map() -> None:
     caret = page.copy()
     with QPainter(caret) as paint:
         paint.fillRect(50, 34, 2, 30, Qt.GlobalColor.black)
-    assert spot_changed(page, moved, 50, 50) and not spot_changed(page, moved, 150, 50)
+    assert spot_changed(page, moved, 50, 50) and spot_changed(page, moved, 150, 50)  # same row
+    assert not spot_changed(page, moved, 150, 90)
     assert not spot_changed(page, tinted, 50, 50) and not spot_changed(page, caret, 50, 50)
     assert spot_changed(page, page.scaled(100, 50), 10, 10)  # another resolution
+    row = page.copy()
+    with QPainter(row) as paint:  # the same button, but the row's label to its left now names another order
+        paint.fillRect(10, 46, 12, 8, Qt.GlobalColor.black)
+    assert spot_changed(page, row, 150, 50) and not spot_changed(page, row, 150, 80)
 
     now = [moved]
     fake = SimpleNamespace(_ref=None, _maps=1, _refused=None,
@@ -945,7 +950,7 @@ def test_click_refused_when_the_screen_changed_since_screen_map() -> None:
     stale = lambda x, y: AiToolHost._stale_click(fake, x, y)
     assert stale(50, 50) == ""  # no screen_map yet: nothing to compare
     fake._ref = page
-    assert stale(150, 50) == ""
+    assert stale(150, 90) == ""
     assert stale(50, 50).startswith("error: not clicked")
     assert stale(50, 50).startswith("error")  # still the same map: refused again
     fake._maps = 2  # a fresh screen_map, and the spot changed again: animated, so it is clicked
