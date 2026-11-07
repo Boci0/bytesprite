@@ -239,6 +239,11 @@ if ($Boxes) {
 def ocr_image_file(png_path: Path, timeout_s: float = 30.0, boxes: bool = False) -> str:
     """Return text recognized in a PNG via Windows OCR, or '' on any failure. With `boxes`, one `x,y,w,h<TAB>text`
     line per recognized line (pixels of the PNG)."""
+    from src.tools import warm_ps
+
+    warm = warm_ps.run("ocr", OCR_PS_SCRIPT, {"Path": str(png_path), **({"Boxes": True} if boxes else {})}, timeout_s)
+    if warm is not None:
+        return warm
     script = png_path.with_suffix(".ps1")
     script.write_text(OCR_PS_SCRIPT, encoding="utf-8")
     try:

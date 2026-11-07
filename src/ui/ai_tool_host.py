@@ -26,7 +26,7 @@ from PyQt6.QtGui import QCursor, QGuiApplication, QImage
 from PyQt6.QtWidgets import QFileDialog
 
 from src.tools import computer
-from src.tools.ai_tools import (calculate, COMPUTER_TOOLS, MAX_BATCH_STEPS, FILE_TOOLS, PET_ACTIONS, TOOL_SPECS, BackgroundProcs, apply_edits,
+from src.tools.ai_tools import (calculate, find_control, COMPUTER_TOOLS, MAX_BATCH_STEPS, FILE_TOOLS, PET_ACTIONS, TOOL_SPECS, BackgroundProcs, apply_edits,
                                 computer_action, destructive_reason, is_secret, load_skill, memory_path, parse_boxes, plan_edit,
                                 plan_edits, plan_memory, plan_skill_update, print_to_pdf_paths, resolve,
                                 PDF_WAIT_S, changed_media, file_stamp, media_stamps, wait_for_new_file, run_command, command_timeout, powershell_file, run_file_tool, save_args,
@@ -154,6 +154,38 @@ def spot_changed(old: QImage, new: QImage, x: int, y: int) -> bool:
         return True
     row = QRect(x - ROW_LEFT, y - ROW_R, ROW_LEFT + ROW_RIGHT + 1, 2 * ROW_R + 1).intersected(old.rect())
     return _diff(old, new, row)[1] >= 6
+
+
+FOLLOW_PX = 300  # how far up or down a moved target is looked for
+
+
+def _rows(img: QImage, rect: QRect) -> list[bytes]:
+    part = img.copy(rect).convertToFormat(QImage.Format.Format_RGB32)
+    bits = part.constBits()
+    bits.setsize(part.sizeInBytes())
+    data, stride = bytes(bits), part.bytesPerLine()
+    return [data[i * stride:(i + 1) * stride] for i in range(part.height())]
+
+
+def follow(old: QImage, new: QImage, x: int, y: int) -> tuple[int, int] | None:
+    """Where the target at (x, y) went: the strip along its row (label and button) found again exactly once,
+    shifted up or down by up to FOLLOW_PX (a banner pushed the page, a row was inserted, the list re-sorted, it
+    scrolled). None when it is gone, found more than once, or the strip is blank.
+    shortcut: vertical moves with pixel-identical rendering only; a sideways move or a re-styled row is refused."""
+    if old.size() != new.size():
+        return None
+    strip = QRect(x - ROW_LEFT, y - SPOT_R, ROW_LEFT + ROW_RIGHT + 1, 2 * SPOT_R + 1).intersected(old.rect())
+    want = _rows(old, strip)
+    if len(set(want)) < 2:
+        return None
+    have = _rows(new, QRect(strip.x(), 0, strip.width(), new.height()))
+    top, n, hits = strip.y(), len(want), []
+    for start in range(max(0, top - FOLLOW_PX), min(len(have) - n, top + FOLLOW_PX) + 1):
+        if start != top and have[start] == want[0] and have[start:start + n] == want:
+            hits.append(start - top)
+            if len(hits) > 1:
+                return None
+    return (x, y + hits[0]) if hits else None
 
 
 class AiToolHost(QObject):
@@ -362,19 +394,7 @@ class AiToolHost(QObject):
             got = self._on_gui(lambda done: self._grab_screen(done, primary=True))
             if not isinstance(got, tuple) or not isinstance(got[0], QImage) or got[0].isNull():
                 return "error: no screen grab"
-            image, hwnd = got
-            with ThreadPoolExecutor(max_workers=2) as pool:  # OCR and the control tree overlap
-                controls = pool.submit(computer.ui_elements, hwnd)
-                lines = pool.submit(self._ocr, image, True).result()
-                elements = controls.result()
-            from src.ui.ai_chat import MAX_IMAGE_SIDE, image_data_url
-
-            side = max(image.width(), image.height())
-            self._shot = image_data_url(image)
-            self._ref, self._maps = image, self._maps + 1
-            note = (f"The screenshot you see is scaled down {side / MAX_IMAGE_SIDE:.2f}x: do not read pixels from "
-                    "it, use the (x, y) listed here." if side > MAX_IMAGE_SIDE else "The screenshot is at full size.")
-            return parse_boxes(lines, image.width(), image.height(), elements, note)
+            return self._map(*got)
         if name in COMPUTER_TOOLS:
             return self._computer(name, args)
         if name == "computer_batch":
@@ -441,27 +461,84 @@ class AiToolHost(QObject):
         if not self._allowed("computer", f"The model wants to control your computer:\n\n{what}", "computer control",
                              risk):
             return "error: the user declined this action"
-        if name == "mouse_click" and (stale := self._stale_click(args["x"], args["y"])):
-            return stale
+        note = ""
+        if name == "mouse_click":
+            if args.get("name") is not None:
+                found = self._find_click(args)
+                if isinstance(found, str):  # an error, or pressed without the mouse
+                    return found
+                args = {**args, "x": found[0], "y": found[1]}
+            note, x, y = self._stale_click(args["x"], args["y"])
+            if note.startswith("error"):
+                return note
+            args = {**args, "x": x, "y": y}
         out = self._on_gui(lambda done: self._act(done, name, args), 90.0)  # up to 2000 chars at 20 ms
-        return out if isinstance(out, str) else "error: the action did not finish in time"
+        return note + out if isinstance(out, str) else "error: the action did not finish in time"
 
-    def _stale_click(self, x: int, y: int) -> str:
-        """An error when the screen at (x, y) changed since the model last saw it, so the click could hit the wrong
-        thing. A spot that changes again right after a fresh screen_map is animated and gets clicked."""
-        if self._ref is None:
-            return ""
+    def _map(self, image: QImage, hwnd: int) -> str:
+        """screen_map's text for a grab; the grab becomes what the next click is checked against."""
+        with ThreadPoolExecutor(max_workers=2) as pool:  # OCR and the control tree overlap
+            controls = pool.submit(computer.ui_elements, hwnd)
+            lines = pool.submit(self._ocr, image, True).result()
+            elements = controls.result()
+        from src.ui.ai_chat import MAX_IMAGE_SIDE, image_data_url
+
+        side = max(image.width(), image.height())
+        self._shot = image_data_url(image)
+        self._ref, self._maps = image, self._maps + 1
+        note = (f"The screenshot you see is scaled down {side / MAX_IMAGE_SIDE:.2f}x: do not read pixels from "
+                "it, use the (x, y) listed here." if side > MAX_IMAGE_SIDE else "The screenshot is at full size.")
+        return parse_boxes(lines, image.width(), image.height(), elements, note)
+
+    def _find_click(self, args: dict[str, Any]) -> tuple[int, int] | str:
+        """Where the control `name` (on the row of `near`) is right now, from a fresh look. When something else covers
+        its spot (a cookie bar, a toolbar) it is pressed through UI Automation instead, never under a dialog."""
         got = self._on_gui(lambda done: self._grab_screen(done, primary=True))
         if not isinstance(got, tuple) or not isinstance(got[0], QImage) or got[0].isNull():
-            return ""  # no grab to compare: click as before
+            return "error: no screen grab"
+        image, hwnd = got
+        near = args.get("near") or ""
+        with ThreadPoolExecutor(max_workers=2) as pool:  # OCR (only needed to find `near`) and the controls overlap
+            controls = pool.submit(computer.ui_elements, hwnd)
+            ocr = self._ocr(image, True) if near.strip() else ""
+            elements = controls.result()
+        found = find_control(elements, ocr, args["name"], near, image.width(), image.height())
+        if isinstance(found, str):
+            return found
+        x, y, label = found
+        self._ref = image  # the check right before the click compares against this look
+        fold = lambda t: " ".join(t.split()).casefold()  # noqa: E731
+        chain = [] if computer.ours_at(x, y) else computer.uia_at(x, y)  # clicks pass through the pet and chat
+        if not chain or any(fold(n) == fold(label) for _kind, n in chain):
+            return x, y
+        cover = next((n for _kind, n in chain if n.strip()), "something else")[:60]
+        if computer.front_state()[1] or any(kind in ("dialog", "alert", "alert dialog") for kind, _n in chain):
+            return f'error: not clicked: a dialog ("{cover}") covers "{label}"; answer or close it first'
+        if computer.uia_invoke(hwnd, x, y, label):
+            return (f'pressed "{label}" at ({x}, {y}) through Windows UI Automation, because "{cover}" covers its '
+                    "spot. Call screen_map for details.")
+        return f'error: not clicked: "{cover}" covers "{label}" at ({x}, {y}); close it or scroll it out of the way first'
+
+    def _stale_click(self, x: int, y: int) -> tuple[str, int, int]:
+        """(note, where to click). The note is an error when the screen at (x, y) changed since the model last saw
+        it and the target cannot be found again, so the click could hit the wrong thing; a target that only moved
+        is followed. A spot that changes again right after a fresh screen_map is animated and gets clicked."""
+        if self._ref is None:
+            return "", x, y
+        got = self._on_gui(lambda done: self._grab_screen(done, primary=True))
+        if not isinstance(got, tuple) or not isinstance(got[0], QImage) or got[0].isNull():
+            return "", x, y  # no grab to compare: click as before
         if not spot_changed(self._ref, got[0], x, y):
-            return ""
+            return "", x, y
+        if (moved := follow(self._ref, got[0], x, y)) is not None:
+            return f"The target moved from ({x}, {y}) to {moved} since you looked; followed it and ", *moved
         if self._refused is not None and self._refused[:2] == (x, y) and self._refused[2] != self._maps:
-            return ""
-        self._refused = (x, y, self._maps)
+            return "", x, y
+        self._refused = (x, y, self._maps)  # against this map; the one below is a fresh look
         return (f"error: not clicked: the screen at ({x}, {y}) changed since you last looked (the page moved, a list "
-                "row shifted, it scrolled, re-rendered or something covers it), so the click could land on the wrong thing. "
-                "Call screen_map again and click the new position.")
+                "row shifted, it scrolled, re-rendered or something covers it), so the click could land on the wrong "
+                "thing. The screen now (a fresh screen_map, no need to call it): find your target again and click its "
+                "new position.\n\n" + self._map(*got), x, y)
 
     def _batch(self, steps: Any) -> str:
         """computer_batch: each step through `_computer` (same approvals), stopping at the first error or Stop."""

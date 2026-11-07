@@ -923,7 +923,7 @@ def test_click_refused_when_the_screen_changed_since_screen_map() -> None:
     from PyQt6.QtCore import Qt
     from PyQt6.QtGui import QColor, QImage, QPainter
 
-    from src.ui.ai_tool_host import AiToolHost, spot_changed
+    from src.ui.ai_tool_host import AiToolHost, follow, spot_changed
 
     page = QImage(200, 100, QImage.Format.Format_RGB32)
     page.fill(Qt.GlobalColor.white)
@@ -946,15 +946,35 @@ def test_click_refused_when_the_screen_changed_since_screen_map() -> None:
 
     now = [moved]
     fake = SimpleNamespace(_ref=None, _maps=1, _refused=None,
-                           _on_gui=lambda ask, *_: (now[0], 1), _grab_screen=None)
+                           _on_gui=lambda ask, *_: (now[0], 1), _grab_screen=None, _map=lambda image, hwnd: "FRESH MAP")
     stale = lambda x, y: AiToolHost._stale_click(fake, x, y)
-    assert stale(50, 50) == ""  # no screen_map yet: nothing to compare
+    assert stale(50, 50) == ("", 50, 50)  # no screen_map yet: nothing to compare
     fake._ref = page
-    assert stale(150, 90) == ""
-    assert stale(50, 50).startswith("error: not clicked")
-    assert stale(50, 50).startswith("error")  # still the same map: refused again
+    assert stale(150, 90) == ("", 150, 90)
+    refused = stale(50, 50)[0]
+    assert refused.startswith("error: not clicked") and refused.endswith("FRESH MAP")  # no extra screen_map round
+    assert stale(50, 50)[0].startswith("error")  # still the same map: refused again
     fake._maps = 2  # a fresh screen_map, and the spot changed again: animated, so it is clicked
-    assert stale(50, 50) == ""
+    assert stale(50, 50) == ("", 50, 50)
+
+    def drawn(*tops: int) -> QImage:  # an order row (label, then its button) at each top
+        img = QImage(400, 300, QImage.Format.Format_RGB32)
+        img.fill(Qt.GlobalColor.white)
+        with QPainter(img) as paint:
+            for top in tops:
+                paint.fillRect(40, top + 5, 60, 10, Qt.GlobalColor.black)
+                paint.fillRect(300, top, 60, 20, QColor("#8090a0"))
+        return img
+
+    before = drawn(95)
+    assert follow(before, drawn(155), 330, 105) == (330, 165)  # a row inserted above pushed it down
+    assert follow(before, drawn(35), 330, 105) == (330, 45)  # scrolled up
+    assert follow(before, drawn(155, 215), 330, 105) is None  # two matches: which one is unknown
+    assert follow(before, drawn(), 330, 105) is None  # gone
+    assert follow(drawn(), drawn(155), 330, 105) is None  # a blank strip matches anywhere
+    fake._ref, now[0], fake._refused = before, drawn(155), None
+    note, x, y = stale(330, 105)
+    assert (x, y) == (330, 165) and note.startswith("The target moved from (330, 105) to (330, 165)")
 
 
 def test_calculate_does_math_and_contrast() -> None:
@@ -1064,3 +1084,30 @@ def test_search_and_list_accept_a_file_as_the_path(tmp_path: Path) -> None:
     only = run_file_tool(tmp_path, "search_text", {"text": "needle", "path": "a.txt"})
     assert only == "a.txt:2: needle here"  # just that file, not b.txt
     assert "is a file" in run_file_tool(tmp_path, "list_files", {"path": "a.txt"})
+
+
+def test_find_control_by_name_and_row() -> None:
+    from src.tools.ai_tools import computer_action, find_control
+
+    elements = "\n".join(["40,90,300,20\tEdit\tCustomer name", "350,90,80,20\tButton\tSearch",
+                          "300,195,60,20\tButton\tView", "380,195,60,20\tButton\tRefund",
+                          "300,245,60,20\tButton\tView", "380,245,60,20\tButton\tRefund",
+                          "300,5000,60,20\tButton\tView",  # off the screen
+                          "500,400,120,30\tButton\tMark as  shipped"])
+    ocr = "40,198,140,14\t#1047 Jose Lopez\n40,248,140,14\t#1042 Maria Lopez"
+    assert find_control(elements, ocr, "View", "#1042", 1920, 1080) == (330, 255, "View")
+    assert find_control(elements, ocr, "view", "maria", 1920, 1080) == (330, 255, "View")
+    assert find_control(elements, ocr, "mark as shipped", "", 1920, 1080) == (560, 415, "Mark as  shipped")
+    assert find_control(elements, ocr, "shipped", "", 1920, 1080)[:2] == (560, 415)  # contains, when nothing equals
+    assert find_control(elements, ocr, "View", "", 1920, 1080).startswith("error: 2 controls are named \"View\"")
+    assert find_control(elements, ocr, "View", "#9999", 1920, 1080).startswith("error: the text")
+    assert find_control(elements, ocr, "Save", "", 1920, 1080).startswith("error: no control named")
+    assert find_control(elements, ocr, "Search", "#1042", 1920, 1080).startswith('error: no "Search" on the row')
+    assert computer_action("mouse_click", {"name": "View", "near": "#1042"}) == ('left-click on "View" near "#1042"', "")
+    assert computer_action("mouse_click", {"name": "OK"}) == ('left-click on "OK"', "")
+    for bad in ({"name": ""}, {"name": 3}, {"name": "OK", "near": 5}, {}):
+        try:
+            computer_action("mouse_click", bad)
+        except ValueError:
+            continue
+        raise AssertionError(bad)

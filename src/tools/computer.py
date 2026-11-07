@@ -142,7 +142,9 @@ param([long]$Hwnd)
 $ErrorActionPreference = 'Stop'
 # Per-monitor DPI aware, so rectangles are physical pixels like SendInput and the grab; unaware, they were scaled
 # and drifted further off the further a control sat from the top-left (right and bottom edges missed most)
-Add-Type -Namespace BS -Name Dpi -MemberDefinition '[DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr c);'
+if (-not ('BS.Dpi' -as [type])) {  # a warm worker runs this again in the same process
+    Add-Type -Namespace BS -Name Dpi -MemberDefinition '[DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr c);'
+}
 [void][BS.Dpi]::SetThreadDpiAwarenessContext([IntPtr]-4)
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
@@ -210,6 +212,15 @@ def _ours(user32, hwnd: int) -> bool:
     pid = wintypes.DWORD()
     user32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(pid))
     return pid.value == os.getpid()
+
+
+def ours_at(x: int, y: int) -> bool:
+    """Whether the pet or its chat is the window at a screen point (computer actions click through them)."""
+    user32 = _user32()
+    user32.WindowFromPoint.restype = wintypes.HWND
+    user32.WindowFromPoint.argtypes = [wintypes.POINT]
+    hwnd = user32.WindowFromPoint(wintypes.POINT(x, y))
+    return bool(hwnd) and _ours(user32, int(hwnd))
 
 
 def front_app() -> int:
@@ -324,6 +335,54 @@ def window_on_monitor(hwnd: int) -> tuple[str, tuple[int, int, int, int], tuple[
     return info.szDevice, (left, top, right, bottom), (m.right - m.left, m.bottom - m.top)
 
 
+_UIA_HEAD = r"""
+if (-not ('BS.Dpi' -as [type])) {
+    Add-Type -Namespace BS -Name Dpi -MemberDefinition '[DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr c);'
+}
+[void][BS.Dpi]::SetThreadDpiAwarenessContext([IntPtr]-4)
+Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, WindowsBase
+$A = [System.Windows.Automation.AutomationElement]
+"""
+
+# The element under a point and its ancestors, one `localized type<TAB>name` line each (deepest first)
+_UIA_AT_PS = "param([int]$X, [int]$Y)\n" + _UIA_HEAD + r"""
+$e = $A::FromPoint([System.Windows.Point]::new($X, $Y))
+$walk = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+for ($i = 0; $e -and $i -lt 8; $i++) {
+    "$($e.Current.LocalizedControlType)`t$($e.Current.Name -replace '\s+', ' ')"
+    $e = $walk.GetParent($e)
+}
+"""
+
+# Press the control named $Name whose centre is (X, Y) in window $Hwnd through its Invoke pattern; prints 'invoked'
+_UIA_INVOKE_PS = "param([long]$Hwnd, [int]$X, [int]$Y, [string]$Name)\n" + _UIA_HEAD + r"""
+$cond = [System.Windows.Automation.PropertyCondition]::new($A::NameProperty, $Name)
+foreach ($e in $A::FromHandle([IntPtr]$Hwnd).FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond)) {
+    $r = $e.Current.BoundingRectangle
+    if ([math]::Abs($r.X + $r.Width / 2 - $X) -le 3 -and [math]::Abs($r.Y + $r.Height / 2 - $Y) -le 3) {
+        $p = $null
+        if ($e.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$p)) { $p.Invoke(); 'invoked' }
+        break
+    }
+}
+"""
+
+
+def uia_at(x: int, y: int) -> list[tuple[str, str]]:
+    """(localized type, name) of the element at a screen point and its ancestors; [] when unknown."""
+    from src.tools import warm_ps
+
+    out = warm_ps.run("uia", _UIA_AT_PS, {"X": x, "Y": y}, 10.0) or ""
+    return [(kind.casefold(), name) for kind, _tab, name in (line.partition("\t") for line in out.splitlines())]
+
+
+def uia_invoke(hwnd: int, x: int, y: int, name: str) -> bool:
+    """Press the control `name` centred at (x, y) without the mouse (for a target something else covers)."""
+    from src.tools import warm_ps
+
+    return (warm_ps.run("uia", _UIA_INVOKE_PS, {"Hwnd": hwnd, "X": x, "Y": y, "Name": name}, 10.0) or "").strip() == "invoked"
+
+
 def ui_elements(hwnd: int, timeout_s: float = 25.0) -> str:
     """Raw `x,y,w,h<TAB>Type<TAB>Name` lines for the controls of window `hwnd`; '' on any failure."""
     import subprocess
@@ -332,6 +391,11 @@ def ui_elements(hwnd: int, timeout_s: float = 25.0) -> str:
 
     if not hwnd:
         return ""
+    from src.tools import warm_ps
+
+    warm = warm_ps.run("uia", _UIA_PS, {"Hwnd": hwnd}, timeout_s)
+    if warm is not None:
+        return warm
     with tempfile.TemporaryDirectory(prefix="paperduck_uia_") as tmp:
         script = Path(tmp) / "uia.ps1"
         script.write_text(_UIA_PS, encoding="utf-8")
