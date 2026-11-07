@@ -21,7 +21,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from PyQt6.QtCore import QCoreApplication, QObject, QStandardPaths, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QCoreApplication, QObject, QRect, QStandardPaths, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QCursor, QGuiApplication, QImage
 from PyQt6.QtWidgets import QFileDialog
 
@@ -116,6 +116,27 @@ def grab_screen(win: Any, done: Callable[[Any], None], primary: bool = False, wi
     QTimer.singleShot(180 if hidden else 30, grab)  # the compositor applies the affinity on its next frame
 
 
+SPOT_R = 16  # half the side of the square compared around a click
+
+
+def spot_changed(old: QImage, new: QImage, x: int, y: int) -> bool:
+    """True when a fifth of the pixels around (x, y) differ by more than 48 in a channel between two grabs: the page
+    moved, scrolled, re-rendered or a popup covers the spot. A blinking caret or a hover tint stays under that."""
+    if old.size() != new.size():
+        return True
+    rect = QRect(x - SPOT_R, y - SPOT_R, 2 * SPOT_R + 1, 2 * SPOT_R + 1).intersected(old.rect())
+    if rect.isEmpty():
+        return False
+    a, b = (img.copy(rect).convertToFormat(QImage.Format.Format_RGB32) for img in (old, new))
+    pa, pb = a.constBits(), b.constBits()
+    pa.setsize(a.sizeInBytes())
+    pb.setsize(b.sizeInBytes())
+    da, db = bytes(pa), bytes(pb)
+    changed = sum(1 for i in range(0, len(da), 4)
+                  if max(abs(da[i] - db[i]), abs(da[i + 1] - db[i + 1]), abs(da[i + 2] - db[i + 2])) > 48)
+    return changed * 5 > len(da) // 4
+
+
 class AiToolHost(QObject):
     """The ToolHost the chat hands to ask(); `window` is the PetWindow."""
 
@@ -127,6 +148,9 @@ class AiToolHost(QObject):
         self._win = window
         self.saved: list[Path] = []
         self._shot = ""
+        self._ref: QImage | None = None  # the screen as the model last saw it: screen_map, then after each action
+        self._maps = 0
+        self._refused: tuple[int, int, int] | None = None  # (x, y, map) of the last click refused as stale
         self.mcp = mcp or McpHub()
         self.procs = BackgroundProcs()
         self.cancel = threading.Event()  # the chat swaps in a fresh one per answer and sets it on Stop
@@ -328,6 +352,7 @@ class AiToolHost(QObject):
 
             side = max(image.width(), image.height())
             self._shot = image_data_url(image)
+            self._ref, self._maps = image, self._maps + 1
             note = (f"The screenshot you see is scaled down {side / MAX_IMAGE_SIDE:.2f}x: do not read pixels from "
                     "it, use the (x, y) listed here." if side > MAX_IMAGE_SIDE else "The screenshot is at full size.")
             return parse_boxes(lines, image.width(), image.height(), elements, note)
@@ -397,8 +422,27 @@ class AiToolHost(QObject):
         if not self._allowed("computer", f"The model wants to control your computer:\n\n{what}", "computer control",
                              risk):
             return "error: the user declined this action"
+        if name == "mouse_click" and (stale := self._stale_click(args["x"], args["y"])):
+            return stale
         out = self._on_gui(lambda done: self._act(done, name, args), 90.0)  # up to 2000 chars at 20 ms
         return out if isinstance(out, str) else "error: the action did not finish in time"
+
+    def _stale_click(self, x: int, y: int) -> str:
+        """An error when the screen at (x, y) changed since the model last saw it, so the click could hit the wrong
+        thing. A spot that changes again right after a fresh screen_map is animated and gets clicked."""
+        if self._ref is None:
+            return ""
+        got = self._on_gui(lambda done: self._grab_screen(done, primary=True))
+        if not isinstance(got, tuple) or not isinstance(got[0], QImage) or got[0].isNull():
+            return ""  # no grab to compare: click as before
+        if not spot_changed(self._ref, got[0], x, y):
+            return ""
+        if self._refused is not None and self._refused[:2] == (x, y) and self._refused[2] != self._maps:
+            return ""
+        self._refused = (x, y, self._maps)
+        return (f"error: not clicked: the screen at ({x}, {y}) changed since you last looked (the page moved, "
+                "scrolled, re-rendered or something covers it), so the click could land on the wrong thing. "
+                "Call screen_map again and click the new position.")
 
     def _batch(self, steps: Any) -> str:
         """computer_batch: each step through `_computer` (same approvals), stopping at the first error or Stop."""
@@ -452,8 +496,18 @@ class AiToolHost(QObject):
                     show_quietly(w)
                 else:
                     computer.click_through(int(w.winId()), False)
-            done(result + "." + computer.front_note(before[0], computer.front_state()) + " Call screen_map for details."
-                 if not result.startswith("error") else result)
+            text = (result + "." + computer.front_note(before[0], computer.front_state()) + " Call screen_map for details."
+                    if not result.startswith("error") else result)
+            if self._ref is None:
+                done(text)
+                return
+
+            def keep(got: Any) -> None:  # what this action left is what a planned next click aims at
+                if isinstance(got, tuple) and isinstance(got[0], QImage) and not got[0].isNull():
+                    self._ref = got[0]
+                done(text)
+
+            self._grab_screen(keep, primary=True)
 
         def work() -> None:
             result = act()

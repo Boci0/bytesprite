@@ -917,6 +917,41 @@ def test_computer_batch_runs_steps_in_order_and_stops_at_an_error() -> None:
     assert AiToolHost._batch(fake, steps) == "error: stopped by the user"
 
 
+def test_click_refused_when_the_screen_changed_since_screen_map() -> None:
+    from types import SimpleNamespace
+
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtGui import QColor, QImage, QPainter
+
+    from src.ui.ai_tool_host import AiToolHost, spot_changed
+
+    page = QImage(200, 100, QImage.Format.Format_RGB32)
+    page.fill(Qt.GlobalColor.white)
+    moved = page.copy()
+    with QPainter(moved) as paint:  # the page scrolled: a dark button now sits under (50, 50)
+        paint.fillRect(30, 30, 40, 40, QColor("#203040"))
+    tinted = page.copy()
+    tinted.fill(QColor("#ececec"))  # a hover tint is not a change
+    caret = page.copy()
+    with QPainter(caret) as paint:
+        paint.fillRect(50, 34, 2, 30, Qt.GlobalColor.black)
+    assert spot_changed(page, moved, 50, 50) and not spot_changed(page, moved, 150, 50)
+    assert not spot_changed(page, tinted, 50, 50) and not spot_changed(page, caret, 50, 50)
+    assert spot_changed(page, page.scaled(100, 50), 10, 10)  # another resolution
+
+    now = [moved]
+    fake = SimpleNamespace(_ref=None, _maps=1, _refused=None,
+                           _on_gui=lambda ask, *_: (now[0], 1), _grab_screen=None)
+    stale = lambda x, y: AiToolHost._stale_click(fake, x, y)
+    assert stale(50, 50) == ""  # no screen_map yet: nothing to compare
+    fake._ref = page
+    assert stale(150, 50) == ""
+    assert stale(50, 50).startswith("error: not clicked")
+    assert stale(50, 50).startswith("error")  # still the same map: refused again
+    fake._maps = 2  # a fresh screen_map, and the spot changed again: animated, so it is clicked
+    assert stale(50, 50) == ""
+
+
 def test_calculate_does_math_and_contrast() -> None:
     from src.tools.ai_tools import calculate
     assert calculate("sum([0, 1, 2, 3]) * 3") == "18"
