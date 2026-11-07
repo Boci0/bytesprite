@@ -23,9 +23,9 @@ jobs:
       - run: python -m pip install --require-hashes -r requirements-dev.txt
       - name: pytest (debug - shutdown exit code)
         run: |
-          python -X faulthandler -m pytest -v -p no:cacheprovider --basetemp "$env:RUNNER_TEMP\pt"
+          python -X faulthandler -m pytest -v -p no:cacheprovider
           $code = $LASTEXITCODE
           "pytest exit code: $code"
-          Get-ChildItem "$env:RUNNER_TEMP\pt" -Recurse -Filter crash.log -ErrorAction SilentlyContinue |
+          Get-ChildItem "$env:TEMP\pytest-of-*" -Recurse -Filter crash.log -ErrorAction SilentlyContinue |
             ForEach-Object { "== $($_.FullName)"; Get-Content $_.FullName }
           exit $code
