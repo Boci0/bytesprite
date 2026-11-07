@@ -31,7 +31,7 @@ CODE_APPS = frozenset({
 })
 # Copies made while these are in front are never inspected, even after switching away
 PRIVATE_APPS = frozenset({
-    "1password.exe", "bitwarden.exe", "keepass.exe", "keepassxc.exe", "lastpass.exe", "dashlane.exe",
+    "1password.exe", "bitwarden.exe", "keepass.exe", "keepassxc.exe", "lastpass.exe", "dashlane.exe", "enpass.exe", "nordpass.exe", "roboform.exe", "keeper.exe",
 })
 FOCUS_DWELL_S = 600.0  # a code app in front this long while Pomodoro is idle
 COOLDOWN_S = {"focus": 1800.0}

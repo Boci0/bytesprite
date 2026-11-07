@@ -27,6 +27,29 @@ _PRIVACY_MIME_MARKERS: frozenset[str] = frozenset(
     }
 )
 
+_QT_WIN_MIME = re.compile(r'^application/x-qt-windows-mime;value="(.*)"$', re.I)
+
+
+def _format_name(fmt: str) -> str:
+    """A clipboard format's own name: Qt on Windows reports registered ones as application/x-qt-windows-mime;value="..."."""
+    found = _QT_WIN_MIME.match(fmt)
+    return (found[1] if found else fmt).lower()
+
+
+def clipboard_is_private(mime: Any) -> bool:
+    """The copy carries a password manager's privacy mark (ExcludeClipboardContentFromMonitorProcessing, or
+    CanIncludeInClipboardHistory set to 0): no clipboard reader in the app may keep, inspect or send it."""
+    if mime is None:
+        return False
+    for fmt in mime.formats():
+        name = _format_name(fmt)
+        if name in _PRIVACY_MIME_MARKERS:
+            return True
+        if name == "canincludeinclipboardhistory" and bytes(mime.data(fmt)) == b"\x00\x00\x00\x00":
+            return True
+    return False
+
+
 _BLANK_LINES_RE = re.compile(r"\n{3,}")
 _URL_ESCAPE_RE = re.compile(r"%[0-9A-Fa-f]{2}")
 _WORD_RE = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+")
@@ -197,18 +220,8 @@ class ClipVaultPlugin:
         if cb is None:
             return
         mime = cb.mimeData()
-        if mime is None:
+        if mime is None or clipboard_is_private(mime):  # password manager and Windows privacy exclusion formats
             return
-
-        # Respect password manager and Windows privacy exclusion formats
-        for fmt in mime.formats():
-            lower_fmt = fmt.lower()
-            if lower_fmt in _PRIVACY_MIME_MARKERS:
-                return
-            if lower_fmt == "canincludeinclipboardhistory":
-                raw = bytes(mime.data(fmt))
-                if raw and raw == b"\x00\x00\x00\x00":
-                    return
 
         if not mime.hasText():
             return
@@ -224,7 +237,7 @@ class ClipVaultPlugin:
     ) -> bool:
         """Validate, deduplicate in O(1), and insert text into the bounded ring."""
         for fmt in mime_formats:
-            if fmt.lower() in _PRIVACY_MIME_MARKERS:
+            if _format_name(fmt) in _PRIVACY_MIME_MARKERS:
                 return False
 
         if not isinstance(text, str) or not text or not text.strip():

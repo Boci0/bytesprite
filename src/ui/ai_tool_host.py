@@ -35,9 +35,10 @@ from src.tools.ai_tools import (calculate, find_control, COMPUTER_TOOLS, MAX_BAT
                                 PDF_WAIT_S, changed_media, file_stamp, media_stamps, wait_for_new_file, run_command, command_timeout, powershell_file, run_file_tool, save_args,
                                 skill_text, skills_dir, task_list, write_memory, write_skill)
 from src.tools.errands import describe as describe_errand
+from src.tools.clip_vault import clipboard_is_private
 from src.tools.file_forge import scrub_metadata
 from src.tools.macros import parse_recipe
-from src.tools.mcp_client import SEP, McpHub, add_server, find_servers, safe_name
+from src.tools.mcp_client import SEP, McpHub, add_server, env_summary, find_servers, safe_name
 from src.ui.quick_tools import ocr_image_file
 
 GUI_TIMEOUT_S = 15.0
@@ -284,7 +285,8 @@ class AiToolHost(QObject):
         if name in ("set_errand", "cancel_errand"):
             return self._errand(name, args)
         if name == "spawn_agent":  # read-only tools only, so nothing to allow; Stop on this answer stops it
-            return self.agents.spawn(args.get("task"), args.get("effort"), self._project(), self.cancel)
+            return self.agents.spawn(args.get("task"), args.get("effort"), self._project(), self.cancel,
+                                     args.get("_local") is True)
         if name == "wait_agents":
             return self.agents.wait(args.get("timeout_s"), self.cancel)
         if name == "calculate":  # pure arithmetic, nothing to allow
@@ -649,7 +651,7 @@ class AiToolHost(QObject):
                 or not isinstance(env, dict) or not all(isinstance(v, str) for v in env.values())):
             return "error: give a name (letters, digits, single _ and -), a command, string args and string env values"
         line = " ".join([command.strip(), *cmd_args])
-        env_note = f"\nwith env: {', '.join(env)}" if env else ""  # names only, values may be secrets
+        env_note = env_summary(env)  # values too (NODE_OPTIONS can run code), secret-looking ones hidden
         if not self._allowed("add_mcp_server", f'The model wants to install MCP server "{server}". It will run this '
                              f"on your PC with your permissions whenever the AI chat starts:\n\n{line}{env_note}",
                              "MCP installs"):
@@ -685,7 +687,8 @@ class AiToolHost(QObject):
 
     def allow_link(self, name: str, url: str) -> bool:
         """A link the model built after reading local data: the user checks the full URL for their data."""
-        verb = "open this link in your browser" if name == "open_link" else "fetch this page"
+        verb = {"open_link": "open this link in your browser", "fetch_page": "fetch this page",
+                "spawn_agent": "give a sub-agent this link"}.get(name, f"pass this link to the MCP tool {name}")
         return self._allowed("link", f"The model wants to {verb} after reading your files, clipboard or screen. "
                              f"Check the address does not carry your data:\n\n{url[:2000]}", "links",
                              "new link after reading your data")
@@ -743,6 +746,8 @@ class AiToolHost(QObject):
     def _pet_tool(self, name: str, args: dict[str, Any]) -> str:
         cb = QGuiApplication.clipboard()
         if name == "read_clipboard":
+            if cb is not None and clipboard_is_private(cb.mimeData()):
+                return "the clipboard holds a copy a password manager marked private; it is not read"
             text = cb.text() if cb is not None else ""
             return text[:MAX_CLIP_CHARS] if text.strip() else "the clipboard has no text"
         if name == "copy_text":

@@ -923,7 +923,8 @@ def _post_anthropic(base_url: str, key: str, model: str, messages: list[dict[str
     used: list[tuple[str, str]] = []
     tool_rounds = hits = 0
     fails: list[Any] = [0, 0, None, []]
-    read_local = any(read_local_data(m) for m in messages)  # set once a tool has returned the user's own data
+    # set once a tool has returned the user's own data; a sub-agent (`local_data`) starts set: its task may hold some
+    read_local = getattr(host, "local_data", False) or any(read_local_data(m) for m in messages)
     seen_buf: list[Any] = ["", 0]  # see _grow_seen
     start = len(turns)  # this answer's own turns follow
     for _ in range(MAX_NATIVE_ROUNDS + MAX_TOOL_ROUNDS + 1):
@@ -1020,7 +1021,8 @@ def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], t
     thinks = thinking in THINKING_LEVELS and thinking != "off"
     messages = list(messages)
     start = len(messages)  # this answer's own turns follow
-    read_local = any(read_local_data(m) for m in messages)  # set once a tool has returned the user's own data
+    # set once a tool has returned the user's own data; a sub-agent (`local_data`) starts set: its task may hold some
+    read_local = getattr(host, "local_data", False) or any(read_local_data(m) for m in messages)
     seen_buf: list[Any] = ["", 0]  # see _grow_seen
     spent = [0, 0, 0, 0]  # prompt, completion, reasoning, total tokens over every round
     paid = 0  # billable tokens (see _billable)
@@ -1378,6 +1380,13 @@ def _run_tool_raw(name: str, arguments: Any, host: ToolHost | None = None, seen:
         return refused
     if name == "open_link" and seen is not None and (refused := _new_link(name, str(args.get("url", "")).strip(), host, seen)):
         return refused
+    # A sub-agent's task and an MCP tool (a browser, an HTTP client) can carry a link out just as fetch_page can
+    if seen is not None and (name == "spawn_agent" or MCP_SEP in name):
+        for url in _arg_links(args):
+            if refused := _new_link(name, url, host, seen):
+                return refused
+    if name == "spawn_agent":  # set here, never by the model: the agent's own guard starts on after a local read
+        args = {**args, "_local": seen is not None}
     if host is not None and name not in ("web_search", "fetch_page") and any(
             s["function"]["name"] == name for s in host.specs):
         return host.run(name, args)
@@ -1401,6 +1410,23 @@ def _example_args(name: str, host: ToolHost | None) -> str:
     need = next((s["function"].get("parameters", {}).get("required", []) for s in specs
                  if s["function"]["name"] == name), [])
     return "{" + ", ".join(f'"{p}": ...' for p in need) + "}"
+
+
+_ARG_LINK = re.compile(r"https?://[^\s\"'<>]+", re.I)
+_LINK_KEY = re.compile(r"^(url|uri|href)$|_(url|uri)$", re.I)
+
+
+def _arg_links(value: Any, key: str = "") -> list[str]:
+    """Every http(s) URL in a tool's arguments, nested ones too, plus the whole value of a url-like key (a browser
+    tool may take a bare `evil.example/?d=...`). shortcut: a link split across arguments is missed."""
+    if isinstance(value, dict):
+        return [u for k, v in value.items() for u in _arg_links(v, str(k))]
+    if isinstance(value, list):
+        return [u for v in value for u in _arg_links(v, key)]
+    if not isinstance(value, str) or not value.strip():
+        return []
+    found = _ARG_LINK.findall(value)
+    return found or ([value.strip()] if _LINK_KEY.search(key) else [])
 
 
 def _new_link(name: str, url: str, host: ToolHost | None, seen: str) -> str:

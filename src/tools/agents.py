@@ -61,10 +61,15 @@ AGENT_SPECS = [SPAWN_SPEC, WAIT_SPEC]
 
 class ReadOnlyHost:
     """The ToolHost a sub-agent gets: file reads, search and calculate only. A secret-looking file is refused, since
-    there is nobody to ask, and having no allow_link makes ask() refuse new links once local data was read."""
+    there is nobody to ask, and having no allow_link makes ask() refuse new links once local data was read.
+    `local_data` (set when the spawning answer had already read local data, so its task may carry some) arms that guard
+    from the first call: the agent then fetches only links in its task (checked against the main chat at spawn) or in
+    its own results. An agent spawned before any local read browses freely, as before."""
 
-    def __init__(self, root: Path | None, on_call: Callable[[str], None] | None = None) -> None:
+    def __init__(self, root: Path | None, on_call: Callable[[str], None] | None = None,
+                 local_data: bool = False) -> None:
         self.root = root
+        self.local_data = local_data
         self.specs = [s for s in TOOL_SPECS if s["function"]["name"] in READ_TOOLS]
         self.calls = 0
         self._on_call = on_call
@@ -131,7 +136,7 @@ class Agents:
             self._checks[cancel] = reads - 1
         return None
 
-    def spawn(self, task: Any, effort: Any, root: Path | None, cancel: threading.Event) -> str:
+    def spawn(self, task: Any, effort: Any, root: Path | None, cancel: threading.Event, local_data: bool = False) -> str:
         """Starts one agent; `cancel` is the answer's own, so Stop on that answer stops its agents too."""
         if not isinstance(task, str) or not task.strip():
             return "error: give the sub-agent a task"
@@ -143,7 +148,7 @@ class Agents:
             self._all.append(agent)
             self._checks[cancel] = MAX_CHECK_CALLS
         self._notify(agent.n, "start", f"{level}\n{agent.task}")
-        host = ReadOnlyHost(root, lambda note: self._notify(agent.n, "tool", note))
+        host = ReadOnlyHost(root, lambda note: self._notify(agent.n, "tool", note), local_data)
         threading.Thread(target=self._work, args=(agent, host, cancel), daemon=True).start()
         return (f"started sub-agent {agent.n} ({level} effort). Its report arrives as a background branch note "
                 f"'agent {agent.n}'. Do not research this part yourself: once all agents are started, call "

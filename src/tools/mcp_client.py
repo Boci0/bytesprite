@@ -348,6 +348,17 @@ def find_servers(query: str, get: Callable[[str], Any] = _get_json) -> str:
     return registry_text(data)
 
 
+_SECRET_ENV = re.compile(r"key|token|secret|pass|auth|credential|cookie|session", re.I)
+
+
+def env_summary(env: dict[str, str]) -> str:
+    """The env lines an add_mcp_server approval shows: values too, since NODE_OPTIONS, PYTHONSTARTUP or UV_INDEX_URL
+    change what runs, but secret-looking names show only `(hidden)`."""
+    if not env:
+        return ""
+    return "\nwith env:\n" + "\n".join(f"{k}=(hidden)" if _SECRET_ENV.search(k) else f"{k}={v}" for k, v in env.items())
+
+
 def add_server(name: str, command: str, args: list[str], env: dict[str, str], path: Path = CONFIG_PATH) -> str:
     """Add one entry to mcp.json, keeping everything else; refuses to overwrite a server or a broken file."""
     try:

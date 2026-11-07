@@ -47,6 +47,7 @@ from src.tools.ai_assist import AiAssistPlugin, AiJob, AiReply, fit_thinking, lo
 from src.tools.ai_tools import skills_dir
 from src.tools.errands import MAX_ERRAND_RUNS, ErrandsPlugin
 from src.tools.macros import MacroBook
+from src.tools.clip_vault import clipboard_is_private
 from src.tools.hints import HintsPlugin, Suggestion, foreground_app, foreground_title, idle_seconds, display_kept_on
 from src.tools.watch import (ACTION_LABELS, EDITORS, LABELS as WATCH_LABELS, SOURCES as WATCH_SOURCES, WatchReply,
                               action_lenses, apply_moves, ask_context, editor_title_parts, editor_workspace,
@@ -957,7 +958,9 @@ class PetWindow(QWidget):
             return
         cb = QGuiApplication.clipboard()
         pomo = self._state_machine.pomodoro_plugin
-        hint = hints.poll(app, cb.text() if cb is not None else "",
+        # a password manager's copy is never inspected or offered to Watch
+        clip = cb.text() if cb is not None and not clipboard_is_private(cb.mimeData()) else ""
+        hint = hints.poll(app, clip,
                           pomo is not None and not pomo.running, title=foreground_title(),
                           watch_ok=hints.watch and self._watch_ready())
         if hint is not None and hint.action == "watch:tidy" and not hint.data:

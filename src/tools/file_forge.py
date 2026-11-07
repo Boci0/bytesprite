@@ -608,6 +608,21 @@ def _resolve_safe_member_path(dest_root: Path, member_name: str) -> Path:
     return target
 
 
+def _carry_mark_of_web(archive: Path, outputs: tuple[Path, ...]) -> None:
+    """Copy a downloaded archive's Mark of the Web (its Zone.Identifier stream) to everything extracted from it, as
+    Explorer does, so SmartScreen and Office Protected View still see the files as from the internet."""
+    try:
+        mark = Path(f"{archive}:Zone.Identifier").read_bytes()
+    except OSError:
+        return  # made on this PC, or not NTFS
+    for out in outputs:
+        for path in (p for p in out.rglob("*") if p.is_file()) if out.is_dir() else (out,):
+            try:
+                Path(f"{path}:Zone.Identifier").write_bytes(mark)
+            except OSError:
+                pass  # FAT or exFAT has no streams
+
+
 def extract_archive_safe(
     archive_path: Path,
     output_dir: Path | None = None,
@@ -707,6 +722,7 @@ def extract_archive_safe(
 
         _check_cancel(cancel_event)
         os.replace(staging_dir, dest_dir)
+        _carry_mark_of_web(src, (dest_dir,))
         if on_progress is not None:
             on_progress(100.0)
         return ForgeResult(True, (dest_dir,), src_bytes, extracted_bytes, "UNZIP OK", "#73EFF7")
@@ -756,6 +772,7 @@ def _decompress_single_stream(
                     raise ValueError("Decompression limit exceeded")
                 fout.write(chunk)
         os.replace(temp_path, dest)
+        _carry_mark_of_web(src, (dest,))
         if on_progress is not None:
             on_progress(100.0)
         return ForgeResult(True, (dest,), src_bytes, written, "UNPACKED", "#73EFF7")

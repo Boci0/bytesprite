@@ -402,7 +402,7 @@ def test_host_asks_before_installing_mcp_servers_and_skills(monkeypatch: pytest.
     assert results[4] == 'added MCP server "gone", but it did not start (wrong command, missing npx / uvx, or a missing env value)'
     assert results[5].startswith('added skill "tidy"')
     assert load_skill(tmp_path / "skills", "tidy") == "Sort imports."
-    assert fake in shown[0] and "with env: TOKEN" in shown[0] and "s3cret" not in shown[0]
+    assert fake in shown[0] and "TOKEN=(hidden)" in shown[0] and "s3cret" not in shown[0]
     assert "Sort imports." in shown[3] and len(shown) == 4
 
 

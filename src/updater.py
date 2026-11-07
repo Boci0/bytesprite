@@ -92,7 +92,10 @@ def latest_release() -> tuple[str, str, str]:
     info = json.loads(_get(LATEST_API, 1024 * 1024))
     assets = {a.get("name"): str(a.get("browser_download_url") or "") for a in info.get("assets") or []
               if isinstance(a, dict)}
-    return str(info["tag_name"]), assets.get(ASSET_NAME, ""), assets.get(SIG_NAME, "")
+    tag = str(info["tag_name"])
+    if not re.fullmatch(r"v?\d+(\.\d+){0,2}", tag):  # the tag names cache files: no `..`, `\` or `:` from the API
+        raise ValueError("bad release tag")
+    return tag, assets.get(ASSET_NAME, ""), assets.get(SIG_NAME, "")
 
 
 def _bundle(tag: str, zip_url: str, sig_url: str, progress: Callable[[int], None] | None = None) -> bytes:
