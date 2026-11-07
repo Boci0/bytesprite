@@ -6,9 +6,10 @@ import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QAction
-from PyQt6.QtWidgets import QLabel, QMenu, QWidget, QWidgetAction
+from PyQt6.QtCore import QEvent, QObject, Qt
+from PyQt6.QtGui import QAction, QContextMenuEvent, QIcon
+from PyQt6.QtWidgets import (QAbstractScrollArea, QApplication, QLabel, QLineEdit, QMenu, QPlainTextEdit, QTextEdit,
+                             QWidget, QWidgetAction)
 
 from src.engine.models import PetState
 from src.engine.pet_state import PetStateMachine
@@ -96,6 +97,33 @@ def style_menu(menu: QMenu) -> QMenu:
     menu.setStyleSheet(MENU_STYLESHEET)
     install_panel_frame(menu)
     return menu
+
+
+class _TextBoxMenus(QObject):
+    """Right-click menus of every text box (line edits, the chat draft, chat bubbles) in the folded-paper look.
+    Qt's own menu took the dark box styling and Windows' black theme icons, so its items were unreadable."""
+
+    def eventFilter(self, obj: QObject | None, event: QEvent | None) -> bool:
+        if not isinstance(event, QContextMenuEvent) or event.type() != QEvent.Type.ContextMenu:
+            return False
+        box = obj.parent() if isinstance(obj, QWidget) and isinstance(obj.parent(), QAbstractScrollArea) else obj
+        if isinstance(box, QAbstractScrollArea) and obj is not box.viewport():
+            return False
+        if not isinstance(box, (QLineEdit, QTextEdit, QPlainTextEdit)):
+            return False
+        menu = box.createStandardContextMenu()
+        if menu is None:
+            return False
+        for action in menu.actions():
+            action.setIcon(QIcon())  # black theme icons vanish on the dark panel; the other menus have none
+        style_menu(menu).exec(event.globalPos())
+        menu.deleteLater()
+        return True
+
+
+def style_text_box_menus(app: QApplication) -> None:
+    """Gives every text box's right-click menu the pet's menu look (call once, after QApplication exists)."""
+    app.installEventFilter(_TextBoxMenus(app))
 
 
 class PetContextMenu(QMenu):

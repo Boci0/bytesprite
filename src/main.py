@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import QApplication, QSystemTrayIcon
 from src.engine.pet_state import PetStateMachine
 from src.graphics.animation_controller import AnimationController
 from src.storage.storage_manager import StorageManager, log_path, repair_autostart
+from src.ui.context_menu import style_text_box_menus
 from src.ui.pet_window import PetWindow, build_app_icon
 from src.ui.quick_tools import GlobalHotkeys
 from src.ui.theme import APP_STYLESHEET
@@ -355,6 +356,7 @@ def main(argv: list[str] | None = None) -> int:
     app.setApplicationName("Paperduck")
     app.setWindowIcon(build_app_icon(64))
     app.setStyleSheet(APP_STYLESHEET)
+    style_text_box_menus(app)
 
     storage_override: StorageManager | None = None
     if "--state-file" in args:

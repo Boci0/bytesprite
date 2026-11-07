@@ -70,3 +70,25 @@ def test_theme_choice_is_saved_and_restarts_only_on_a_change(tmp_path, monkeypat
         win.deleteLater()
     theme.THEME_FILE.write_text("garbage", encoding="utf-8")
     assert theme.saved_theme() == "system"
+
+
+def test_text_box_right_click_menus_get_the_pet_menu_look(monkeypatch) -> None:
+    """Qt's own Undo/Copy/Paste menu took the dark box styling and black theme icons, so it was unreadable."""
+    from PyQt6.QtCore import QPoint
+    from PyQt6.QtGui import QContextMenuEvent
+    from PyQt6.QtWidgets import QApplication, QLineEdit, QMenu, QPlainTextEdit
+
+    from src.ui.context_menu import MENU_STYLESHEET, style_text_box_menus
+
+    app = QApplication.instance() or QApplication([])
+    style_text_box_menus(app)
+    shown: list[QMenu] = []
+    monkeypatch.setattr(QMenu, "exec", lambda menu, *_a: shown.append(menu))
+    line, draft = QLineEdit("hi"), QPlainTextEdit("hello")
+    for target in (line, draft.viewport()):
+        app.sendEvent(target, QContextMenuEvent(QContextMenuEvent.Reason.Mouse, QPoint(5, 5), QPoint(5, 5)))
+    assert len(shown) == 2
+    for menu in shown:
+        assert menu.styleSheet() == MENU_STYLESHEET
+        assert any(a.text().startswith("&Copy") or "Copy" in a.text() for a in menu.actions())
+        assert all(a.icon().isNull() for a in menu.actions())

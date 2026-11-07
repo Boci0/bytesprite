@@ -16,6 +16,7 @@ import json
 import tempfile
 import threading
 import time
+from datetime import date
 from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable
 from pathlib import Path
@@ -26,6 +27,8 @@ from PyQt6.QtGui import QCursor, QGuiApplication, QImage
 from PyQt6.QtWidgets import QFileDialog
 
 from src.tools import computer
+from src.tools.ai_assist import ask, fit_thinking, load_key
+from src.tools.agents import AGENT_PROMPT, AGENT_SPECS, MAX_AGENT_CALLS, Agents, ReadOnlyHost
 from src.tools.ai_tools import (calculate, find_control, COMPUTER_TOOLS, MAX_BATCH_STEPS, FILE_TOOLS, PET_ACTIONS, TOOL_SPECS, BackgroundProcs, apply_edits,
                                 computer_action, destructive_reason, is_secret, load_skill, memory_path, parse_boxes, plan_edit,
                                 plan_edits, plan_memory, plan_skill_update, print_to_pdf_paths, resolve,
@@ -81,7 +84,10 @@ def _front_window_shot(hwnd: int) -> QImage | None:
 
 
 def _ours(win: Any) -> list[Any]:
-    return [w for w in (win, win._ai_chat) if w is not None and w.isVisible()]
+    """The pet's own windows on screen (pet, chat card, its agent sheets): left out of shots and clicked through."""
+    chat = win._ai_chat
+    sheets = getattr(getattr(chat, "_sheets", None), "sheets", [])
+    return [w for w in (win, chat, *sheets) if w is not None and w.isVisible()]
 
 
 def show_quietly(w: Any) -> None:
@@ -193,6 +199,7 @@ class AiToolHost(QObject):
 
     _call = pyqtSignal(object)
     activity = pyqtSignal(str)  # the tool that runs now, "approval" while one waits on the user, "" when idle
+    agent_event = pyqtSignal(int, str, str)  # (agent n, kind, text) from a sub-agent's thread, for its sheet
 
     def __init__(self, window: Any, mcp: McpHub | None = None) -> None:
         super().__init__(window)  # lives on the Qt thread, so the queued signal lands there
@@ -206,6 +213,8 @@ class AiToolHost(QObject):
         self.procs = BackgroundProcs()
         self.cancel = threading.Event()  # the chat swaps in a fresh one per answer and sets it on Stop
         self.approve_s = APPROVE_TIMEOUT_S  # the chat raises it for an errand's answer
+        self.agents = Agents(self._run_agent, lambda text, source: self._win._ai_chat.add_branch_note(text, source),
+                             self.agent_event.emit)
         self._call.connect(self._on_call)
         self._idle_timer = QTimer(self)
         self._idle_timer.timeout.connect(self._close_idle_mcp)
@@ -222,7 +231,11 @@ class AiToolHost(QObject):
     @property
     def specs(self) -> list[dict[str, Any]]:
         """Built-in tools plus the MCP servers' (started on first use, on the worker thread)."""
-        return TOOL_SPECS + self.mcp.specs()
+        return TOOL_SPECS + AGENT_SPECS + self.mcp.specs()
+
+    def blocked(self, name: str) -> str | None:
+        """ask() refuses a research tool while this chat's sub-agents still run (see Agents.blocked)."""
+        return self.agents.blocked(name, self.cancel)
 
     def run(self, name: str, args: dict[str, Any]) -> str:
         """One tool call; the pet acts it out meanwhile (`activity`)."""
@@ -270,6 +283,10 @@ class AiToolHost(QObject):
             return apply_edits(edits)
         if name in ("set_errand", "cancel_errand"):
             return self._errand(name, args)
+        if name == "spawn_agent":  # read-only tools only, so nothing to allow; Stop on this answer stops it
+            return self.agents.spawn(args.get("task"), args.get("effort"), self._project(), self.cancel)
+        if name == "wait_agents":
+            return self.agents.wait(args.get("timeout_s"), self.cancel)
         if name == "calculate":  # pure arithmetic, nothing to allow
             return calculate(args.get("expression"))
         if name == "plan_tasks":
@@ -612,6 +629,16 @@ class AiToolHost(QObject):
                              {"event": threading.Event(), "result": None}))
 
         QTimer.singleShot(180 if hidden else 0, lambda: threading.Thread(target=work, daemon=True).start())
+
+    def _run_agent(self, task: str, effort: str, host: ReadOnlyHost, cancel: threading.Event) -> str:
+        """A sub-agent's thread: one ask() with the chat's provider and model at the agent's own thinking level."""
+        plugin = self._win._ai_chat._plugin
+        url, model = plugin.base_url, plugin.model
+        where = f"the Project Folder {host.root}" if host.root else f"the home folder {Path.home()}"
+        messages = [{"role": "system", "content": AGENT_PROMPT.format(calls=MAX_AGENT_CALLS, where=where, today=date.today())},
+                    {"role": "user", "content": task}]
+        return ask(url, load_key(url), model, messages, thinking=fit_thinking(url, effort, model), host=host,
+                   cancel=cancel).text
 
     def _add_mcp_server(self, args: dict[str, Any]) -> str:
         server, command = args.get("name"), args.get("command")

@@ -16,7 +16,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from PyQt6.QtCore import (QBuffer, QByteArray, QIODevice, QMimeData, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer,
+from PyQt6.QtCore import (QBuffer, QByteArray, QEvent, QIODevice, QMimeData, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer,
                           QUrl, pyqtSignal)
 from PyQt6.QtGui import (QColor, QDesktopServices, QDragEnterEvent, QDropEvent, QFont, QGuiApplication, QImage,
                          QKeyEvent, QMouseEvent, QPainter, QPainterPath, QPalette, QPen, QPixmap, QTextBlockFormat, QTextCharFormat,
@@ -28,11 +28,12 @@ from PyQt6.QtWidgets import (QAbstractButton, QComboBox, QFileDialog, QFormLayou
 from src.storage.recent_files import format_age
 from src.tools.ai_assist import (BRAVE_KEY_PAGE, BRAVE_URL, COMPACT_AT, COMPACT_PREFIX, KEY_PAGES, MAX_INPUT_CHARS, PRESETS,
                                  compact_history, history_chars, summary_turns, DEEPSEEK_TOP_UP, deepseek_balance, is_deepseek,
-                                 THINKING_LEVELS, AiAssistPlugin, fit_thinking, thinking_levels, AiJob, AiReply, ModelInfo, ToolHost, ask, chat_messages, delete_key, list_models, load_key, save_key, valid_key,
+                                 THINKING_LEVELS, AiAssistPlugin, BranchNote, fit_thinking, thinking_levels, AiJob, AiReply, ModelInfo, ToolHost, ask, chat_messages, delete_key, list_models, load_key, save_key, valid_key,
                                  valid_model, validate_base_url)
 from src.tools.ai_sessions import archive_turns, delete_session, delete_sessions, list_sessions, load_session, new_id, save_session
 from src.tools.web_drop import strip_metadata
 from src.tools.errands import ERRAND_MARK, Errand, describe as describe_errand
+from src.ui.agent_sheets import AgentSheets
 from src.ui.ai_tool_host import APPROVE_TIMEOUT_S, ERRAND_APPROVE_S
 from src.ui.context_menu import style_menu
 from src.ui.quick_tools import OcrJob
@@ -45,6 +46,7 @@ MAX_FILE_BYTES = 4 * 1024 * 1024  # most that is read for a text chip; a bigger 
 INLINE_FILE_CHARS = 100_000  # a text file longer than this goes by path too (a message holds MAX_INPUT_CHARS)
 REF_HEAD_CHARS = 3000
 MAX_ATTACHMENTS = 4
+MAX_BRANCH_CHARS = 40_000  # background branch text held for the next message (the oldest posts go); 4 agent reports fit
 MAX_IMAGE_SIDE = 1568  # longest side sent to vision models: bigger only costs tokens
 _IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp")
 # A saved file with these would run rather than open, so its row offers only Show in folder
@@ -374,7 +376,7 @@ class _Draft(QPlainTextEdit):
                                         else Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
 
-_THINK_GLYPHS = "·✢✳✶✻✽✻✶✳✢"  # a twinkle, like Claude Code's spinner
+_THINK_GLYPHS = "Â·âœ¢âœ³âœ¶âœ»âœ½âœ»âœ¶âœ³âœ¢"  # a twinkle, like Claude Code's spinner
 
 
 class ChatText(QTextBrowser):
@@ -657,6 +659,7 @@ class AiChat(QWidget):
 
     thinking_changed = pyqtSignal(bool)
     answered = pyqtSignal(bool)  # an answer landed (True) or failed (False); not sent when stopped
+    _posted = pyqtSignal(str, str)  # (source, text) of a branch note, shown on the Qt thread
 
     WIDTH = 380
     THREAD_MAX_H = 320
@@ -668,6 +671,9 @@ class AiChat(QWidget):
         super().__init__(None, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
                          | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.NoDropShadowWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self._sheets = AgentSheets(self)  # sub-agents' sheets, stacked behind this card
+        if (events := getattr(tool_host, "agent_event", None)) is not None:
+            events.connect(self._sheets.on_event)
         self.setAcceptDrops(True)
         self.setWindowTitle("Paperduck AI")
         self.setFixedWidth(self.WIDTH)
@@ -701,6 +707,10 @@ class AiChat(QWidget):
         self._thinking_label: ChatText | None = None
         self._steer_q: list[str] = []  # typed while an answer is coming; the worker takes them with its next tool result
         self._steer_sent: list[str] = []  # the ones it took
+        self._branch_q: list[BranchNote] = []  # background branch posts waiting for a tool round or a send
+        self._branch_sent: list[BranchNote] = []  # the ones the running answer took
+        self._branch_lock = threading.Lock()  # sub-agents post from their own threads
+        self._posted.connect(self._show_branch)
         self._progress = ""  # what the worker is doing now (written on its thread, shown by _tick_dots)
         self._tasks: list[tuple[str, str]] = []
         self._sid: str | None = None  # this chat's saved session, made on its first answer
@@ -1024,6 +1034,24 @@ class AiChat(QWidget):
         menu.exec(self._plus.mapToGlobal(QPoint(0, -menu.sizeHint().height() - 4)))
         menu.deleteLater()
 
+    # ------------------------------------------------------------------ branch inbox
+
+    def add_branch_note(self, text: str, source: str) -> None:
+        """Any thread: a background branch's post, held for the next tool round or send (oldest dropped past
+        MAX_BRANCH_CHARS). The note row is drawn on the Qt thread."""
+        text = text.strip()
+        if not text:
+            return
+        with self._branch_lock:
+            self._branch_q.append(BranchNote(text, source))
+            while sum(map(len, self._branch_q)) > MAX_BRANCH_CHARS and len(self._branch_q) > 1:
+                self._branch_q.pop(0)
+        self._posted.emit(source, text)
+
+    def _show_branch(self, source: str, text: str) -> None:
+        self._add_row("note", f"{source}: {text[:240]}" + ("..." if len(text) > 240 else ""))
+        self._relayout()
+
     def _pick_files(self) -> None:
         paths, _flt = QFileDialog.getOpenFileNames(self, "Paperduck AI - Attach Files")
         for path in paths:
@@ -1157,7 +1185,7 @@ class AiChat(QWidget):
             if item is not None and item.widget() is not None:
                 item.widget().deleteLater()
         for i, (label, _run) in enumerate(self._actions):
-            btn = QPushButton(label + ("  ⏎" if i == 0 else ""))
+            btn = QPushButton(label + ("  âŽ" if i == 0 else ""))
             btn.setStyleSheet(_ALLOW_CSS if i == 0 else _BUTTON_CSS)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.clicked.connect(lambda _c=False, n=i: self._run_action(n))
@@ -1182,13 +1210,19 @@ class AiChat(QWidget):
         self.clear_ask()
         run()
 
-    def _take_steer(self) -> list[str]:
-        """Worker thread: what the user typed since the last tool result."""
+    def _take_steer(self, cancel: threading.Event) -> list[str]:
+        """Worker thread: what the user typed since the last tool result. A stopped answer's worker takes no branch
+        notes (checked under the lock stop() sets `cancel` under), so they stay queued for the next message."""
         taken: list[str] = []
         while self._steer_q:
             taken.append(self._steer_q.pop(0))
         self._steer_sent.extend(taken)
-        return taken
+        with self._branch_lock:
+            if cancel.is_set():
+                return taken
+            branch, self._branch_q = self._branch_q, []
+            self._branch_sent.extend(branch)
+        return [*branch, *taken]
 
     def _steer(self, text: str) -> None:
         """The user typed (or attached) while the model works: show it now, and the model reads it at its next tool
@@ -1223,7 +1257,10 @@ class AiChat(QWidget):
         if not self._ready():
             self.show_setup("Set up a provider, model and API key first. Nothing has been sent.")
             return
-        content = "\n\n".join([text, *(a.as_prompt() for a in usable), self._context]).strip()[:MAX_INPUT_CHARS]
+        with self._branch_lock:
+            branch, self._branch_q = self._branch_q, []
+        heard = [n.note().strip() for n in branch]  # background context first, then the user's own words
+        content = "\n\n".join([*heard, text, *(a.as_prompt() for a in usable), self._context]).strip()[:MAX_INPUT_CHARS]
         self._context, self._actions = "", []
         self._action_box.hide()
         self._draft.clear()
@@ -1254,7 +1291,8 @@ class AiChat(QWidget):
         ignored when it lands."""
         if self._job is None or self._testing:
             return
-        self._cancel.set()  # no further request or tool runs; a running command is killed
+        with self._branch_lock:  # so a dying worker cannot take branch notes after this (see _take_steer)
+            self._cancel.set()  # no further request or tool runs; a running command is killed
         if self._pending is not None:  # the worker is waiting on it
             self._pending(None)
         job, self._job = self._job, None
@@ -1270,7 +1308,7 @@ class AiChat(QWidget):
         self._asked = (model, thinking)
         job = self._job = AiJob(self)
         job.finished.connect(self._on_done)
-        self._steer_q, self._steer_sent = [], []
+        self._steer_q, self._steer_sent, self._branch_sent = [], [], []
         host = None if self._testing else self._tool_host
         cancel = self._cancel = threading.Event()
         if host is not None:
@@ -1282,11 +1320,11 @@ class AiChat(QWidget):
 
         def run() -> AiReply:
             if history is None:
-                return ask(url, key, model, messages or [], thinking=thinking, host=host, steer=self._take_steer, cancel=cancel)
+                return ask(url, key, model, messages or [], thinking=thinking, host=host, steer=lambda: self._take_steer(cancel), cancel=cancel)
             sent, n, summary = (compact_history(url, key, model, history, cancel) if history_chars(history) > COMPACT_AT
                                 else (history, 0, ""))
             reply = ask(url, key, model, chat_messages(sent), thinking=thinking, host=host, progress=note,
-                         steer=self._take_steer, cancel=cancel)
+                         steer=lambda: self._take_steer(cancel), cancel=cancel)
             reply.compacted, reply.summary = n, summary
             return reply
 
@@ -1316,6 +1354,9 @@ class AiChat(QWidget):
         self._hide_status()
         said, left = self._steer_sent, self._steer_q
         self._steer_sent, self._steer_q = [], []
+        for note in self._branch_sent:  # branch posts the model read: kept as the untrusted notes it saw
+            self._history.append({"role": "user", "content": note.note().strip()})
+        self._branch_sent = []
         for path in getattr(self._tool_host, "take_saved", list)():
             self._add_saved_row(path)
         if error or reply is None:
@@ -1853,6 +1894,7 @@ class AiChat(QWidget):
     def new_chat(self) -> None:
         """Fresh start: drops a pending reply, the thread, the draft and any attachments."""
         self.stop()
+        self._sheets.close_all()
         self._sid = None
         self._history.clear()
         self._allowed.clear()
@@ -1978,6 +2020,30 @@ class AiChat(QWidget):
         self.move(x, max(area.top() + 8, min(y, area.bottom() - self.height() - 8)))
 
     # Header drag: the card stays where it is dropped (its anchor moves with it)
+    # the sub-agent sheets behind the card go where it goes
+    def moveEvent(self, event) -> None:  # type: ignore[override]
+        super().moveEvent(event)
+        self._sheets.card_moved()
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        if self._sheets.sheets:
+            self._sheets.place()
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self._sheets.show_all()
+
+    def hideEvent(self, event) -> None:  # type: ignore[override]
+        super().hideEvent(event)
+        self._sheets.hide_all()
+
+    def changeEvent(self, event) -> None:  # type: ignore[override]
+        super().changeEvent(event)
+        if (event is not None and event.type() == QEvent.Type.ActivationChange and self.isActiveWindow()
+                and self._sheets.order[0] is not self):  # a click on the card deals it back to the front
+            self._sheets.deal(self)
+
     def mousePressEvent(self, event: QMouseEvent | None) -> None:
         if (event is not None and event.button() == Qt.MouseButton.LeftButton
                 and event.position().y() < self._header_sep.mapTo(self, QPoint(0, 0)).y()):
