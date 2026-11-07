@@ -1072,6 +1072,33 @@ def test_typing_while_it_works_steers_the_answer(monkeypatch: pytest.MonkeyPatch
         chat.close()
 
 
+def test_steering_can_carry_an_attachment(monkeypatch: pytest.MonkeyPatch, api: str, tmp_path: Path) -> None:
+    from src.tools.ai_assist import AiReply
+
+    app, _plugin, chat = _chat(monkeypatch, api)
+    go, took = threading.Event(), []
+
+    def fake_ask(url, key, model, messages, *, steer=None, **_kw):
+        go.wait(5)
+        took.extend(steer())
+        return AiReply(text="done")
+
+    monkeypatch.setattr("src.ui.ai_chat.ask", fake_ask)
+    try:
+        chat.insert_text("big job")
+        chat.send()
+        note = tmp_path / "spec.txt"
+        note.write_text("use blue", encoding="utf-8")
+        chat.attach_path(note)
+        chat.send()  # no typed text, only the file: still steers
+        assert "[File: spec.txt]\nuse blue" in chat._steer_q[0] and not chat._attachments
+        go.set()
+        _wait(app, lambda: chat._job is None)
+        assert "[File: spec.txt]\nuse blue" in took[0] and "use blue" in chat._history[1]["content"]
+    finally:
+        chat.close()
+
+
 def test_steering_typed_too_late_is_sent_next(monkeypatch: pytest.MonkeyPatch, api: str) -> None:
     from src.tools.ai_assist import AiReply
 

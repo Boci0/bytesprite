@@ -1191,12 +1191,19 @@ class AiChat(QWidget):
         return taken
 
     def _steer(self, text: str) -> None:
-        """The user typed while the model works: show it now, and the model reads it at its next tool round."""
-        if not text:
+        """The user typed (or attached) while the model works: show it now, and the model reads it at its next tool
+        round. Attachments go as text (an image as its OCR text): a tool result cannot carry image parts."""
+        usable = [a for a in self._attachments if a.text or a.image_url or a.path]
+        content = "\n\n".join([text, *(a.as_prompt() for a in usable)]).strip()
+        if not content:
             return
-        self._steer_q.append(text[:MAX_INPUT_CHARS])
-        self._add_bubble("user", text)
+        if any(a.pending for a in self._attachments):
+            self._add_bubble("error", "Still reading an image. Send again in a moment.")
+            return
+        self._steer_q.append(content[:MAX_INPUT_CHARS])
+        self._add_bubble("user", text, attachments=usable)
         self._draft.clear()
+        self._clear_attachments()
         self._relayout()
 
     def send(self) -> None:
