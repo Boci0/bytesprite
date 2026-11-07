@@ -42,7 +42,8 @@ from typing import Any
 from src.tools.errands import KINDS as ERRAND_KINDS
 
 MAX_FILE_CHARS = 30000  # one read_file call; the model pages on with start_line
-MAX_FILE_BYTES = 2 * 1024 * 1024
+MAX_FILE_BYTES = 2 * 1024 * 1024  # edits and saves
+MAX_READ_BYTES = 32 * 1024 * 1024  # read_file and search_text: a big attachment is read in pages
 MAX_LISTED = 200
 MAX_FOUND = 100
 MAX_MATCHES = 60
@@ -332,7 +333,7 @@ def _walk(base: Path, cut: list[bool] | None = None):
 
 def _text(path: Path) -> str | None:
     """File text, or None when it is binary or too big."""
-    if path.stat().st_size > MAX_FILE_BYTES:
+    if path.stat().st_size > MAX_READ_BYTES:
         return None
     raw = path.read_bytes()
     return None if b"\0" in raw[:8192] else raw.decode("utf-8", "replace")
@@ -360,7 +361,7 @@ def run_file_tool(root: Path | None, name: str, args: dict[str, Any], secrets: b
                 return "error: that looks like a secrets file and the user did not allow reading it"
             text = _text(path)
             if text is None:
-                return "error: binary or larger than 2 MB"
+                return "error: binary or larger than 32 MB"
             start = args.get("start_line")
             start = start if isinstance(start, int) and start > 0 else 1
             out, size = [], 0

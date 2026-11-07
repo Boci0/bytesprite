@@ -973,3 +973,12 @@ def test_timeout_hint() -> None:
     from src.tools.ai_tools import shell_hint
     assert "Start-Sleep" in shell_hint("timeout /t 60 /nobreak >nul & dir",
                                        "ERROR: Input redirection is not supported, exiting the process immediately.")
+
+
+def test_a_file_over_the_edit_cap_can_still_be_read_and_searched(tmp_path: Path) -> None:
+    """A big attachment goes by path, so read_file and search_text must handle it (edits keep the 2 MB cap)."""
+    from src.tools.ai_tools import MAX_FILE_BYTES, run_file_tool
+
+    (tmp_path / "huge.log").write_text("row\n" * (MAX_FILE_BYTES // 4 + 10) + "LATE_CODE = 5\n", encoding="utf-8")
+    assert "huge.log:" in run_file_tool(tmp_path, "search_text", {"text": "LATE_CODE"})
+    assert "LATE_CODE" in run_file_tool(tmp_path, "read_file", {"path": "huge.log", "start_line": MAX_FILE_BYTES // 4 + 11})
