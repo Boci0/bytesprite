@@ -29,7 +29,7 @@ from src.tools import computer
 from src.tools.ai_tools import (calculate, COMPUTER_TOOLS, MAX_BATCH_STEPS, FILE_TOOLS, PET_ACTIONS, TOOL_SPECS, BackgroundProcs, apply_edits,
                                 computer_action, destructive_reason, is_secret, load_skill, memory_path, parse_boxes, plan_edit,
                                 plan_edits, plan_memory, plan_skill_update, print_to_pdf_paths, resolve,
-                                PDF_WAIT_S, changed_media, file_stamp, media_stamps, wait_for_new_file, run_command, run_file_tool, save_args,
+                                PDF_WAIT_S, changed_media, file_stamp, media_stamps, wait_for_new_file, run_command, command_timeout, run_file_tool, save_args,
                                 skill_text, skills_dir, task_list, write_memory, write_skill)
 from src.tools.errands import describe as describe_errand
 from src.tools.file_forge import scrub_metadata
@@ -211,12 +211,14 @@ class AiToolHost(QObject):
             cwd = self._project() or Path.home()
             where = "the Project Folder" if self._project() else f"your home folder ({cwd})"
             risk = destructive_reason(command)
-            if not self._allowed("run_command", f"The model wants to run in {where}:\n\n{command.strip()}", "commands",
-                                 risk):
+            seconds = command_timeout(args.get("timeout_s"))
+            limit = f" (allowed to run up to {seconds:g} s)" if args.get("timeout_s") is not None else ""
+            if not self._allowed("run_command", f"The model wants to run in {where}{limit}:\n\n{command.strip()}",
+                                 "commands", risk):
                 return "error: the user declined this command"
             pdfs = {pdf: file_stamp(pdf) for pdf in print_to_pdf_paths(command, cwd)}
             media = media_stamps(command, cwd)
-            out = run_command(cwd, command, self.cancel)
+            out = run_command(cwd, command, self.cancel, seconds)
             for pdf, before in pdfs.items():  # headless Edge stamps HeadlessChrome, Skia and dates
                 # msedge.exe hands off to a child and returns before the PDF is written: wait for the new file
                 if wait_for_new_file(pdf, before, PDF_WAIT_S, self.cancel):

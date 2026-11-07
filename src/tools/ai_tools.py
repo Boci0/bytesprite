@@ -60,6 +60,7 @@ TASK_STATUSES = ("pending", "in_progress", "done")
 MAX_BACKGROUND = 4  # background processes running at once
 MAX_BACKGROUND_CHARS = 100000  # output kept per background process (the newest)
 COMMAND_TIMEOUT_S = 120
+MAX_COMMAND_TIMEOUT_S = 900  # what the model may ask for with timeout_s
 MAX_COMMAND_CHARS = 30000  # command output returned to the model (head and tail kept)
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".mypy_cache", ".pytest_cache", "dist", "build"}
 _SECRET = re.compile(r"^\.env|\.(pem|key|pfx|p12|kdbx|ppk)$|^id_(rsa|dsa|ecdsa|ed25519)|credential|secret",
@@ -180,7 +181,9 @@ TOOL_SPECS: list[dict[str, Any]] = [
         f"{COMMAND_TIMEOUT_S} s; use start_background for servers, watchers and long runs. To open a desktop app "
         f'use start "" /d "<the exe\'s own folder>" "<exe>" (many apps, e.g. OBS, fail unless started in their '
         f"own folder).",
-        {"command": {"type": "string"}}, ("command",)),
+        {"command": {"type": "string"},
+         "timeout_s": {"type": "integer", "description": f"Seconds to allow, default {COMMAND_TIMEOUT_S}, most "
+                       f"{MAX_COMMAND_TIMEOUT_S}. Shown to the user with the command."}}, ("command",)),
     _fn("start_background", f"Start a long-running cmd.exe command (dev server, watcher, long test run) in the Project "
         f"Folder and return at once with its id. At most {MAX_BACKGROUND} run at a time. The user allows each "
         f"command first and can stop it in the chat. Read its output with read_background.",
@@ -411,14 +414,18 @@ def run_file_tool(root: Path | None, name: str, args: dict[str, Any], secrets: b
             context = args.get("context")
             context = context if isinstance(context, int) and not isinstance(context, bool) and 0 < context <= MAX_CONTEXT else 0
             hits: list[str] = []
-            cut, secret = [], 0
+            cut, secret, skipped = [], 0, 0
             for path in _walk(base, cut):
                 if not fnmatch.fnmatch(path.name.lower(), pattern.strip().lower()):
                     continue
                 if _SECRET.search(path.name):
                     secret += 1
                     continue
-                lines = (_text(path) or "").splitlines()
+                text = _text(path)
+                if text is None:
+                    skipped += 1
+                    continue
+                lines = text.splitlines()
                 for n, line in enumerate(lines, 1):
                     if found_in(line):
                         rel = _rel(base, path)
@@ -426,7 +433,9 @@ def run_file_tool(root: Path | None, name: str, args: dict[str, Any], secrets: b
                                                for i in range(max(1, n - context), min(len(lines), n + context) + 1)))
                         if len(hits) >= MAX_MATCHES:
                             return ("\n--\n" if context else "\n").join(hits) + "\n... more matches, narrow the search"
-            notes = (f"\n({secret} secret-looking files not searched)" if secret else "") + (SCAN_CUT if cut else "")
+            notes = ((f"\n({secret} secret-looking files not searched)" if secret else "")
+                     + (f"\n({skipped} binary or over-32 MB files not searched)" if skipped else "")
+                     + (SCAN_CUT if cut else ""))
             return (("\n--\n" if context else "\n").join(hits) or "no matches") + notes
     except ValueError as exc:
         return f"error: {exc}"
@@ -673,9 +682,19 @@ def destructive_reason(command: str) -> str:
     return found.group(0).strip() if found else ""
 
 
-def run_command(root: Path | None, command: Any, cancel: threading.Event | None = None) -> str:
+def command_timeout(value: Any) -> float:
+    """Seconds a run_command may take: the model's timeout_s clamped to 10..MAX_COMMAND_TIMEOUT_S, else the default."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return COMMAND_TIMEOUT_S
+    return float(min(max(value, 10), MAX_COMMAND_TIMEOUT_S))
+
+
+def run_command(root: Path | None, command: Any, cancel: threading.Event | None = None,
+                timeout: float | None = None) -> str:
     """Exit code and output of an allowed cmd.exe command in `root` (the Project Folder, or the host's fallback
-    home folder); the whole tree dies on timeout or once `cancel` is set (the chat's Stop)."""
+    home folder); the whole tree dies after `timeout` seconds (default COMMAND_TIMEOUT_S) or once `cancel` is
+    set (the chat's Stop)."""
+    timeout = timeout or COMMAND_TIMEOUT_S
     try:
         cwd = resolve(root, "")
     except ValueError as exc:
@@ -691,7 +710,7 @@ def run_command(root: Path | None, command: Any, cancel: threading.Event | None 
                                     stderr=subprocess.STDOUT, creationflags=flags)
         except OSError as exc:
             return f"error: could not start ({exc.strerror or 'failed'})"
-        end = time.monotonic() + COMMAND_TIMEOUT_S
+        end = time.monotonic() + timeout
         while proc.poll() is None and time.monotonic() < end and not (cancel is not None and cancel.is_set()):
             try:
                 proc.wait(timeout=0.25)
@@ -706,7 +725,10 @@ def run_command(root: Path | None, command: Any, cancel: threading.Event | None 
             proc.wait()
             if cancel is not None and cancel.is_set():
                 return "error: stopped by the user"
-            head = f"stopped after {COMMAND_TIMEOUT_S} s"
+            head = f"stopped after {timeout:g} s"
+            if timeout < MAX_COMMAND_TIMEOUT_S:
+                head += (" (still running, so it may just be slow: run it again with a larger timeout_s up to "
+                         f"{MAX_COMMAND_TIMEOUT_S}, or with start_background and check read_background)")
             if re.search(r"GetActiveObject|Application|Word|Excel|PowerPoint", command, re.I):
                 head += " (an Office app is probably waiting on an open dialog: read_screen, press esc, retry)"
         sink.seek(0)

@@ -982,3 +982,20 @@ def test_a_file_over_the_edit_cap_can_still_be_read_and_searched(tmp_path: Path)
     (tmp_path / "huge.log").write_text("row\n" * (MAX_FILE_BYTES // 4 + 10) + "LATE_CODE = 5\n", encoding="utf-8")
     assert "huge.log:" in run_file_tool(tmp_path, "search_text", {"text": "LATE_CODE"})
     assert "LATE_CODE" in run_file_tool(tmp_path, "read_file", {"path": "huge.log", "start_line": MAX_FILE_BYTES // 4 + 11})
+
+
+def test_search_says_what_it_skipped(tmp_path: Path) -> None:
+    from src.tools.ai_tools import run_file_tool
+
+    (tmp_path / "blob.bin").write_bytes(b"\0\1needle\n")
+    (tmp_path / "a.txt").write_text("hay\n", encoding="utf-8")
+    out = run_file_tool(tmp_path, "search_text", {"text": "needle"})
+    assert out.startswith("no matches") and "1 binary or over-32 MB files not searched" in out
+
+
+def test_run_command_timeout_is_asked_for_and_clamped(tmp_path: Path) -> None:
+    from src.tools import ai_tools
+
+    assert [ai_tools.command_timeout(v) for v in (None, "9", True, 1, 300, 5000)] == [120, 120, 120, 10, 300, 900]
+    out = ai_tools.run_command(tmp_path, "ping -n 30 127.0.0.1 >nul", None, 1)
+    assert out.startswith("stopped after 1 s") and "timeout_s" in out and "start_background" in out
