@@ -218,3 +218,24 @@ def test_delete_this_chat_removes_only_the_open_chat() -> None:
         assert [s.id for s in list_sessions()] == [keep]
     finally:
         chat.deleteLater()
+
+
+def test_compacted_turns_are_archived_as_searchable_text(tmp_path: Path) -> None:
+    from src.tools.ai_sessions import archive_turns, delete_session
+
+    turns = [{"role": "user", "content": "[Earlier conversation, compacted by Paperduck into this summary:]\nold"},
+             {"role": "user", "content": "the build key is sk-" + "a" * 30},
+             {"role": "assistant", "content": "ran it", "tools": [("run_command", "exit 0")]}]
+    path = archive_turns("abc123abc123", turns, tmp_path)
+    text = path.read_text("utf-8")
+    assert "## user\n[key removed]" in text.replace("the build key is ", "") or "[key removed]" in text
+    assert "old" not in text and "[tool run_command] exit 0" in text  # an earlier summary is not archived again
+    assert archive_turns("abc123abc123", [], tmp_path) is None and archive_turns("bad id", turns, tmp_path) is None
+    delete_session("abc123abc123", tmp_path)
+    assert not path.exists()
+
+
+def test_summary_points_at_the_archive_and_keeps_tasks_verbatim() -> None:
+    first = ai_assist.summary_turns("did things", "C:/x/abc.archive.txt", [("ship 2.0.5", "doing")])[0]["content"]
+    assert "- [doing] ship 2.0.5" in first and "C:/x/abc.archive.txt" in first
+    assert ai_assist.summary_turns("plain")[0]["content"].endswith("plain")

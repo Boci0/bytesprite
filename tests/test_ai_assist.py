@@ -402,7 +402,7 @@ def test_chat_attachments_are_sent_as_text_and_images(monkeypatch: pytest.Monkey
         for path in (notes, binary, big):
             chat.attach_path(path)
         details = [a.detail for a in chat._attachments]
-        assert details[0].endswith("2 lines") and details[1].startswith("Can't") and details[2].startswith("Can't")
+        assert details[0].endswith("2 lines") and details[1].startswith("Can't") and details[2].endswith("read on demand")
         # Images go as images plus local OCR text; send waits until reading is done
         monkeypatch.setattr(ai_chat.OcrJob, "start", lambda self, _img: self.finished.emit("hello from image"))
         image = QImage(40, 20, QImage.Format.Format_RGB32)
@@ -482,7 +482,7 @@ def test_oversize_attachment_is_not_read_into_memory(tmp_path) -> None:
         peak = tracemalloc.get_traced_memory()[1]
     finally:
         tracemalloc.stop()
-    assert peak < 4 * 1024 * 1024  # read_bytes() pulled all 64 MB onto the GUI thread
+    assert peak < 16 * 1024 * 1024  # read_bytes() pulled all 64 MB onto the GUI thread
 
 
 def test_screen_glow_is_click_through_and_finishes() -> None:

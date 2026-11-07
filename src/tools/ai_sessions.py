@@ -119,6 +119,9 @@ def _trim(root: Path) -> None:
         files = sorted(root.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
         for old in files[MAX_SESSIONS:]:
             old.unlink(missing_ok=True)
+        for arch in root.glob("*.archive.txt"):  # an archive lives only as long as its session
+            if not (root / f"{arch.name.split('.')[0]}.json").exists():
+                arch.unlink(missing_ok=True)
         for leftover in root.glob("*.tmp"):  # a crash between write and replace
             if time.time() - leftover.stat().st_mtime > 3600:
                 leftover.unlink(missing_ok=True)
@@ -170,11 +173,44 @@ def load_session(sid: str, root: Path | None = None) -> Session | None:
     return _parse((root or sessions_dir()) / f"{sid}.json") if _ID.match(sid) else None
 
 
+MAX_ARCHIVE_BYTES = 8 * 1024 * 1024  # shortcut: stops appending past this, no rotation; upgrade if chats run longer
+
+
+def archive_path(sid: str, root: Path | None = None) -> Path:
+    return (root or sessions_dir()) / f"{sid}.archive.txt"
+
+
+def archive_turns(sid: str, turns: list[dict[str, Any]], root: Path | None = None) -> Path | None:
+    """Append turns about to be summarized, as plain text the chat's search_text and read_file can search.
+
+    Compaction replaces them in the session file, so this is the only full copy. Summaries of earlier
+    summaries are skipped. Returns the file, or None when nothing was written."""
+    if not _ID.match(sid):
+        return None
+    parts = []
+    for t in turns:
+        if str(t["content"]).startswith("[Earlier conversation"):
+            continue
+        parts.append(f"## {t['role']}\n{_clean(t['content'])}\n")
+        parts.extend(f"[tool {_clean(n)}] {_clean(o)}\n" for n, o in t.get("tools") or [])
+    path = archive_path(sid, root)
+    try:
+        if not parts or (path.exists() and path.stat().st_size > MAX_ARCHIVE_BYTES):
+            return None
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write("\n".join(parts) + "\n")
+    except OSError:
+        return None
+    return path
+
+
 def delete_session(sid: str, root: Path | None = None) -> None:
-    """Remove one saved session; a bad id or a disk error just leaves it."""
+    """Remove one saved session and its archive; a bad id or a disk error just leaves it."""
     if _ID.match(sid):
         try:
             ((root or sessions_dir()) / f"{sid}.json").unlink(missing_ok=True)
+            archive_path(sid, root).unlink(missing_ok=True)
         except OSError:
             pass
 
@@ -183,7 +219,7 @@ def delete_sessions(root: Path | None = None) -> None:
     """Remove every saved session."""
     root = root or sessions_dir()
     try:
-        for path in [*root.glob("*.json"), *root.glob("*.tmp")]:
+        for path in [*root.glob("*.json"), *root.glob("*.archive.txt"), *root.glob("*.tmp")]:
             path.unlink(missing_ok=True)
     except OSError:
         pass

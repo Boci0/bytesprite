@@ -78,7 +78,7 @@ first time it opens on Setup: pick a provider (DeepSeek, OpenAI, OpenRouter, Goo
 OpenAI-compatible URL), a model and your API key. The key lives in Windows Credential Manager, never
 in the settings file. Nothing is sent until you press Enter, and nothing runs in the background.
 
-Attach with `+`, drag-and-drop or paste: text files up to 512 KB go as text, images are read with
+Attach with `+`, drag-and-drop or paste: text files up to 4 MB go as text, images are read with
 local OCR and only that text is sent, never the pixels.
 
 While answering, the model can search the web (through DeepSeek's own search when you have a DeepSeek key,

@@ -30,7 +30,7 @@ from src.tools.ai_assist import (BRAVE_KEY_PAGE, BRAVE_URL, COMPACT_AT, COMPACT_
                                  compact_history, history_chars, summary_turns, DEEPSEEK_TOP_UP, deepseek_balance, is_deepseek,
                                  THINKING_LEVELS, AiAssistPlugin, fit_thinking, thinking_levels, AiJob, AiReply, ModelInfo, ToolHost, ask, chat_messages, delete_key, list_models, load_key, save_key, valid_key,
                                  valid_model, validate_base_url)
-from src.tools.ai_sessions import delete_session, delete_sessions, list_sessions, load_session, new_id, save_session
+from src.tools.ai_sessions import archive_turns, delete_session, delete_sessions, list_sessions, load_session, new_id, save_session
 from src.tools.web_drop import strip_metadata
 from src.tools.errands import ERRAND_MARK, Errand, describe as describe_errand
 from src.ui.ai_tool_host import APPROVE_TIMEOUT_S, ERRAND_APPROVE_S
@@ -41,7 +41,9 @@ from src.ui.theme import (ACCENT_HEX, BUBBLE_RGBA, DANGER_HEX, FONT_FAMILY, GLAS
                           HAIRLINE_RGBA, HOVER_RGBA, OUTLINE_RGBA, SHADOW, TEXT_DIM_HEX, TEXT_HEX, paint_panel, qcolor,
                           rgba_css, ui_font)
 
-MAX_FILE_BYTES = 512 * 1024
+MAX_FILE_BYTES = 4 * 1024 * 1024  # most that is read for a text chip; a bigger file is attached by path
+INLINE_FILE_CHARS = 100_000  # a text file longer than this goes by path too (a message holds MAX_INPUT_CHARS)
+REF_HEAD_CHARS = 3000
 MAX_ATTACHMENTS = 4
 MAX_IMAGE_SIDE = 1568  # longest side sent to vision models: bigger only costs tokens
 _IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp")
@@ -154,8 +156,12 @@ class Attachment:
     pending: bool = False
     thumb: QPixmap | None = None
     image_url: str = ""  # PNG data URL, sent as an image part
+    path: str = ""  # set when the file is too big to paste: only its start goes in, the model reads the rest
 
     def as_prompt(self) -> str:
+        if self.path:
+            return (f"[File: {self.name}, {self.detail}; too big to paste. Read it on demand with read_file "
+                    f"(start_line) and search_text, path {self.path}. Its start:]\n{self.text[:REF_HEAD_CHARS]}")
         label = "Image (attached; its text read by OCR)" if self.kind == "image" else "File"
         return f"[{label}: {self.name}]\n{self.text}"
 
@@ -1045,11 +1051,21 @@ class AiChat(QWidget):
                 return
         item = Attachment("file", path.name)
         try:
-            item.text = read_text_file(path)
-            lines = item.text.count("\n") + 1
-            item.detail = f"{_size_text(path.stat().st_size)}, {lines} lines"
-        except ValueError as exc:
-            item.detail = "Can't attach: over 512 KB" if str(exc) == "too large" else "Can't read: not a text file"
+            try:
+                item.text = read_text_file(path)
+            except ValueError as exc:
+                if str(exc) != "too large":
+                    raise
+                item.path = str(path)  # no text read: the model opens it itself
+                item.detail = f"{_size_text(path.stat().st_size)}, read on demand"
+            else:
+                lines = item.text.count("\n") + 1
+                item.detail = f"{_size_text(path.stat().st_size)}, {lines} lines"
+                if len(item.text) > INLINE_FILE_CHARS:
+                    item.path = str(path)
+                    item.detail += ", read on demand"
+        except ValueError:
+            item.detail = "Can't read: not a text file"
         except OSError:
             item.detail = "Can't read this file"
         self._add_attachment(item)
@@ -1191,7 +1207,7 @@ class AiChat(QWidget):
         if not text and self._actions and self._job is None:
             self._run_action(0)  # Enter on an empty draft: the best-fit action
             return
-        usable = [a for a in self._attachments if a.text or a.image_url]
+        usable = [a for a in self._attachments if a.text or a.image_url or a.path]
         if (not text and not usable) or self._job is not None:
             return
         if any(a.pending for a in self._attachments):
@@ -1316,7 +1332,8 @@ class AiChat(QWidget):
         for text in said:  # steering the model read: part of the chat, in the order it was said
             self._history.append({"role": "user", "content": f"(sent while you worked) {text}"})
         if reply.compacted:
-            self._history[:reply.compacted] = summary_turns(reply.summary)
+            saved = archive_turns(self.ensure_sid(), self._history[:reply.compacted])  # before they are replaced
+            self._history[:reply.compacted] = summary_turns(reply.summary, str(saved or ""), self._tasks)
             self._add_row("note", f"Compacted {reply.compacted} earlier messages into a summary to keep the chat "
                                   "within its context budget.")
         self._accept_reply(reply)

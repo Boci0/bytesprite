@@ -62,7 +62,7 @@ PRESETS: dict[str, tuple[str, str, str]] = {
     "gemini": ("Google Gemini", "https://generativelanguage.googleapis.com/v1beta/openai", ""),
     "anthropic": ("Claude (Anthropic)", "https://api.anthropic.com/v1", "claude-sonnet-5-5"),
 }
-MAX_INPUT_CHARS = 48000  # per message, attachments included
+MAX_INPUT_CHARS = 240000  # per message, attachments included
 MAX_HISTORY_CHARS = 600000  # what is sent; past COMPACT_AT the chat summarizes older turns instead of dropping them
 RECENT_TOOL_CHARS = 32000  # tool output kept for the newest answer that ran tools, so follow-ups need no rerun
 OLD_TOOL_CHARS = 1000  # ... and per tool for older answers
@@ -383,7 +383,14 @@ def history_chars(history: list[dict[str, Any]]) -> int:
     return total
 
 
-def summary_turns(summary: str) -> list[dict[str, Any]]:
+def summary_turns(summary: str, archive: str = "", tasks: list[tuple[str, str]] | None = None) -> list[dict[str, Any]]:
+    """The summary pair. `archive` is the file with the full summarized turns; `tasks` are copied in word for word,
+    since a summary may reword them."""
+    if tasks:
+        summary += "\n\nTask list, verbatim:\n" + "\n".join(f"- [{status}] {label}" for label, status in tasks)
+    if archive:
+        summary += (f"\n\nThe full text of the summarized turns is saved in {archive}. If a detail is missing from "
+                    "this summary, search_text it there, then read_file the lines around the match.")
     return [{"role": "user", "content": f"{COMPACT_MARK}\n{summary}"},
             {"role": "assistant", "content": "Noted. Continuing from that summary."}]
 
@@ -1653,7 +1660,7 @@ class AiAssistPlugin:
                 self._setting_up = True
                 threading.Thread(target=self._run_starter_pack, daemon=True).start()
             return (True, "SETTING UP", "#FFCD75")
-        if callback_id == "ai:rules":  # the user's own rules: no tool writes this file
+        if callback_id == "ai:rules":  # the user's own rules: the chat edits it only through edit_file, with approval
             path = rules_path()
             try:
                 if not path.exists():
