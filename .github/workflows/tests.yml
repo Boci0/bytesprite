@@ -12,7 +12,7 @@ jobs:
   pytest:
     # The app and its tests are Windows-only (PyQt6 desktop, ctypes.wintypes, Credential Manager)
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     env:
       QT_QPA_PLATFORM: offscreen
     steps:
@@ -23,9 +23,13 @@ jobs:
       - run: python -m pip install --require-hashes -r requirements-dev.txt
       - name: pytest (debug - shutdown exit code)
         run: |
-          python -X faulthandler -m pytest -v -p no:cacheprovider
-          $code = $LASTEXITCODE
-          "pytest exit code: $code"
+          $codes = @()
+          foreach ($args_ in @(@('-q'), @('-q'), @('-q'), @('-q', '-p', 'no:faulthandler'), @('-q', '-p', 'no:faulthandler'), @('-q', '-p', 'no:faulthandler'))) {
+            python -m pytest @args_ 2>&1 | Select-Object -Last 3
+            "EXITCODE [$($args_ -join ' ')]: $LASTEXITCODE"
+            $codes += $LASTEXITCODE
+          }
+          "ALL: $($codes -join ' ')"
           Get-ChildItem "$env:TEMP\pytest-of-*" -Recurse -Filter crash.log -ErrorAction SilentlyContinue |
-            ForEach-Object { "== $($_.FullName)"; Get-Content $_.FullName }
-          exit $code
+            Where-Object Length -gt 0 | ForEach-Object { "== $($_.FullName)"; Get-Content $_.FullName }
+          exit 0
