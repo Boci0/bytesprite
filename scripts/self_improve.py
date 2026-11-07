@@ -4,6 +4,8 @@ lessons, keep a rewrite only when the score goes up.
     python scripts/self_improve.py                      baseline plus 3 improve rounds on DeepSeek
     python scripts/self_improve.py --rounds 5 --max-cost 0.50 --model deepseek-chat
     python scripts/self_improve.py --apply              same, then offer to save the best lessons to memory
+    python scripts/self_improve.py --save-baseline      one pass; remember which tasks pass for this model
+    python scripts/self_improve.py --check              one pass; exit 1 if a task that used to pass fails
 
 Each task runs the real `ask` loop and system prompt with file tools only, inside a throwaway folder, and is
 checked by code. The lessons are AI memory notes tagged "[harness]". The run uses a sandboxed memory with only
@@ -542,6 +544,48 @@ def save_to_memory(path: Path, lessons: list[str]) -> None:
     path.write_text("\n".join([*kept, *(f"- {TAG}{n}" for n in lessons)]) + "\n", encoding="utf-8")
 
 
+BASELINE = ROOT / "scripts" / "harness_baseline.json"  # {model: [tasks that passed]}; task names only, safe to commit
+
+
+def regressions(result: Result, saved: list[str]) -> list[str]:
+    """Tasks that passed in the saved baseline and fail now (a task no longer in the run is not a regression)."""
+    return [name for name in saved if result.passed.get(name)]
+
+
+def load_baseline(path: Path = BASELINE) -> dict[str, list[str]]:
+    try:
+        data = json.loads(path.read_text("utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {m: [n for n in names if isinstance(n, str)] for m, names in data.items() if isinstance(names, list)} \
+        if isinstance(data, dict) else {}
+
+
+def save_baseline(model: str, result: Result, path: Path = BASELINE) -> None:
+    data = load_baseline(path)
+    data[model] = sorted(name for name, why in result.passed.items() if not why)
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def check(model: str, lessons: list[str], args: argparse.Namespace, key: str, sandbox: Path) -> int:
+    """One pass with the current notes against the saved baseline: 1 when a task that used to pass fails."""
+    result = run_suite(lessons, ask, args.base_url, key, model, sandbox, repeats=args.repeats)
+    print(f"{result.score}/{len(result.passed)} tasks passed (about ${result.cost:.3f})")
+    saved = load_baseline().get(model)
+    if args.save_baseline:
+        save_baseline(model, result)
+        print(f"baseline for {model} saved to {BASELINE}")
+        return 0
+    if saved is None:
+        print(f"no baseline for {model}; run once with --save-baseline")
+        return 2
+    bad = regressions(result, saved)
+    for name in bad:
+        print(f"REGRESSION {name}: {result.passed[name]}")
+    print("no regressions" if not bad else f"{len(bad)} regression(s)")
+    return 1 if bad else 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--base-url", default="https://api.deepseek.com")
@@ -553,6 +597,8 @@ def main() -> int:
     parser.add_argument("--apply", action="store_true", help="offer to save the best notes to your memory")
     parser.add_argument("--no-recheck", action="store_true", help="skip the final old-vs-new rerun")
     parser.add_argument("--report", default=str(ROOT / "dist" / "harness_report.html"), help="HTML report path")
+    parser.add_argument("--check", action="store_true", help="one pass, no rewriting; exit 1 on a regression vs the baseline")
+    parser.add_argument("--save-baseline", action="store_true", help="one pass, then save which tasks pass as the baseline")
     args = parser.parse_args()
     key = load_key(args.base_url)
     if not key:
@@ -561,6 +607,11 @@ def main() -> int:
     real_memory = memory_path()  # before LOCALAPPDATA points at the sandbox
     current = [n[len(TAG):] for n in read_memory(real_memory) if n.startswith(TAG)]
     sandbox = Path(tempfile.mkdtemp(prefix="paperduck_rsi_"))
+    if args.check or args.save_baseline:
+        try:
+            return check(args.model, current, args, key, sandbox)
+        finally:
+            shutil.rmtree(sandbox, ignore_errors=True)
     history: list[dict[str, Any]] = []
     try:
         lessons, _best = improve(current, args.rounds, args.max_cost, ask, args.base_url, key, args.model, sandbox,

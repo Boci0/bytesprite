@@ -165,3 +165,16 @@ def test_real_task_checks_pass_on_correct_answers(tmp_path: Path) -> None:
     assert by_name["count_todo"].check(tmp_path, "3") == ""
     assert by_name["count_todo"].check(tmp_path, "There are 3 of 4") != ""
     assert by_name["which_file"].check(tmp_path, "models/billing.py") == ""
+
+
+def test_baseline_flags_only_tasks_that_used_to_pass(tmp_path: Path) -> None:
+    base = tmp_path / "baseline.json"
+    assert si.load_baseline(base) == {}
+    now = si.Result(passed={"fix": "", "say": "wrong", "new": "wrong"})
+    si.save_baseline("m1", now, base)
+    assert si.load_baseline(base) == {"m1": ["fix"]}
+    si.save_baseline("m2", si.Result(passed={"fix": "", "say": ""}), base)  # another model keeps its own entry
+    assert si.load_baseline(base)["m2"] == ["fix", "say"] and si.load_baseline(base)["m1"] == ["fix"]
+    assert si.regressions(si.Result(passed={"fix": "not fixed", "say": ""}), ["fix", "say", "gone"]) == ["fix"]
+    base.write_text("not json", encoding="utf-8")
+    assert si.load_baseline(base) == {}
