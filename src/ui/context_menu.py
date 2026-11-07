@@ -43,8 +43,8 @@ QMenu {{
     font-size: 10pt;
 }}
 QMenu::item {{
-    padding: 6px 30px 6px 12px;
-    margin: 1px 0;
+    padding: 5px 30px 5px 12px;
+    margin: 0;
     border-radius: 6px;
     background: transparent;
 }}
@@ -71,6 +71,10 @@ QMenu::right-arrow {{
     margin-right: 10px;
 }}
 """
+
+# Plugin submenus grouped apart from the desk tools: the AI ones get their own block, the timer one joins the timer
+AI_SUBMENUS = frozenset({"Hints", "AI Assist", "Errands"})
+TIMER_SUBMENUS = frozenset({"Pomodoro Length"})
 
 QUICK_TOOL_ITEMS: tuple[tuple[str, str], ...] = (
     (f"Snip Region -> Copy Image	{HOTKEY_LABEL}+S", "snip:image"),
@@ -253,6 +257,8 @@ class PetContextMenu(QMenu):
         self.addMenu(self.recent_menu)
 
         top_level_items = []
+        timer_subs: list[QMenu] = []
+        groups_started: set[str] = set()
         for item in state_machine.get_active_menu_items():
             if item.callback_id in {"sysmon:refresh", "pomodoro:toggle"}:
                 continue
@@ -263,7 +269,14 @@ class PetContextMenu(QMenu):
             if sub is None:
                 # "&&" renders a literal "&" instead of a mnemonic underline
                 sub = style_menu(QMenu(item.submenu.replace("&", "&&"), self))
-                self.addMenu(sub)
+                group = "timer" if item.submenu in TIMER_SUBMENUS else "ai" if item.submenu in AI_SUBMENUS else "tools"
+                if group == "timer":
+                    timer_subs.append(sub)
+                else:
+                    if group not in groups_started:
+                        self.addSeparator()
+                        groups_started.add(group)
+                    self.addMenu(sub)
                 self.plugin_submenus[item.submenu] = sub
             p_act = QAction(item.label, sub)
             p_act.setEnabled(item.enabled)
@@ -295,6 +308,8 @@ class PetContextMenu(QMenu):
             connect(p_act, item.callback_id)
             self.addAction(p_act)
             self.plugin_actions[item.callback_id] = p_act
+        for sub in timer_subs:
+            self.addMenu(sub)
 
         self.addSeparator()
 

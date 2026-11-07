@@ -8,6 +8,7 @@ http(s) links opened on click; commands, approvals and errors stay exact plain t
 
 from __future__ import annotations
 
+import math
 import re
 import subprocess
 import threading
@@ -376,7 +377,24 @@ class _Draft(QPlainTextEdit):
                                         else Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
 
-_THINK_GLYPHS = "◐◓◑◒"  # a turning half-moon; all four glyphs share one width, so the label never jitters
+class _ThinkingDots(QWidget):
+    """Three yolk dots that rise and brighten in a travelling wave while an answer is coming."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.phase = 0.0  # seconds since the answer started; advanced by the chat's timer
+        self.setFixedSize(26, 16)
+
+    def paintEvent(self, _event: object) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        color = QColor(ACCENT_HEX)
+        for i in range(3):
+            wave = max(0.0, math.sin((self.phase * 1.4 - i * 0.18) * 2 * math.pi))  # each dot a beat behind, then a rest
+            color.setAlphaF(0.35 + 0.65 * wave)
+            painter.setBrush(color)
+            painter.drawEllipse(QPointF(4 + i * 9, 10 - 4 * wave), 2.6, 2.6)
 
 
 class ChatText(QTextBrowser):
@@ -552,6 +570,27 @@ class _ClickLabel(QLabel):
             self.clicked.emit()
 
 
+class _HoverRow(QWidget):
+    """A thread row whose Copy link shows only while the pointer is over the row; it keeps its space, so nothing jumps."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.link: QLabel | None = None
+
+    def _show_link(self, shown: bool) -> None:
+        if self.link is not None:
+            self.link.setStyleSheet(f"color: {TEXT_DIM_HEX if shown else 'transparent'}; padding: 0 2px;"
+                                    " text-decoration: underline;")
+
+    def enterEvent(self, event) -> None:  # type: ignore[override]
+        self._show_link(True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # type: ignore[override]
+        self._show_link(False)
+        super().leaveEvent(event)
+
+
 class _TaskList(QWidget):
     """The model's checklist (plan_tasks): one dim header, then a pixel marker and a line per task. A marker is hollow
     for pending, ice-blue for in progress and dim for done (that line is struck through). Clicking the header
@@ -700,9 +739,8 @@ class AiChat(QWidget):
         self._anchor: QRect | None = None  # the pet's sprite, in global coordinates
         self._above: bool | None = None  # which side of the sprite the card sits on, until the next open_near
         self._drag_from: QPoint | None = None  # cursor minus card position while the header is dragged
-        self._dots = 0
         self._dots_timer = QTimer(self)
-        self._dots_timer.setInterval(180)
+        self._dots_timer.setInterval(33)  # ~30 fps for the dots
         self._dots_timer.timeout.connect(self._tick_dots)
         self._thinking_label: ChatText | None = None
         self._steer_q: list[str] = []  # typed while an answer is coming; the worker takes them with its next tool result
@@ -791,9 +829,16 @@ class AiChat(QWidget):
         self._stack.addWidget(self._build_setup())
         panel_layout.addWidget(self._stack)
         # What the worker is doing, pinned under the thread so a long command or an approval card never scrolls it away
-        self._status_line = ChatText("", color=ACCENT_HEX)
-        self._status_line.hide()
-        panel_layout.addWidget(self._status_line)
+        self._status_row = QWidget()
+        status_layout = QHBoxLayout(self._status_row)
+        status_layout.setContentsMargins(2, 0, 0, 0)
+        status_layout.setSpacing(6)
+        self._think_dots = _ThinkingDots()
+        self._status_line = ChatText("", color=TEXT_DIM_HEX, pt=9.5)
+        status_layout.addWidget(self._think_dots, 0, Qt.AlignmentFlag.AlignTop)
+        status_layout.addWidget(self._status_line, 1)
+        self._status_row.hide()
+        panel_layout.addWidget(self._status_row)
         self._task_list = _TaskList()
         self._task_list.hide()
         self._task_list.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1274,7 +1319,8 @@ class AiChat(QWidget):
         """Start an answer to `content`, whose bubble is already in the thread."""
         self._history.append({"role": "user", "content": content, "images": images or []})
         self._thinking_label = self._status_line
-        self._status_line.show()
+        self._think_dots.phase = 0.0
+        self._status_row.show()
         self._progress = ""
         self._dots_timer.start()
         self._tick_dots()
@@ -1663,17 +1709,19 @@ class AiChat(QWidget):
 
     def _hide_status(self) -> None:
         self._thinking_label = None
-        self._status_line.hide()
+        self._status_row.hide()
         self._relayout()
 
     def _tick_dots(self) -> None:
-        self._dots = (self._dots + 1) % len(_THINK_GLYPHS)
-        if self._thinking_label is not None:
-            self._thinking_label.set_text(f"{_THINK_GLYPHS[self._dots]}  {self._progress or 'Thinking'}")
+        self._think_dots.phase += self._dots_timer.interval() / 1000
+        self._think_dots.update()
+        text = self._progress or "Thinking"
+        if self._thinking_label is not None and self._thinking_label.toPlainText() != text:
+            self._thinking_label.set_text(text)
 
     def _add_row(self, role: str, text: str, attachments: list[Attachment] | None = None,
                  markdown: bool = False) -> tuple[QWidget, ChatText]:
-        row = QWidget()
+        row = _HoverRow()
         layout = QVBoxLayout(row)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
@@ -1704,7 +1752,9 @@ class AiChat(QWidget):
         else:
             layout.addWidget(label)
         if role in ("user", "assistant") and text:
-            layout.addWidget(self._copy_link(text), 0, align)
+            row.link = self._copy_link(text)
+            row._show_link(row.underMouse())
+            layout.addWidget(row.link, 0, align)
         self._append(row)
         return row, label
 

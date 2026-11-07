@@ -351,6 +351,9 @@ def _head(painter: QPainter, pose: Pose, edge: QPen) -> None:
         else:
             _poly(painter, ((95, 29), (121, 36), (97, 37.5)), PAPER["beak"], edge)
         painter.restore()
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QColor(232, 102, 74, 95))  # cheek blush, the beak's red thinned out
+    painter.drawEllipse(QPointF(90.5, 39.5), 3.6, 2.3)
     _eye(painter, pose.eye)
     painter.restore()
 
@@ -455,8 +458,9 @@ def paint_pose(painter: QPainter, pose: Pose, *, mirrored: bool = False, shadow:
     painter.translate(82, 68)
     painter.rotate(pose.wing)
     painter.translate(-82, -68)
-    _poly(painter, ((40, 66), (82, 66), (66, 86)), PAPER["wing"], edge)
-    _poly(painter, ((40, 66), (82, 66), (60, 73)), PAPER["wing_fold"], edge)
+    # Swept back to a point at the tail; a lit sliver along the top edge is the crease
+    _poly(painter, ((30, 70), (84, 64), (78, 80), (58, 88)), PAPER["wing"], edge)
+    _poly(painter, ((30, 70), (84, 64), (60, 72)), PAPER["wing_fold"], edge)
     painter.restore()
     _head(painter, pose, edge)
     painter.restore()
