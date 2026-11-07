@@ -157,10 +157,12 @@ class Agents:
             kind, report = "failed", f"(failed: {exc})"
         except Exception as exc:  # a bug must not leave wait_agents hanging on this agent
             kind, report = "failed", f"(failed: {type(exc).__name__})"
-        self._notify(agent.n, kind, report)
-        cut = " [cut]" if len(report) > MAX_REPORT_CHARS else ""
-        self._post(f"task: {agent.task[:200]}\nreport: {report[:MAX_REPORT_CHARS]}{cut}", f"agent {agent.n}")
-        agent.done.set()  # after the post, so a waiter's next tool round already holds the report
+        try:
+            self._notify(agent.n, kind, report)
+            cut = " [cut]" if len(report) > MAX_REPORT_CHARS else ""
+            self._post(f"task: {agent.task[:200]}\nreport: {report[:MAX_REPORT_CHARS]}{cut}", f"agent {agent.n}")
+        finally:
+            agent.done.set()  # after the post, so a waiter's next tool round already holds the report; even if it raised
 
     def wait(self, timeout_s: Any, cancel: threading.Event) -> str:
         try:

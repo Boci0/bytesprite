@@ -43,10 +43,11 @@ class AgentSheet(QWidget):
         self.title.setTextFormat(Qt.TextFormat.RichText)
         self.title.setStyleSheet(f"color: {TEXT_HEX}; font-family: '{FONT_FAMILY}'; font-size: 9.5pt;")
         top.addWidget(self.title, 1)
-        self.close_btn = QLabel(f"<a href='x' style='text-decoration:none; color:{TEXT_DIM_HEX}'>Close</a>")
-        self.close_btn.setToolTip("Hide this sheet; a running agent keeps working")
+        self.close_btn = QLabel("Close")  # hides only the view: a running agent keeps working
         self.close_btn.setStyleSheet(f"color: {TEXT_DIM_HEX}; font-family: '{FONT_FAMILY}'; font-size: 8.5pt;")
-        self.close_btn.linkActivated.connect(lambda _l: self._stack.close_sheet(self))
+        # the sheet takes every press (click to deal, drag the deck), so Close is hit-tested in mouseReleaseEvent:
+        # live, the label's own link click never fired
+        self.close_btn.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         top.addWidget(self.close_btn)
         box.addLayout(top)
         self.task = QLabel(task[:400])
@@ -110,7 +111,11 @@ class AgentSheet(QWidget):
             return
         self.releaseMouse()
         self._press = None
-        if not self._moved:
+        if self._moved:
+            return
+        if event is not None and self.close_btn.geometry().contains(event.position().toPoint()):
+            self._stack.close_sheet(self)
+        else:
             self._stack.clicked(self)
 
 
@@ -154,8 +159,9 @@ class AgentSheets:
     def _offset(k: int) -> QPoint:
         return QPoint(STEP_X * k, -PEEK * k)
 
-    def place(self) -> None:
-        """Snaps every sheet into its slot, sized like the front one, then stacks them back to front."""
+    def place(self, restack: bool = True) -> None:
+        """Snaps every sheet into its slot, sized like the front one, then (if `restack`) stacks them back to front.
+        A drag passes restack=False: raising each window on every move flashes the back sheets over the front."""
         if self.base is None:
             self.base = self.card.pos() - self._offset(self.order.index(self.card))
         card = self.card.size()
@@ -172,15 +178,16 @@ class AgentSheets:
                     widget.setGeometry(QRect(pos, size))
         finally:
             self._placing = False
-        for widget in reversed(self.order):
-            widget.raise_()
+        if restack:
+            for widget in reversed(self.order):
+                widget.raise_()
 
     def card_moved(self) -> None:
         """The card moved itself (dragged, or placed by the pet): the deck follows it from the card's slot."""
         if self._placing or not self.sheets:
             return
         self.base = self.card.pos() - self._offset(self.order.index(self.card))
-        self.place()
+        self.place(restack=False)
 
     def deal(self, widget: QWidget) -> None:
         """Brings `widget` to the front; the others keep their order behind it."""
@@ -195,7 +202,7 @@ class AgentSheets:
         """Dragging the front sheet moves the deck."""
         if self.base is not None:
             self.base += delta
-            self.place()
+            self.place(restack=False)
 
     def close_sheet(self, sheet: AgentSheet) -> None:
         """Only the view: a running agent keeps working and still reports to the chat."""

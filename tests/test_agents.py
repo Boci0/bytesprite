@@ -2,6 +2,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 from src.tools.agents import MAX_RUNNING, Agents, ReadOnlyHost
 
 
@@ -69,6 +71,22 @@ def test_an_agent_crash_still_reports() -> None:
     agents.spawn("t", "low", None, threading.Event())
     agents.wait(5, threading.Event())
     assert posts == [("agent 1", "task: t\nreport: (failed: KeyError)")]
+
+
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")  # the raise is the point
+def test_a_failing_notify_still_ends_the_agent() -> None:
+    def notify(_n, kind, _text):
+        if kind == "done":
+            raise RuntimeError("card closed")
+
+    agents = Agents(lambda *_a: "ok", lambda *_a: None, notify)
+    agents.spawn("t", "low", None, threading.Event())
+    t = time.monotonic()
+    agents.wait(5, threading.Event())
+    assert not agents.running() and time.monotonic() - t < 3
+    for thread in threading.enumerate():  # let its raise land inside this test, where the warning is filtered
+        if "_work" in thread.name:
+            thread.join(2)
 
 
 def test_an_agent_gets_a_tool_budget_and_reports_progress(tmp_path: Path) -> None:
@@ -189,6 +207,10 @@ def test_agent_sheets_deal_like_a_deck_and_move_together() -> None:
         assert two.pos() == slot(1)
         stack.close_sheet(one)  # the rest close up
         assert stack.order == [card, two, three] and three.pos() == slot(2)
+        from PyQt6.QtTest import QTest  # a click on a back sheet's Close closes it rather than dealing it
+        QTest.mouseClick(three, Qt.MouseButton.LeftButton, pos=three.close_btn.geometry().center())
+        app.processEvents()
+        assert stack.order == [card, two] and stack.sheets == [two]
     finally:
         stack.close_all()
         card.close()

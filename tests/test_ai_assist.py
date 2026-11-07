@@ -1162,7 +1162,7 @@ def test_a_sub_agent_report_reaches_the_answer_that_waits_for_it(monkeypatch: py
         chat.insert_text("where is the parser?")
         chat.send()
         _wait(app, lambda: chat._job is None)
-        assert took[0].startswith("all 1 sub-agents finished")
+        assert took[0].startswith(("all 1 sub-agents finished", "no sub-agents are running"))  # it may finish first
         assert took[1].source == "agent 1" and "src/parse.py:12" in took[1]
         assert "background branch 'agent 1'" in chat._history[1]["content"]
     finally:

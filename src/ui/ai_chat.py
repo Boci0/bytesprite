@@ -18,7 +18,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import (QBuffer, QByteArray, QEvent, QIODevice, QMimeData, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer,
                           QUrl, pyqtSignal)
-from PyQt6.QtGui import (QColor, QDesktopServices, QDragEnterEvent, QDropEvent, QFont, QGuiApplication, QImage,
+from PyQt6.QtGui import (QColor, QCursor, QDesktopServices, QDragEnterEvent, QDropEvent, QFont, QGuiApplication, QImage,
                          QKeyEvent, QMouseEvent, QPainter, QPainterPath, QPalette, QPen, QPixmap, QTextBlockFormat, QTextCharFormat,
                          QTextCursor, QTextDocument, QTextFormat, QTextOption)
 from PyQt6.QtWidgets import (QAbstractButton, QComboBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
@@ -376,7 +376,7 @@ class _Draft(QPlainTextEdit):
                                         else Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
 
-_THINK_GLYPHS = "Â·âœ¢âœ³âœ¶âœ»âœ½âœ»âœ¶âœ³âœ¢"  # a twinkle, like Claude Code's spinner
+_THINK_GLYPHS = "◐◓◑◒"  # a turning half-moon; all four glyphs share one width, so the label never jitters
 
 
 class ChatText(QTextBrowser):
@@ -702,7 +702,7 @@ class AiChat(QWidget):
         self._drag_from: QPoint | None = None  # cursor minus card position while the header is dragged
         self._dots = 0
         self._dots_timer = QTimer(self)
-        self._dots_timer.setInterval(120)
+        self._dots_timer.setInterval(180)
         self._dots_timer.timeout.connect(self._tick_dots)
         self._thinking_label: ChatText | None = None
         self._steer_q: list[str] = []  # typed while an answer is coming; the worker takes them with its next tool result
@@ -755,6 +755,8 @@ class AiChat(QWidget):
         close_btn.clicked.connect(self.hide)
         for button in (self._history_btn, self._new_btn, self._gear, close_btn):
             header.addWidget(button, 0, Qt.AlignmentFlag.AlignTop)
+            if button is not close_btn:  # a press on a button skips the activation deal (changeEvent), so deal here
+                button.clicked.connect(self._to_front)
         layout.addLayout(header)
         self._header_sep = _Separator()  # presses above it drag the card
         layout.addWidget(self._header_sep)
@@ -1185,7 +1187,7 @@ class AiChat(QWidget):
             if item is not None and item.widget() is not None:
                 item.widget().deleteLater()
         for i, (label, _run) in enumerate(self._actions):
-            btn = QPushButton(label + ("  âŽ" if i == 0 else ""))
+            btn = QPushButton(label + ("  ⏎" if i == 0 else ""))
             btn.setStyleSheet(_ALLOW_CSS if i == 0 else _BUTTON_CSS)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.clicked.connect(lambda _c=False, n=i: self._run_action(n))
@@ -2028,7 +2030,7 @@ class AiChat(QWidget):
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
         if self._sheets.sheets:
-            self._sheets.place()
+            self._sheets.place(restack=False)
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
@@ -2041,7 +2043,11 @@ class AiChat(QWidget):
     def changeEvent(self, event) -> None:  # type: ignore[override]
         super().changeEvent(event)
         if (event is not None and event.type() == QEvent.Type.ActivationChange and self.isActiveWindow()
-                and self._sheets.order[0] is not self):  # a click on the card deals it back to the front
+                and not isinstance(self.childAt(self.mapFromGlobal(QCursor.pos())), QAbstractButton)):
+            self._to_front()  # a click on the card deals it back to the front; a button's press must not move it
+
+    def _to_front(self) -> None:
+        if self._sheets.order[0] is not self:
             self._sheets.deal(self)
 
     def mousePressEvent(self, event: QMouseEvent | None) -> None:
