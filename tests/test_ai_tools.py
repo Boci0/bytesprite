@@ -999,3 +999,28 @@ def test_run_command_timeout_is_asked_for_and_clamped(tmp_path: Path) -> None:
     assert [ai_tools.command_timeout(v) for v in (None, "9", True, 1, 300, 5000)] == [120, 120, 120, 10, 300, 900]
     out = ai_tools.run_command(tmp_path, "ping -n 30 127.0.0.1 >nul", None, 1)
     assert out.startswith("stopped after 1 s") and "timeout_s" in out and "start_background" in out
+
+
+def test_powershell_script_runs_from_a_file_with_quotes_intact(tmp_path: Path) -> None:
+    from src.tools import ai_tools
+
+    script = 'Write-Output "café \'$(1+2)\' | & done"\n$x = @{ a = "b" }\nWrite-Output $x.a\n'
+    path, cmd = ai_tools.powershell_file(script)
+    try:
+        out = ai_tools.run_command(tmp_path, cmd)
+    finally:
+        path.unlink(missing_ok=True)
+    assert out == "exit code 0\ncafé '3' | & done\nb", out
+    for bad in ("", "  ", None):
+        with pytest.raises(ValueError):
+            ai_tools.powershell_file(bad)
+
+
+def test_search_and_list_accept_a_file_as_the_path(tmp_path: Path) -> None:
+    from src.tools.ai_tools import run_file_tool
+
+    (tmp_path / "a.txt").write_text("one\nneedle here\n", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("needle too\n", encoding="utf-8")
+    only = run_file_tool(tmp_path, "search_text", {"text": "needle", "path": "a.txt"})
+    assert only == "a.txt:2: needle here"  # just that file, not b.txt
+    assert "is a file" in run_file_tool(tmp_path, "list_files", {"path": "a.txt"})

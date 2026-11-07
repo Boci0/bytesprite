@@ -29,7 +29,7 @@ from src.tools import computer
 from src.tools.ai_tools import (calculate, COMPUTER_TOOLS, MAX_BATCH_STEPS, FILE_TOOLS, PET_ACTIONS, TOOL_SPECS, BackgroundProcs, apply_edits,
                                 computer_action, destructive_reason, is_secret, load_skill, memory_path, parse_boxes, plan_edit,
                                 plan_edits, plan_memory, plan_skill_update, print_to_pdf_paths, resolve,
-                                PDF_WAIT_S, changed_media, file_stamp, media_stamps, wait_for_new_file, run_command, command_timeout, run_file_tool, save_args,
+                                PDF_WAIT_S, changed_media, file_stamp, media_stamps, wait_for_new_file, run_command, command_timeout, powershell_file, run_file_tool, save_args,
                                 skill_text, skills_dir, task_list, write_memory, write_skill)
 from src.tools.errands import describe as describe_errand
 from src.tools.file_forge import scrub_metadata
@@ -204,21 +204,33 @@ class AiToolHost(QObject):
                 return f"error: {exc}"
             self._on_gui(lambda done: done(self._win._ai_chat.set_tasks(tasks) or "ok"))
             return f"task list shown ({sum(1 for _t, s in tasks if s == 'done')} of {len(tasks)} done)"
-        if name == "run_command":
-            command = args.get("command")
+        if name in ("run_command", "run_powershell"):
+            ps = name == "run_powershell"
+            command = args.get("script" if ps else "command")
             if not isinstance(command, str) or not command.strip():
-                return "error: give a command"
+                return "error: give a script" if ps else "error: give a command"
             cwd = self._project() or Path.home()
             where = "the Project Folder" if self._project() else f"your home folder ({cwd})"
             risk = destructive_reason(command)
             seconds = command_timeout(args.get("timeout_s"))
             limit = f" (allowed to run up to {seconds:g} s)" if args.get("timeout_s") is not None else ""
-            if not self._allowed("run_command", f"The model wants to run in {where}{limit}:\n\n{command.strip()}",
+            what = " this PowerShell script" if ps else ""
+            if not self._allowed("run_command", f"The model wants to run{what} in {where}{limit}:\n\n{command.strip()}",
                                  "commands", risk):
                 return "error: the user declined this command"
+            script = None
+            if ps:  # the user saw the script; it runs from a file so no cmd.exe quoting touches it
+                try:
+                    script, command = powershell_file(command)
+                except (ValueError, OSError) as exc:
+                    return f"error: {exc}"
             pdfs = {pdf: file_stamp(pdf) for pdf in print_to_pdf_paths(command, cwd)}
             media = media_stamps(command, cwd)
-            out = run_command(cwd, command, self.cancel, seconds)
+            try:
+                out = run_command(cwd, command, self.cancel, seconds)
+            finally:
+                if script is not None:
+                    script.unlink(missing_ok=True)
             for pdf, before in pdfs.items():  # headless Edge stamps HeadlessChrome, Skia and dates
                 # msedge.exe hands off to a child and returns before the PDF is written: wait for the new file
                 if wait_for_new_file(pdf, before, PDF_WAIT_S, self.cancel):
@@ -475,7 +487,8 @@ class AiToolHost(QObject):
                       "they are from the user's next message, so tell the user to send one.")
 
     def _project(self) -> Path | None:
-        return getattr(self._win._state_machine.registry.get_plugin("project"), "repo", None)
+        repo = getattr(self._win._state_machine.registry.get_plugin("project"), "repo", None)
+        return repo if repo is not None and Path(repo).is_dir() else None  # a deleted folder would fail every command
 
     def _allowed(self, key: str, text: str, what: str, risk: str = "") -> bool:
         """The user's answer in the chat; no answer within APPROVE_TIMEOUT_S counts as declined.

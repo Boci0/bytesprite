@@ -106,6 +106,11 @@ STEER_NOTE = ("\n\n[Paperduck: {n} tool calls in a row failed. Do not repeat the
               "and tell the user what is blocking you and what you need.]")
 REPEAT_NOTE = ("\n\n[Paperduck: the same call gave the same result {n} times recently. It is not getting anywhere: try "
                "something different, or tell the user what is blocking you.]")
+LOOP_CALLS = 8  # the same call this often among the last LOOP_WINDOW calls is a loop, whatever the results said
+LOOP_WINDOW = 40
+LOOP_NOTE = ("\n\n[Paperduck: you have made this exact call {n} times in this answer. Repeating it is not working: "
+             "change the approach (read the screen or file again, use a different tool), or tell the user what blocks "
+             "you.]")
 STUCK_NOTE = ("\n\n[Paperduck: that is {n} in a row, so tools are off for the rest of this answer. Tell the user what "
               "failed and what you need.]")
 # Claude's own server-side tools, run by Anthropic (web search is billed per search, fetch is free)
@@ -150,6 +155,8 @@ SYSTEM_PROMPT = (
     "and tokens run out. Finish with the result first, then what you changed, how you checked it, and what is "
     "left. A '[Paperduck: the user sent this while you worked: ...]' note is the user steering you mid-job: "
     "finish or undo the step you are in, then follow it. "
+    "For anything beyond one simple command on Windows, use run_powershell (the script goes to a file, so no "
+    "cmd.exe quoting touches it), never a long powershell -Command line through run_command. "
     "Driving Office through COM: put the whole job in one script, run it, then at most two refinement passes, "
     "since every run-and-look round is slow. A drop cap is set on the Paragraph, not its Range "
     "($p.DropCap.Enable(); $p.DropCap.Position=1; $p.DropCap.LinesToDrop=3). Never click the Office window "
@@ -888,7 +895,7 @@ def _post_anthropic(base_url: str, key: str, model: str, messages: list[dict[str
     reasoning: list[str] = []
     used: list[tuple[str, str]] = []
     tool_rounds = hits = 0
-    fails: list[Any] = [0, 0, None]
+    fails: list[Any] = [0, 0, None, []]
     read_local = any(read_local_data(m) for m in messages)  # set once a tool has returned the user's own data
     seen_buf: list[Any] = ["", 0]  # see _grow_seen
     start = len(turns)  # this answer's own turns follow
@@ -993,7 +1000,7 @@ def _post(base_url: str, key: str, model: str, messages: list[dict[str, Any]], t
     used: list[tuple[str, str]] = []
     shot_at: list[int] = []  # indexes in `messages` of the screenshot messages still sent
     cached, cost, estimate = 0, 0.0, 0.0
-    fails: list[Any] = [0, 0, None]
+    fails: list[Any] = [0, 0, None, []]
     for round_ in range(MAX_TOOL_ROUNDS + 1):
         _check(cancel)
         shots: list[str] = []
@@ -1133,13 +1140,19 @@ def _steer(name: str, call: str, result: str, state: list[Any], tokens: int = 0)
     state[0] = state[0] + 1 if bad else 0
     window = [*(state[2] if isinstance(state[2], list) else []), (call, result)][-REPEAT_WINDOW:]
     state[1], state[2] = window.count(window[-1]), window  # A,B,A,B repeats count, not only A,A
+    looped = 0
+    if len(state) > 3:  # the calls alone, so a click that "works" 24 times in a row is still caught
+        state[3] = [*state[3], call][-LOOP_WINDOW:]
+        looped = state[3].count(call)
     if tokens >= MAX_ANSWER_TOKENS:
         return OVER_NOTE
     if _stuck(state):
         return STUCK_NOTE.format(n=max(state[0], state[1]))
     if state[0] >= STEER_AFTER:
         return STEER_NOTE.format(n=state[0])
-    return REPEAT_NOTE.format(n=state[1]) if state[1] >= STEER_AFTER else ""
+    if state[1] >= STEER_AFTER:
+        return REPEAT_NOTE.format(n=state[1])
+    return LOOP_NOTE.format(n=looped) if looped >= LOOP_CALLS else ""
 
 
 def _take_shot(host: ToolHost | None) -> str:

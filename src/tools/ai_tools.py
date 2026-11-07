@@ -35,6 +35,7 @@ import tempfile
 import itertools
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -81,7 +82,7 @@ PET_ACTIONS: dict[str, str] = {
 }
 # Tools whose output is the user's own data; after one runs, fetch_page may only open links already in the chat
 LOCAL_DATA_TOOLS = {"list_files", "read_file", "find_files", "search_text", "read_clipboard", "read_screen", "screen_map", "pet_status",
-                    "run_command", "read_background"}
+                    "run_command", "run_powershell", "read_background"}
 
 
 def _fn(name: str, description: str, props: dict[str, Any] | None = None, required: tuple[str, ...] = ()) -> dict:
@@ -184,6 +185,14 @@ TOOL_SPECS: list[dict[str, Any]] = [
         {"command": {"type": "string"},
          "timeout_s": {"type": "integer", "description": f"Seconds to allow, default {COMMAND_TIMEOUT_S}, most "
                        f"{MAX_COMMAND_TIMEOUT_S}. Shown to the user with the command."}}, ("command",)),
+    _fn("run_powershell", f"Run a PowerShell script (Windows PowerShell 5.1) in the Project Folder or the user's home "
+        f"folder and get its exit code and output. Prefer this over run_command whenever the work is more than one "
+        f"simple command: the script is saved to a file and run with -File, so quotes, $variables, pipes and "
+        f"multi-line code arrive exactly as written (nothing goes through cmd.exe quoting). The user sees the script and "
+        f"allows it first. Same {COMMAND_TIMEOUT_S} s limit and timeout_s as run_command.",
+        {"script": {"type": "string"},
+         "timeout_s": {"type": "integer", "description": f"Seconds to allow, default {COMMAND_TIMEOUT_S}, most "
+                       f"{MAX_COMMAND_TIMEOUT_S}."}}, ("script",)),
     _fn("start_background", f"Start a long-running cmd.exe command (dev server, watcher, long test run) in the Project "
         f"Folder and return at once with its id. At most {MAX_BACKGROUND} run at a time. The user allows each "
         f"command first and can stop it in the chat. Read its output with read_background.",
@@ -230,7 +239,7 @@ TOOL_SPECS: list[dict[str, Any]] = [
 ]
 # the user allows each call in the chat (or all of them for a chat)
 COMPUTER_TOOLS = {"mouse_click", "type_text", "press_key", "scroll"}  # computer_batch runs these as its steps
-APPROVED_TOOLS = COMPUTER_TOOLS | {"computer_batch", "edit_file", "edit_files", "run_command", "start_background", "add_mcp_server", "add_skill", "update_skill", "remember", "forget", "set_errand"}
+APPROVED_TOOLS = COMPUTER_TOOLS | {"computer_batch", "edit_file", "edit_files", "run_command", "run_powershell", "start_background", "add_mcp_server", "add_skill", "update_skill", "remember", "forget", "set_errand"}
 FILE_TOOLS = {"list_files", "read_file", "find_files", "search_text"}
 
 
@@ -349,6 +358,8 @@ def run_file_tool(root: Path | None, name: str, args: dict[str, Any], secrets: b
         base = resolve(root, "")
         if name == "list_files":
             folder = resolve(root, args.get("path"))
+            if folder.is_file():
+                return f"{folder.name} is a file ({folder.stat().st_size} bytes), not a folder; use read_file on it"
             if not folder.is_dir():
                 return "error: not a folder"
             entries = sorted(folder.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
@@ -386,7 +397,7 @@ def run_file_tool(root: Path | None, name: str, args: dict[str, Any], secrets: b
         pattern = args.get("pattern") if isinstance(args.get("pattern"), str) and args["pattern"].strip() else "*"
         if name in ("find_files", "search_text"):
             base = resolve(root, args.get("path"))
-            if not base.is_dir():
+            if not base.is_dir() and not (name == "search_text" and base.is_file()):
                 return "error: not a folder"
         if name == "find_files":
             cut: list[bool] = []
@@ -415,8 +426,11 @@ def run_file_tool(root: Path | None, name: str, args: dict[str, Any], secrets: b
             context = context if isinstance(context, int) and not isinstance(context, bool) and 0 < context <= MAX_CONTEXT else 0
             hits: list[str] = []
             cut, secret, skipped = [], 0, 0
-            for path in _walk(base, cut):
-                if not fnmatch.fnmatch(path.name.lower(), pattern.strip().lower()):
+            single = base if base.is_file() else None  # a file given as the path: search just that file
+            if single is not None:
+                base = single.parent
+            for path in [single] if single is not None else _walk(base, cut):
+                if single is None and not fnmatch.fnmatch(path.name.lower(), pattern.strip().lower()):
                     continue
                 if _SECRET.search(path.name):
                     secret += 1
@@ -680,6 +694,18 @@ def destructive_reason(command: str) -> str:
     """Why a command could destroy data (empty when it looks harmless); the chat then asks every time."""
     found = _DESTRUCTIVE.search(command)
     return found.group(0).strip() if found else ""
+
+
+def powershell_file(script: Any) -> tuple[Path, str]:
+    """(the saved script, the cmd line that runs it), or ValueError. The file has a BOM, which Windows PowerShell 5.1
+    needs to read non-ASCII text; the caller deletes it after the run."""
+    if not isinstance(script, str) or not script.strip():
+        raise ValueError("give a script")
+    if len(script) > MAX_SAVE_CHARS:
+        raise ValueError(f"script is longer than {MAX_SAVE_CHARS} characters")
+    path = scratch_dir() / f"ps_{uuid.uuid4().hex[:10]}.ps1"
+    path.write_text("\r\n".join(script.splitlines()) + "\r\n", encoding="utf-8-sig", newline="")
+    return path, f'powershell -NoProfile -ExecutionPolicy Bypass -File "{path}"'
 
 
 def command_timeout(value: Any) -> float:

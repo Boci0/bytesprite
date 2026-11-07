@@ -205,3 +205,20 @@ def test_mcp_server_names_never_hold_the_separator(tmp_path: Path) -> None:
     path = tmp_path / "mcp.json"
     path.write_text(json.dumps({"mcpServers": {"my__srv": {"command": "x"}}}), encoding="utf-8")
     assert list(mcp_client.load_config(path)) == ["my_srv"]
+
+
+def test_press_key_knows_zoom_keys() -> None:
+    from src.tools.computer import parse_keys
+
+    assert parse_keys("ctrl+plus") == parse_keys("ctrl+=") == parse_keys("ctrl++") == [0x11, 0xBB]
+    assert parse_keys("ctrl+minus") == parse_keys("ctrl+-") == [0x11, 0xBD]
+
+
+def test_the_same_call_over_and_over_is_flagged_even_when_it_succeeds() -> None:
+    from src.tools import ai_assist
+
+    state = [0, 0, None, []]
+    notes = [ai_assist._steer("mouse_click", "mouse_click(150,328)", f"clicked, screen {i}", state) for i in range(9)]
+    assert all(n == "" for n in notes[:7]) and "8 times" in notes[7] and "9 times" in notes[8]
+    other = [0, 0, None, []]
+    assert all(ai_assist._steer("t", f"call{i}", "ok", other) == "" for i in range(30))  # different calls are fine

@@ -17,6 +17,9 @@ _VK = {"enter": 0x0D, "return": 0x0D, "tab": 0x09, "esc": 0x1B, "escape": 0x1B, 
        "delete": 0x2E, "del": 0x2E, "up": 0x26, "down": 0x28, "left": 0x25, "right": 0x27, "home": 0x24, "end": 0x23,
        "pageup": 0x21, "pagedown": 0x22, "ctrl": 0x11, "control": 0x11, "shift": 0x10, "alt": 0x12, "win": 0x5B}
 _VK.update({f"f{n}": 0x6F + n for n in range(1, 13)})
+# OEM punctuation keys (zoom is ctrl+plus / ctrl+minus); the models also write them as the symbol itself
+_VK.update({"plus": 0xBB, "=": 0xBB, "equals": 0xBB, "minus": 0xBD, "-": 0xBD, "comma": 0xBC, ",": 0xBC,
+            "period": 0xBE, ".": 0xBE})
 _EXTENDED = {0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x2E, 0x5B}
 _MODIFIERS = {0x10, 0x11, 0x12, 0x5B}
 
@@ -30,7 +33,9 @@ def parse_keys(keys: object) -> list[int]:
     if not isinstance(keys, str) or not keys.strip():
         raise ValueError("give keys like enter, ctrl+s or alt+tab")
     codes: list[int] = []
-    for part in keys.lower().replace(" ", "").split("+"):
+    combo = keys.lower().replace(" ", "")
+    combo = combo[:-2] + "+plus" if combo.endswith("++") else combo  # "ctrl++" means ctrl and the plus key
+    for part in combo.split("+"):
         if part in _VK:
             codes.append(_VK[part])
         elif len(part) == 1 and part.isascii() and part.isalnum():
