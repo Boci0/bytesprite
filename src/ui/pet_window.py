@@ -2116,6 +2116,10 @@ class PetWindow(QWidget):
         if event is not None:
             super().leaveEvent(event)
 
+    def _prewarm_if_holding(self) -> None:
+        if self._hold_timer.isActive():
+            prewarm_ticks()
+
     def mousePressEvent(self, event: QMouseEvent | None) -> None:
         if event is None:
             return
@@ -2145,7 +2149,7 @@ class PetWindow(QWidget):
             self._hold_timer.start()
             # Resume audio during the hold delay, not as the tool wheel appears. Waits PREWARM_DELAY_MS and skips
             # drags (they stop the hold timer): the blocking ~175ms resume froze the start of every drag.
-            QTimer.singleShot(self.PREWARM_DELAY_MS, lambda: self._hold_timer.isActive() and prewarm_ticks())
+            QTimer.singleShot(self.PREWARM_DELAY_MS, self._prewarm_if_holding)  # bound: dropped if the pet is deleted
             event.accept()
             return
 

@@ -640,3 +640,26 @@ def test_notices_react_by_colour_and_quiet_ones_skip_the_tray(qapp: QApplication
     finally:
         win.shutdown()
         win.close()
+
+
+def test_press_then_delete_leaves_no_pending_call_on_a_dead_pet(qapp: QApplication, monkeypatch) -> None:
+    """The audio prewarm after a press was a lambda on the pet's hold timer: deleting the pet within
+    PREWARM_DELAY_MS made it raise on a deleted QTimer, which PyQt turns into an abort (CI exit at shutdown)."""
+    import sys
+    import time
+
+    errors: list[BaseException] = []
+    monkeypatch.setattr(sys, "excepthook", lambda kind, value, tb: errors.append(value))
+    win = PetWindow(state_machine=PetStateMachine(PetStats()), animation_controller=AnimationController(size=32),
+                    auto_wander=False)
+    local_pt = win.sprite_center_point()
+    win.mousePressEvent(QMouseEvent(QEvent.Type.MouseButtonPress, QPointF(local_pt), QPointF(win.mapToGlobal(local_pt)),
+                                    Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+    win.shutdown()
+    win.deleteLater()
+    qapp.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
+    end = time.monotonic() + (PetWindow.PREWARM_DELAY_MS + 150) / 1000
+    while time.monotonic() < end:
+        qapp.processEvents()
+        time.sleep(0.01)
+    assert errors == []
