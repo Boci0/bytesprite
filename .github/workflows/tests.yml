@@ -24,7 +24,7 @@ jobs:
       - name: pytest (debug - shutdown exit code)
         run: |
           $codes = @()
-          foreach ($args_ in @(@('-q'), @('-q'), @('-q'), @('-q', '-p', 'no:faulthandler'), @('-q', '-p', 'no:faulthandler'), @('-q', '-p', 'no:faulthandler'))) {
+          foreach ($args_ in @(@('-q'), @('-q'), @('-q'), @('-q'), @('-q'), @('-q'))) {
             python -m pytest @args_ 2>&1 | Select-Object -Last 3
             "EXITCODE [$($args_ -join ' ')]: $LASTEXITCODE"
             $codes += $LASTEXITCODE
